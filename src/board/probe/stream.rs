@@ -1,6 +1,6 @@
 use super::super::transmit::Attempt;
 use super::super::{LSR, THRE, UART0};
-use super::{CCR, CR0, Capture, INPUTS, IR, TC, TIMERS, read, send, write};
+use super::{CCR, CR0, Capture, FIO0PIN, INPUTS, IR, TC, TIMERS, read, send, write};
 use tekmar_482_firmware::tn4::tx::Request;
 use tekmar_482_firmware::tn4::{Frame, Receiver, Trailer};
 
@@ -78,11 +78,13 @@ pub struct Receivers {
 
 impl Receivers {
     pub fn start() -> Self {
+        let capture = Capture::arm(true);
+        let high = INPUTS.map(|(pin, _, _)| capture.initial & (1 << pin) != 0);
         Self {
-            rx: core::array::from_fn(|_| Receiver::default()),
-            rising: [true; 5],
+            rx: high.map(Receiver::starting_at),
+            rising: high.map(|level| !level),
             max_delay: [0; 5],
-            capture: Capture::arm(5),
+            capture,
         }
     }
 
@@ -166,6 +168,8 @@ pub fn stream(diagnostic: bool, panel: &mut super::super::panel::Panel, request:
     {
         out.result(r.port, b"STOPPED");
     }
+    let initial = receivers.capture.initial;
+    let final_levels = read(FIO0PIN);
     drop(receivers.capture);
     while out.len != 0 {
         out.pump();
@@ -173,6 +177,7 @@ pub fn stream(diagnostic: bool, panel: &mut super::super::panel::Panel, request:
     if diagnostic {
         for (port, r) in receivers.rx.iter().enumerate() {
             let s = &r.stats;
+            let pin = INPUTS[port].0;
             send(&[b'D', b' ', b'0' + port as u8]);
             for n in [
                 s.edges,
@@ -187,6 +192,7 @@ pub fn stream(diagnostic: bool, panel: &mut super::super::panel::Panel, request:
                 receivers.max_delay[port],
                 u32::from(s.last_received_crc),
                 u32::from(s.last_expected_crc),
+                ((initial >> pin) & 1) | (((final_levels >> pin) & 1) << 1),
             ] {
                 let mut word = *b" 00000000";
                 hex(&mut word[1..], n);

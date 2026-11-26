@@ -125,6 +125,11 @@ class PayloadTests(unittest.TestCase):
             FrameAudit(True).record(summary(3, stats))
         with self.assertRaises(ValueError):
             FrameAudit(True).finish(0)
+        for level, expected in [(0, "steady-idle"), (3, "steady-dominant")]:
+            msg = FrameAudit(True).record(summary(0, empty + [level]))
+            self.assertIn(expected, msg)
+        with self.assertRaisesRegex(ValueError, "input level flags"):
+            FrameAudit(True).record(summary(0, empty + [4]))
 
 
 if __name__ == "__main__":

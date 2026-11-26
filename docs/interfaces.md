@@ -151,11 +151,16 @@ tN4 body with a bad bus trailer is printed as a diagnostic as in live mode.
 `board.py diagnostics PORT --seconds 60` (or `ram_trial.py --frames 60
 --diagnostics`) uses `RX-DIAG`. The wire stream is identical to `RX-STREAM`
 except for the `OK DIAG` greeting and five final `D` rows before `END`.
-Each row has a decimal port followed by twelve eight-digit hex words:
+Each row has a decimal port followed by thirteen eight-digit hex words:
 captured edges, SOFs, stuffing failures, CRC mismatches, ACK with valid end,
 no ACK with valid end, bad trailers, in-progress candidate at stop (0/1),
 UART frame drops, maximum edge service delay in microseconds, and last
-received and calculated mismatching CRCs (zero until a mismatch).
+received and calculated mismatching CRCs (zero until a mismatch), and
+the sampled physical input levels (bit 0 at capture start, bit 1 at stop;
+1 = dominant). Archives with the earlier twelve-word rows still replay.
+At startup the decoder samples the pin to choose its first edge. A port
+that stays high with no captured edges cannot provide the idle interval
+required for transmit; the firmware does not force a send on it.
 
 The host independently checks each body CRC, balances all candidates against
 their outcomes, and reconciles delivered frames and drops for all five ports.

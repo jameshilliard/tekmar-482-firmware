@@ -79,6 +79,13 @@ impl Default for Receiver {
 }
 
 impl Receiver {
+    pub fn starting_at(high: bool) -> Self {
+        Self {
+            level: high,
+            ..Self::default()
+        }
+    }
+
     pub fn partial(&self) -> bool {
         !matches!(self.state, State::Seek(_) | State::Idle)
     }

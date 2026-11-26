@@ -51,7 +51,7 @@ def smoke(image: bytes, ram: bool) -> None:
     clock = 0
 
     led_mask = sum(1 << pin for pin in (22, 21, 18, 23, 25, 16))
-    gpio = {0: 0, 0x10: 0, 0x14: 1 << 14, 0x20: 0, 0x30: 0, 0x34: 0}
+    gpio = {0: 0, 0x10: 0, 0x14: (1 << 14) | (1 << 2), 0x20: 0, 0x30: 0, 0x34: 0}
     def gpio_read(uc, offset, size, data):
         assert size == 4 and offset in gpio
         return gpio[offset]
@@ -99,7 +99,7 @@ def smoke(image: bytes, ram: bool) -> None:
             assert regs[0x0c] == 47 and regs[0x14] == 0 and regs[0x70] == 0
             pins = sum(2 << (2 * pin) for pin in (2, 4, 6, 10, 11))
             assert uc.mem_read(0xE002C000, 4) == struct.pack("<I", pins | 5)
-            if regs[0x28] == (0x16d, 0x2d)[index]:
+            if regs[0x28] == (0x16e, 0x2d)[index]:  # port 4 starts dominant: arm falling
                 if index == 0:
                     sending = outgoing.endswith(b"OK TX\r\n")
                     streaming = sending or outgoing.endswith(b"OK FRAMES\r\n")
@@ -135,6 +135,7 @@ def smoke(image: bytes, ram: bool) -> None:
                         incoming.extend(b"A\nPANEL?\n")
                 if not sending and edges and edges[0][0] <= clock:
                     stamp, bit = edges.popleft()
+                    gpio[0x14] = (gpio[0x14] & ~(1 << 4)) | (int(bit) << 4)
                     assert timers[0][0x28] >> 3 & 7 == (5 if bit == "1" else 6)
                     timers[0][0x30] = stamp
                     timers[0][0] |= 0x20
@@ -199,6 +200,7 @@ def smoke(image: bytes, ram: bool) -> None:
         assert records[0].split() == [b'F', b'0', b'00009c40', b'0e2f', b'N', tx_body.hex().encode()], records
         assert records[1] == b'T 0 NOACK'
         assert len(records) == 10 and all(row.startswith(b'D ') for row in records[2:7])
+        assert records[6].split() == [b'D', b'4'] + [b'00000000'] * 12 + [b'00000003']
         assert records[-3:] == [b'END 00000000', b'OK RX', b'OK ISP']
         assert gpio[0] == tx_latch == 0
         assert all(t[0] == t[4] == t[0x28] == 0 for t in timers)

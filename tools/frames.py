@@ -68,12 +68,14 @@ class FrameAudit:
             _, port, _, _, status, _ = line.split()
             self.seen[int(port)][status] += 1
             return result
-        if not re.fullmatch(rb"D [0-4](?: [0-9a-f]{8}){12}\r\n", line):
+        if not re.fullmatch(rb"D [0-4](?: [0-9a-f]{8}){12,13}\r\n", line):
             raise ValueError("malformed receiver diagnostic")
         _, p, *words = line.split()
         port = int(p)
-        edges, starts, stuff, crc, ack, no_ack, bad, partial, drops, lag, rx, expected = (
+        edges, starts, stuff, crc, ack, no_ack, bad, partial, drops, lag, rx, expected, *levels = (
             int(word, 16) for word in words)
+        if levels and levels[0] > 3:
+            raise ValueError(f"port {port}: invalid input level flags")
         seen = self.seen[port]
         observed_bad = sum(seen[k] for k in (b"D", b"E", b"M"))
         if port in self.drops or partial > 1 or starts != stuff + crc + ack + no_ack + bad + partial:
@@ -85,6 +87,11 @@ class FrameAudit:
         result = (f"port={port} edges={edges} candidates={starts} ack={ack} no_ack={no_ack} "
                   f"bad_trailer={bad} stuffing_errors={stuff} crc_errors={crc} partial={partial} "
                   f"uart_drops={drops} max_capture_service_us={lag}")
+        if levels:
+            start, end = levels[0] & 1, levels[0] >> 1
+            result += f" rx_initial={start} rx_final={end}"
+            if not edges and start == end:
+                result += " line=steady-dominant" if end else " line=steady-idle"
         return result + (f" last_crc={rx:04x} expected={expected:04x}" if crc else "")
 
     def finish(self, dropped):
