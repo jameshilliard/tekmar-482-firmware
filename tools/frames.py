@@ -1,6 +1,9 @@
 """Parse the passive receiver's UART records and independently verify the bus CRC."""
 
+import argparse
 import re
+from collections.abc import Iterable, Iterator
+from pathlib import Path
 
 from payloads import details
 
@@ -34,3 +37,37 @@ def describe(line: bytes) -> str:
             f"id=0x{message:03x} subnet=0x{(header >> 12) & 255:02x} "
             f"node=0x{(header >> 6) & 63:02x} payload={data[4:].hex() or '-'} "
             f"crc=0x{crc:04x} {TRAILERS[status]} {details(message, data[4:])}").rstrip()
+
+
+def dropped_records(line: bytes) -> int | None:
+    match = re.fullmatch(rb"END ([0-9a-f]{8})\r\n", line)
+    return int(match[1], 16) if match else None
+
+
+def replay(lines: Iterable[bytes]) -> Iterator[str]:
+    dropped = None
+    for number, line in enumerate(lines, 1):
+        if dropped is not None:
+            raise ValueError(f"line {number}: unexpected data after END")
+        dropped = dropped_records(line)
+        if dropped is None:
+            try:
+                yield describe(line)
+            except ValueError as exc:
+                raise ValueError(f"line {number}: {exc}") from exc
+    if dropped is None:
+        raise ValueError("incomplete capture: missing END")
+    if dropped:
+        raise ValueError(f"gateway UART queue dropped {dropped} records")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Decode a saved UART frame stream without a gateway.")
+    parser.add_argument("capture", type=Path)
+    args = parser.parse_args()
+    try:
+        with args.capture.open("rb") as src:
+            for record in replay(src):
+                print(record)
+    except (OSError, ValueError) as error:
+        parser.exit(1, f"{args.capture}: {error}\n")

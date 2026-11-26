@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+from frames import replay
 from payloads import DECODERS, decode_payload
 
 
@@ -83,6 +84,18 @@ class PayloadTests(unittest.TestCase):
         for body in ("0040", "0080", "00c0", "ffff"):
             self.assertEqual(decode(0x32f, body)["outdoor_temp"], "unavailable")
         self.assertNotIn("tank_temp_f", decode(0x23f, "000001ff"))
+
+    def test_replay_keeps_diagnostics_and_verifies_record_integrity(self):
+        record = b"F 3 000061a8 5f14 M 7d7123420582\r\n"
+        end = b"END 00000000\r\n"
+        decoded, = replay([record, end])
+        self.assertIn("no-ack/bad-end NetworkError code=5 instance=2 priority=2", decoded)
+        self.assertEqual(list(replay([end])), [])
+        for lines, error in (([record], "missing END"), ([end, record], "after END"),
+                             ([record, b"END 00000002\r\n"], "dropped 2"),
+                             ([record.replace(b"0582", b"0583"), end], "line 1: tN4 CRC")):
+            with self.subTest(error=error), self.assertRaisesRegex(ValueError, error):
+                list(replay(lines))
 
 
 if __name__ == "__main__":

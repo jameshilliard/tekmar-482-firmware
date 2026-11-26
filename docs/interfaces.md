@@ -133,3 +133,14 @@ trailing bytes (including byte 12 of observed 0x22f reports) appear as
 `extension_hex`. A known payload too short for its layout is marked
 `truncated`, not interpreted using missing bytes. Unknown message IDs still
 display their header and raw payload.
+
+Replay a saved stream (the raw `F` lines through the final `END`, including
+their CRLFs) using only the Python standard library:
+
+```sh
+python3 tools/frames.py capture.frames
+```
+
+Replay uses the same decoder as the live monitor. A bad UART record, missing
+terminator or reported queue drop returns a nonzero exit status. A CRC-valid
+tN4 body with a bad bus trailer is printed as a diagnostic as in live mode.

@@ -9,7 +9,7 @@ import asyncio
 import re
 import sys
 
-from frames import describe
+from frames import describe, dropped_records
 from port import connect
 
 
@@ -74,8 +74,7 @@ async def monitor(port, seconds: float) -> None:
         deadline = loop.time() + 4
         while True:
             line = await port.readline(160, timeout=max(0, deadline - loop.time()))
-            if match := re.fullmatch(rb"END ([0-9a-f]{8})\r\n", line):
-                dropped = int(match[1], 16)
+            if (dropped := dropped_records(line)) is not None:
                 if dropped:
                     raise RuntimeError(f"gateway UART queue dropped {dropped} records")
                 break
