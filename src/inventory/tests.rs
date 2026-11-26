@@ -2,6 +2,46 @@ use super::*;
 use crate::uptime::Sample;
 mod read_scheduler;
 
+#[test]
+fn network_error_preserves_events_and_reads_latest_even_before_the_queue_drains() {
+    let mut inv = Inventory::new();
+    observe(&mut inv, 2, 9, 0, 0x3d7, &[0xc6, 0xa5], 0);
+    assert!(!inv.has_reports());
+    inv.set_reporting(true);
+    assert!(!inv.has_reports()); // No synthetic alarm on enable.
+    for (port, body) in [(1, [0x8f, 0xe1]), (4, [0x8f, 0xe1]), (1, [0, 0x80])] {
+        observe(&mut inv, port, 9, 0, 0x3d7, &body, 0);
+    }
+    observe(&mut inv, 1, 9, 0, 0x3d7, &[0x95], 0);
+    assert_eq!(
+        call(&mut inv, 0x107, 1, &[], 0).unwrap().payload(),
+        &[4, 7, 1, 0, 0, 0, 0x80]
+    );
+    for word in [[0x8f, 0xe1], [0x8f, 0xe1], [0, 0x80]] {
+        assert_eq!(
+            inv.next_report(0).unwrap().payload(),
+            &[2, 7, 1, 0, 0, word[0], word[1]]
+        );
+    }
+    assert!(!inv.has_reports());
+    for _ in 0..NETWORK_ERROR_REPORT_CAPACITY {
+        observe(&mut inv, 0, 0, 1, 0x3d7, &[0xc7, 0], 0);
+    }
+    observe(&mut inv, 0, 0, 1, 0x3d7, &[0, 0], 0);
+    for _ in 1..NETWORK_ERROR_REPORT_CAPACITY {
+        assert_eq!(inv.next_report(0).unwrap().payload()[5], 0xc7);
+    }
+    assert_eq!(inv.next_report(0).unwrap().payload()[5..], [0, 0]);
+    assert!(!inv.has_reports());
+    observe(&mut inv, 0, 0, 1, 0x3d7, &[0xc7, 0], 0);
+    inv.set_reporting(false);
+    assert!(!inv.has_reports());
+    assert_eq!(
+        call(&mut inv, 0x107, 0, &[0, 0], 0).unwrap().payload(),
+        &[3, 7, 1, 0, 0, 0xc7, 0]
+    );
+}
+
 fn observe(
     cache: &mut Inventory,
     port: usize,

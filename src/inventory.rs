@@ -20,6 +20,7 @@ use telemetry::{Field, Telemetry};
 const NODES: usize = 24;
 const PORTS: usize = tn4::PORT_COUNT;
 const SLOTS: usize = PORTS * NODES;
+const NETWORK_ERROR_REPORT_CAPACITY: usize = 128;
 use method::{
     DEVICE_INVENTORY as INVENTORY, DEVICE_TYPE as PRODUCT, DEVICE_VERSION as VERSION,
     TAKING_ADDRESS,
@@ -100,7 +101,7 @@ pub struct Inventory {
     reporting: bool,
     setbacks: bool,
     network_error: u16,
-    error_pending: bool,
+    error_reports: heapless::Deque<u16, NETWORK_ERROR_REPORT_CAPACITY>,
     next_slot: usize,
 }
 
@@ -134,7 +135,7 @@ impl Inventory {
             reporting: false,
             setbacks: false,
             network_error: 0,
-            error_pending: false,
+            error_reports: heapless::Deque::new(),
             next_slot: 0,
         }
     }
@@ -229,7 +230,14 @@ impl Inventory {
         if message == message::NETWORK_ERROR {
             let [lo, hi, ..] = data else { return None };
             self.network_error = u16::from_le_bytes([*lo, *hi]);
-            self.error_pending = self.reporting;
+            if self.reporting {
+                // A clear or a different source's fault must not replace an
+                // undelivered alarm. On overflow retain the most recent events.
+                if self.error_reports.is_full() {
+                    self.error_reports.pop_front();
+                }
+                let _ = self.error_reports.push_back(self.network_error);
+            }
             return None;
         }
         if message == message::MASTER_PRESENT {
@@ -507,7 +515,7 @@ impl Inventory {
             port.job = Operation::IDLE;
         }
         self.remaining = 0;
-        self.error_pending = false;
+        self.error_reports.clear();
         self.network_error = 0;
     }
 
@@ -564,7 +572,7 @@ impl Inventory {
         if !on {
             self.groups.clear_reports();
             self.outdoor.dirty = false;
-            self.error_pending = false;
+            self.error_reports.clear();
             self.discard_fields(u16::MAX);
         }
     }
@@ -583,17 +591,14 @@ impl Inventory {
         }
     }
     pub fn has_reports(&self) -> bool {
-        self.error_pending
+        !self.error_reports.is_empty()
             || self.outdoor.dirty
             || self.groups.has_reports()
             || self.ports.iter().any(|p| p.pending != 0)
     }
     pub fn next_report(&mut self, now: u32) -> Option<Reply> {
-        if core::mem::take(&mut self.error_pending) {
-            return Some(Reply::report(
-                method::NETWORK_ERROR,
-                &self.network_error.to_le_bytes(),
-            ));
+        if let Some(word) = self.error_reports.pop_front() {
+            return Some(Reply::report(method::NETWORK_ERROR, &word.to_le_bytes()));
         }
         if let Some(report) = self.outdoor.report() {
             return Some(report);

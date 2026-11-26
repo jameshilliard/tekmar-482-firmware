@@ -21,7 +21,7 @@ behavior or compatibility with every serial client's timeout.
 | 167 DeviceInventory | Full walk, exact lookup, clear one, clear all. No unsolicited inventory report. |
 | 197 DeviceType, 19F DeviceVersion | Read addressed identity from block 0. Ignore writes. |
 | 15F TakingAddress | Report the old and new addresses even with reporting disabled. The stock input dispatcher has no case for this report ID: host Request and Update get an empty NullMethod on the corresponding response service. |
-| 107 NetworkError | Request and Update return the current network error word. Reports follow native 3D7, including clearance. |
+| 107 NetworkError | Request and read-only Update return the most recently received fault word. With reporting enabled, forward each native 3D7, including repeated values and clears. No source address in tHA. |
 | 10F ReportingState | Request and Update read back the active reporting flag. A Test-mode Report carries the physical DIP position instead. |
 | 117 OutdoorTemp | Read the selected network temperature, supply a four-minute local sample, and report changes. Respond to native outdoor requests on all five ports. |
 | 11F DeviceAttributes | Read the observed u16 mask, echo it on Update, and report changes. See below for the evidence behind each bit. |
@@ -154,6 +154,15 @@ A Raw decoder for an additional 483 message is not evidence that the stock
 not a timing or electrical equivalence test on real controllers.
 
 ## Gateway diagnostics
+
+NetworkError preserves both native bytes unchanged. Incoming faults and
+clears are queued in receive order, not coalesced like temperatures.
+The gateway buffers 128 pending fault reports; if the UART falls further
+behind it discards the oldest pending report first. Disabling reporting
+discards undelivered reports, not the last word returned by a Request.
+A zero code clears the **sender's** fault. Since tHA omits the sender, a
+client cannot infer that every device is clear from the latest word.
+Use [Raw fault reports](tn4-frames.md#network-faults) for per-source state.
 
 FirmwareRevision returns 0 for this unnumbered custom firmware. This is a
 project convention, not a tekmar revision or a reliable way to identify a

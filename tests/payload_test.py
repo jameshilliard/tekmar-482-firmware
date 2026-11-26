@@ -10,6 +10,7 @@ from frames import encode, replay
 from payloads import DECODERS, decode_payload
 from payloads.climate import AirGroupTargets, AirStatus, AirTarget, ThermostatConfiguration, ThermostatMode as Mode
 from payloads.codec import Reader
+from payloads.faults import NetworkFault, SensorCircuit
 from payloads.io import IoEndpoint, IoReport, IoType, io_terminal
 from payloads.line import ClockReport, GroupReport, SetpointAssignment, ZoneSyncAdjustment, ZoneTargetMode, group_command
 from payloads.plant import BoilerChillerOutput, HeatPumpOutput, MixingPresent, MixingReport, MixingUpdate, PlantKind, PlantOutput, StageBits, StageCounts
@@ -1105,6 +1106,27 @@ class PayloadTests(unittest.TestCase):
                         self.assertEqual(fields["master_flag"], 1)
                         self.assertEqual(fields["schedule_cycling_rate"], 2)
                         self.assertEqual(fields["num_daily_events"], 2)
+
+    def test_network_fault_word_and_code_specific_descriptors(self):
+        fault = NetworkFault.read(Reader(bytes.fromhex("8fe1")))
+        self.assertEqual((fault.raw, fault.code, fault.instance, fault.priority), (0xe18f, 0x8f, 33, 3))
+        self.assertEqual(fault.circuit, SensorCircuit.OPEN)
+        self.assertIsNone(fault.detail)
+        self.assertEqual(NetworkFault(0x108f).circuit, SensorCircuit.SHORT)
+        self.assertIsNone(NetworkFault(0x2194).circuit)
+        for word, expected in [(0x0809, "duplicate snowmelt zone"), (0x0909, "duplicate snow/ice sensor"),
+                               (0x2107, "duplicate master for schedule 1"),
+                               (0x0308, "missing master for cool group 3"),
+                               (0x3104, "missing device 17"), (0x8a0b, "no flow proof for pump 2"),
+                               (0x2384, "plant device 4"), (0x2382, "cooling duct"),
+                               (0x2390, "cool group 3"), (0x1199, "remote sensor 18")]:
+            self.assertEqual(NetworkFault(word).detail, expected)
+        self.assertTrue(NetworkFault(0xfe00).is_clear)
+        unknown = NetworkFault(0xd1fd)
+        self.assertEqual(unknown.priority, 3)
+        self.assertIsNone(unknown.detail)
+        self.assertEqual(unknown.description, "Unknown Error")
+        self.assertFalse(unknown.is_clear)
 
     def test_binary_replay(self):
         message = encode(1, bytes.fromhex("0003190000007d7123420582"))

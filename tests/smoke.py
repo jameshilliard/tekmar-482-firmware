@@ -134,6 +134,7 @@ def run(path, ram, fast=False):
     wire_log = deque(maxlen=12)
     clock_frame = bytes.fromhex("71f00005 1b52 05190c")
     clock_ports = set()
+    fault_words = []
     conflicts, interrupted, lost = {}, {}, set()
     raw_winner = bytes.fromhex("3f700000")
     backoff_after = 0
@@ -540,6 +541,25 @@ def run(path, ram, fast=False):
                     call(0x13d,b"\x0c\x01",True)
                     call(0x13d,b"\x0c\0")
                 else:
+                    phase = "fault-burst"
+                    # Two lines finish at the same instant: the second report
+                    # must not overwrite the first before UART can drain it.
+                    faults = (bytes.fromhex("7d700602 8fe1"), bytes.fromhex("7d705002 0080"))
+                    widths = [len(protected_bits(body)) for body in faults]
+                    for port, body in enumerate(faults):
+                        inject(body, port, after=clock + (max(widths) - widths[port]) * 2500)
+                    ordered = sorted(edges)
+                    edges.clear()
+                    edges.extend(ordered)
+            elif method == 0x107 and phase == "fault-burst":
+                if data[0] == 2:
+                    fault_words.append(data[5:])
+                    assert fault_words == [b"\x8f\xe1", b"\x00\x80"][:len(fault_words)]
+                    if len(fault_words) == 2:
+                        call(0x107, bytes(2))
+                else:
+                    assert data == bytes.fromhex("0407010000 0080")
+                    phase = "capture"
                     inject(bytes.fromhex("76f00608 20032a0a06000000"))
             elif method == 0x12f and data[0] == 2 and phase == "capture":
                 assert data[5:] == bytes.fromhex("010003")

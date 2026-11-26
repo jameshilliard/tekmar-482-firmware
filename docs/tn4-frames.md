@@ -109,7 +109,7 @@ Lengths describe known fields, not a reason to discard extensions.
 | `0x36f` | AirGroupMemberStatus | Byte 0: group [4:0], cool vs heat [5], master-report request [6]. Byte 1: enabled [0], demand [1], schedule [4:2], optimum start [6:5], weather shutdown [7]. Offset 2: target E. Offset 3: local H. Byte 5: output 1 [1:0], output 2 [3:2]. Offset 6: remote H. |
 | `0x3c7` | RelayStatusHeartbeat | One water subnet byte. |
 | `0x3cf` | MasterStatus | Supply H, return H, then u16 with target [12:0] and heat/cool mode [15:13]. Bytes 6/7: loop and pump percentages. Byte 8: setback [2:0], weather shutdown [3], on max [4], on min [5], output limited [6]. Optional DHW supply H at offset 9. |
-| `0x3d7` | NetworkError | Error code, then instance [5:0] and priority [7:6]. A native bus error is not a serial transport exception. |
+| `0x3d7` | NetworkError | Error code, then instance [5:0] and priority [7:6]. See [network faults](#network-faults). |
 | `0x3df` | NetworkInitRequest | No payload defined. |
 | `0x3f7` | MasterQuery | No payload defined. |
 
@@ -445,6 +445,37 @@ unless its encoding is known.
 | 2c, 2d, 2e | Return, supply and supply target temperatures (H); the 483 maps these keys to its degH temperature model. |
 | 2f, 30 | Keep-alive, melting time (minutes) |
 | Others | Preserve key and raw u16 |
+
+### Network faults
+
+Native `3D7` is a device announcement, not a failed serial operation.
+Both 483 SW 11 message layouts agree on its first two bytes:
+
+| Offset | Meaning |
+| --- | --- |
+| 0 | Code; zero explicitly clears the fault for this reporting source. |
+| 1 | Bits 0..5: code-specific descriptor (instance). Bits 6..7: fault priority, independent of the tN4 header priority. |
+
+For example, payload `8f e1` is a slab sensor error with instance 33 and
+priority 3. The instance's bit 5 indicates an open circuit here. Payload
+`00 80` clears this source even though the packed word is nonzero. Keep
+the physical receive port, full header subnet, node, timestamp and any
+trailing bytes. Two sources can report the same word. Silence, address
+reuse and a capture discontinuity are not clear reports.
+
+The [fault decoder](../tools/payloads/faults.py) combines the tHA code
+names with descriptor interpretations from the 483 SW 11
+`network_error_descriptions.yml`. EEPROM, internal, mixing and device
+configuration errors have code-specific descriptor tables. Lost devices,
+schedule masters and cool groups use the low five bits; for the latter
+two, bit 5 distinguishes duplicate from missing masters. Sensor faults
+can distinguish open from short; plant sensor instance numbers are
+one-based after decoding the low nibble. This doesn't extend to every
+code: a snow/ice sensor drift warning, for example, does not establish an
+open circuit. Unknown codes, descriptors and priority values remain raw.
+
+J1196J copies the two bytes into the little-endian tHA NetworkError word
+(`0x5a5c`). That interface carries neither source nor extensions.
 
 ### Other read-only queries
 
