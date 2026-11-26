@@ -267,6 +267,24 @@ For thermostats with only a heating schedule ID the 483 also uses it for
 cooling. Its per-model tables specify an independent cooling ID for 540,
 545 and 546; a missing cooling byte on one of these is unknown, not heat.
 
+**Live role changes.** `2F7 ScheduleStatus` identifies a change when the
+previous and current two-bit IDs differ or the master bit changes. The
+reported ID is zero-based, not a block 000F binding. In particular, losing
+mastership does not tell the host whether the device selected a member
+schedule, its zone schedule, or None. SW 11 re-reads 000F on an identified
+non-timer and requests the event rows when mastership is acquired. Use
+confirmed setup to decide which rows to display. For an 033, use the
+indexed Wake header (0038) for each affected system instead of 000F.
+Different timer slots can be reported by the same physical source.
+
+For two-event status, state 0 or 2 means Occupied; 1 or 3 means
+Unoccupied. Four-event status uses Wake, Unoccupied, Occupied, Sleep in
+order. Neither zero events nor reserved event code 3 names an active
+period. The reference uses the current event from a **master** to update
+its schedule status. Ordinary event changes, duplicate-response bit and
+time-to-next-edge changes are not evidence that weekly times changed.
+Retain the edge byte without assuming a unit or calculating a wall time.
+
 Daily event codes 0/1/2 mean zero/two/four timed events. In a two-event
 schedule the **Wake** and **Sleep** wire rows are displayed as Occupied
 and Unoccupied, not the separate Occ/UnOcc four-event rows. A 24-hour

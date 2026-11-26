@@ -25,6 +25,7 @@ SCENE = bytes.fromhex("2ff00003 07e001")  # 483 scene 8, eight hours.
 RAW_SENDS = (SCENE, bytes.fromhex("21f00002 0401"), bytes.fromhex("31f00005 1ebf100607"),
              bytes.fromhex("01000003 000102"), bytes.fromhex("20000001 01"))
 RAW_READS = ((bytes.fromhex("6d70000b 100000 00008000 00000000"), bytes.fromhex("6e70060a 10007f 90020304050607")),
+             (bytes.fromhex("6d70000b 380000 00008000 02000000"), bytes.fromhex("6e70060b 3800ff 7a 90020304050607")),
              (bytes.fromhex("17f00003 11 01 1b"), bytes.fromhex("57e250c5 19 01 1b1204")),
              (bytes.fromhex("17f00004 12 02 1922"), bytes.fromhex("57e250c8 1a 02 220006 190300")))
 TELEMETRY = ((1, bytes.fromhex("7cf25fca bc07 00c0 0000 19ff f9 ca")),
@@ -32,6 +33,8 @@ TELEMETRY = ((1, bytes.fromhex("7cf25fca bc07 00c0 0000 19ff f9 ca")),
              (2, bytes.fromhex("76f250c8 a4 62 2a 0000 07 0080")),
              (4, bytes.fromhex("777250cd 65 88 07 00 2c06 13 ff 00c0 e4 b005")),
              (0, bytes.fromhex("6e7250c6 030007 07 03 05")),
+             (4, bytes.fromhex("6f7250c4 65 f2 ca 35")),
+             (4, bytes.fromhex("6f7250c3 68 0d ff")),
              (0, bytes.fromhex("57e250cc 19 03 220006 220106 1b1704 ca")),
              (0, bytes.fromhex("57e250c8 1a 02 22ff05 190300")))
 

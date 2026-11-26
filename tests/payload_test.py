@@ -14,7 +14,7 @@ from payloads.line import ClockReport, GroupReport, SetpointAssignment, ZoneSync
 from payloads.products import block_selectors, identify_product
 from payloads.queries import NativeStatusQuery, ReplyPart, SnowmeltRole, StatusRequest
 from payloads.scenes import NativeScene, SceneReport, SceneResponse
-from payloads.schedules import DailyEvents, ScheduleBinding, ScheduleCycle, ScheduleEvent, ScheduleProfile
+from payloads.schedules import DailyEvents, ScheduleBinding, ScheduleCycle, ScheduleEvent, ScheduleProfile, ScheduleStatus
 from payloads.sensors import SensorRole as R, SensorSlot, ThermostatSensors
 from payloads.snowmelt import SnowmeltAddress, SnowmeltApplication, SnowmeltOperatingState, SnowmeltPair, SnowmeltReport, WaterDetection
 from payloads.water import HeatSource, LoopAssignment, LoopKind, LoopSetupSlot, LoopTopology
@@ -26,6 +26,28 @@ def decode(mid, hex_bytes):
 
 
 class PayloadTests(unittest.TestCase):
+    def test_schedule_status_is_not_a_schedule_assignment(self):
+        for previous in range(8):
+            for current in range(8):
+                r = Reader(bytes([previous << 3 | current | 0x80, 0xf2, 0xca, 0x35]))
+                status = ScheduleStatus.read(r)
+                self.assertEqual(status.previous_id, previous & 3)
+                self.assertEqual(status.schedule_id, current & 3)
+                self.assertEqual(status.previous_master, bool(previous & 4))
+                self.assertEqual(status.master, bool(current & 4))
+                self.assertEqual(status.ownership_changed, current != previous)
+                self.assertEqual((r.remaining, status.time_to_next_edge), (b"\x35", 0xca))
+                self.assertEqual((status.current_event, status.next_event), (ScheduleEvent.OCCUPIED, ScheduleEvent.WAKE))
+        for count in range(4):
+            for state in range(4):
+                s = ScheduleStatus(count << 6, state | (3 - state) << 2, 0xff)
+                expected = (ScheduleEvent(state) if count == 2 else
+                            (ScheduleEvent.UNOCCUPIED if state & 1 else ScheduleEvent.OCCUPIED) if count == 1 else None)
+                self.assertEqual(s.current_event, expected)
+        self.assertIn("truncated", decode(0x2f7, "a704"))
+        self.assertEqual(decode(0x2f7, "480c00ca")["extension_hex"], "ca")
+        self.assertNotIn("current_event", decode(0x2f7, "c000ff"))
+
     def test_snowmelt_endpoints_are_one_based_and_roles_are_independent(self):
         for role in SnowmeltRole:
             for n in (1, role.maximum):
