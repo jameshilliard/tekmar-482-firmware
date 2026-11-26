@@ -69,6 +69,33 @@ available data, not these lists.
 | A3..A8 | Humidification/dehumidification setup, their setback targets, heat pump cycles, cooling purge minutes, onboard humidity sensor enable. |
 | A9..B0 | Five balance-point targets, balance-point schedule ID, W1 shutdown, W2 lockout, Y during W2, baseload mode, unoccupied humidity enable and humidity differential. |
 
+## Selecting Instances
+
+A single `2D7` request can select several nodes on the same subnet. Each
+responds separately with `2E7`; one link ACK is not evidence that all
+selected devices replied. Match the source subnet, node (without its lock
+bit), block ID and, for an indexed block, the supported selector byte.
+An unindexed report with a zero support mask is a reply. An indexed report
+without its selector cannot establish which instance replied.
+
+The 483 SW 11 device, timer and reset-control models give these read hints:
+
+- Timer 033 uses wire selectors 0..3 for each of blocks `38..3B`. Its UI
+  schedule IDs 2..5 are not the block arguments.
+- 400/401/402 use boiler 0 and pump IDs 0 and 129; 406 uses pump 0; other
+  reset controls use pump IDs 0 and 1. For boiler-specific blocks on other
+  models, use set-bit positions in the **available** boiler mask in `35`,
+  not the enabled mask or a count. For tank pump hours use `5B`.
+- For reset-control bus counters (`48/49`), SW 11 uses water bus minus one,
+  not the bridge's physical port. Water bus zero supplies no such index.
+- The mix/heat pump availability masks (`50/97`) and matching runtime IDs
+  (`4D/98`) likewise provide candidate pump indices. The returned selector
+  and support mask confirm what the device actually supplied.
+
+When no enumeration is known, zero is a useful first probe, not a maximum.
+Keep other selectors actually seen from that device. A present zero
+availability mask advertises no instances; a missing mask is unknown.
+
 ## Reading a 402
 
 Use block 00 to confirm the native source. A plant master need not have

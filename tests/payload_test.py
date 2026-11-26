@@ -7,7 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 from frames import encode, replay
 from payloads import DECODERS, decode_payload
-from payloads.products import identify_product
+from payloads.products import block_selectors, identify_product
 
 
 def decode(mid, hex_bytes):
@@ -15,6 +15,24 @@ def decode(mid, hex_bytes):
 
 
 class PayloadTests(unittest.TestCase):
+    def test_read_selectors_use_wire_ids_and_known_availability(self):
+        for product, block, subnet, masks, expected in (
+            (101103, 0x38, 8, {}, (0, 1, 2, 3)),
+            (103301, 0x44, 8, {}, (0, 129)),
+            (104106, 0x44, 8, {}, (0,)),
+            (102002, 0x44, 8, {}, (0, 1)),
+            (103301, 0x43, 8, {0x35: 0}, (0,)),
+            (102002, 0x43, 8, {0x35: 0x84}, (2, 7)),
+            (102002, 0x45, 8, {0x35: 0}, ()),
+            (104106, 0x5a, 8, {0x5b: 8}, (3,)),
+            (104106, 0x48, 0x23, {}, (2,)),
+            (104106, 0x49, 0x20, {}, (0,)),
+            (0, 0x7a, 0, {}, (0,)),
+            (0, 0x01, 0, {}, (None,)),
+        ):
+            with self.subTest(product=product, block=block):
+                self.assertEqual(block_selectors(block, identify_product(product), subnet, masks), expected)
+
     def test_catalog_uses_product_and_j_number_not_address_or_order(self):
         for number, j, model in (
             (101901, 1159, "346"), (101901, 1145, "481"),
