@@ -7,12 +7,15 @@
 import argparse
 import binascii
 import struct
+import sys
 from collections import deque
 from pathlib import Path
 
 from unicorn import UC_ARCH_ARM, UC_HOOK_CODE, UC_MODE_ARM, UC_PROT_EXEC, UC_PROT_READ, Uc
 from unicorn.arm_const import UC_ARM_REG_CPSR, UC_ARM_REG_R0, UC_ARM_REG_R1
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+from frames import replay
 
 # Independent fixture for the five board paths: RX pin, timer, channel, TX pin.
 PORTS = [(4, 0, 1, 28), (11, 1, 1, 13), (6, 0, 2, 22), (10, 1, 0, 8), (2, 0, 0, 29)]
@@ -227,6 +230,11 @@ def smoke(image: bytes, ram: bool, tx_port: int) -> None:
         assert ack_records[2] == f"K {tx_port} 00000001 00000000".encode()
         counts = [int(v, 16) for v in ack_records[3 + tx_port].split()[2:]]
         assert counts[1:8] == [3, 0, 1, 1, 0, 1, 0], counts
+        bad_start = (10 + len(body_bits) + 16) * 2500
+        assert counts[10:12] == [0xe2e, 0xe2f] and counts[13] == bad_start, counts
+        decoded = list(replay(listened.splitlines(keepends=True)))
+        assert decoded[3 + tx_port].endswith(
+            f"rejected_start_us={bad_start} rejected_body={tx_body.hex()}"), decoded
         slot = (10 + len(body_bits) + 1) * 2500
         assert len(ack_edges) == 4 and [e[0] for e in ack_edges] == [True, False]*2, ack_edges
         for on, off in (ack_edges[:2], ack_edges[2:]):

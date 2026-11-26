@@ -145,6 +145,27 @@ class HelperTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 describe(b"F 2 000061a8 0e2f A " + raw + b"\r\n")
 
+    def test_maximum_rejected_body_in_live_diagnostics(self):
+        master, proc = self.start_helper("diagnostics", "--seconds", "1")
+        self.expect(master, b"A\nID?\n")
+        os.write(master, b"TEKMAR-482-DEV\r\n")
+        self.expect(master, b"A\nRX-DIAG\n")
+        os.write(master, b"OK DIAG\r\n")
+        self.expect(master, b"\n")
+        for port in range(5):
+            counts = [0] * 13
+            suffix = b""
+            if port == 4:
+                counts[:4] = [82, 1, 0, 1]
+                counts[10:12] = [0x7baa, 0x7bab]
+                suffix = b" ffffffff " + b"ff" * 67
+            os.write(master, (f"D {port}" + "".join(f" {v:08x}" for v in counts)).encode()
+                     + suffix + b"\r\n")
+        os.write(master, b"END 00000000\r\n")
+        out, err = proc.communicate(timeout=3)
+        self.assertEqual(proc.returncode, 0, err)
+        self.assertIn(b"rejected_start_us=4294967295 rejected_body=" + b"ff" * 67, out)
+
     def test_send_requires_acknowledged_echo(self):
         for echoed in (False, True):
             with self.subTest(echoed=echoed):

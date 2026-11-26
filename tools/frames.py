@@ -15,6 +15,21 @@ TRAILERS = {
     b"L": "ack/local-drive", b"X": "ack/local-drive/bad-end",
 }
 
+# "D p", fourteen space-prefixed words, space, 67 hex-encoded bytes and CRLF.
+MAX_RECORD_BYTES = 3 + 14 * 9 + 1 + 2 * 67 + 2
+
+
+def body_crc(data: bytes) -> int:
+    if len(data) < 4 or data[3] & 63 != len(data) - 4:
+        raise ValueError("tN4 header length differs from UART record length")
+    crc = 0x4599
+    for byte in data:
+        crc ^= byte << 7
+        for _ in range(8):
+            crc = ((crc << 1) ^ (0x4599 if crc & 0x4000 else 0)) & 0x7fff
+    return crc
+
+
 def describe(line: bytes) -> str:
     match = re.fullmatch(
         rb"F ([0-4]) ([0-9a-f]{8}) ([0-7][0-9a-f]{3}) ([ANDEMLX]) ((?:[0-9a-f]{2}){4,67})\r\n",
@@ -25,13 +40,7 @@ def describe(line: bytes) -> str:
     port, stamp, check, status, raw = match.groups()
     data = bytes.fromhex(raw.decode("ascii"))
     header = int.from_bytes(data[:4], "big")
-    if header & 63 != len(data) - 4:
-        raise ValueError("tN4 header length differs from UART record length")
-    crc = 0x4599
-    for byte in data:
-        crc ^= byte << 7
-        for _ in range(8):
-            crc = ((crc << 1) ^ (0x4599 if crc & 0x4000 else 0)) & 0x7fff
+    crc = body_crc(data)
     if crc != int(check, 16):
         raise ValueError("tN4 CRC differs from UART record data")
     message = (header >> 20) & 1023
@@ -77,14 +86,23 @@ class FrameAudit:
             _, port, _, _, status, _ = line.split()
             self.seen[int(port)][status] += 1
             return result
-        if not re.fullmatch(rb"D [0-4](?: [0-9a-f]{8}){12,13}\r\n", line):
+        match = re.fullmatch(
+            rb"D ([0-4])((?: [0-9a-f]{8}){12})(?: ([0-9a-f]{8})"
+            rb"(?: ([0-9a-f]{8}) ((?:[0-9a-f]{2}){4,67}))?)?\r\n", line)
+        if not match:
             raise ValueError("malformed receiver diagnostic")
-        _, p, *words = line.split()
+        p, words, level_word, stamp, raw = match.groups()
         port = int(p)
-        edges, starts, stuff, crc, ack, no_ack, bad, partial, drops, lag, rx, expected, *levels = (
-            int(word, 16) for word in words)
-        if levels and levels[0] > 3:
+        edges, starts, stuff, crc, ack, no_ack, bad, partial, drops, lag, rx, expected = (
+            int(word, 16) for word in words.split())
+        levels = int(level_word, 16) if level_word else None
+        if levels is not None and levels > 3:
             raise ValueError(f"port {port}: invalid input level flags")
+        if (max(rx, expected) > 0x7fff or (crc and rx == expected) or
+                (not crc and (rx or expected or raw))):
+            raise ValueError(f"port {port}: inconsistent last CRC failure")
+        if raw and body_crc(bytes.fromhex(raw.decode("ascii"))) != expected:
+            raise ValueError(f"port {port}: rejected body disagrees with calculated CRC")
         seen = self.seen[port]
         observed_bad = sum(seen[k] for k in (b"D", b"E", b"M", b"X"))
         if port in self.drops or partial > 1 or starts != stuff + crc + ack + no_ack + bad + partial:
@@ -96,12 +114,16 @@ class FrameAudit:
         result = (f"port={port} edges={edges} candidates={starts} ack={ack} no_ack={no_ack} "
                   f"bad_trailer={bad} stuffing_errors={stuff} crc_errors={crc} partial={partial} "
                   f"uart_drops={drops} max_capture_service_us={lag}")
-        if levels:
-            start, end = levels[0] & 1, levels[0] >> 1
+        if levels is not None:
+            start, end = levels & 1, levels >> 1
             result += f" rx_initial={start} rx_final={end}"
             if not edges and start == end:
                 result += " line=steady-dominant" if end else " line=steady-idle"
-        return result + (f" last_crc={rx:04x} expected={expected:04x}" if crc else "")
+        if crc:
+            result += f" last_crc={rx:04x} expected={expected:04x}"
+        if raw:
+            result += f" rejected_start_us={int(stamp, 16)} rejected_body={raw.decode('ascii')}"
+        return result
 
     def finish(self, dropped):
         for port, seen in enumerate(self.seen):

@@ -97,11 +97,16 @@ mod board {
         }
     }
 
+    fn hex(dst: &mut [u8], mut value: u32) {
+        for b in dst.iter_mut().rev() {
+            *b = b"0123456789abcdef"[(value & 15) as usize];
+            value >>= 4;
+        }
+    }
+
     fn send_word(value: u32) {
         let mut word = *b" 00000000";
-        for (i, b) in word[1..].iter_mut().rev().enumerate() {
-            *b = b"0123456789abcdef"[((value >> (4 * i)) & 15) as usize];
-        }
+        hex(&mut word[1..], value);
         send(&word);
     }
 

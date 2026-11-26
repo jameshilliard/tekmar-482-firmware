@@ -46,7 +46,7 @@ impl Capture {
         }
         let mut mux = saved.mux;
         let mut mask = saved.mask;
-        for (pin, _, _) in INPUTS {
+        for &(pin, _, _) in &INPUTS {
             mux = (mux & !(3 << (2 * pin))) | (2 << (2 * pin));
             mask &= !(1 << pin);
         }
@@ -54,7 +54,7 @@ impl Capture {
         write(FIO0MASK, mask);
         saved.initial = read(FIO0PIN);
         let mut captures = [0; 2];
-        for (pin, timer, channel) in INPUTS {
+        for &(pin, timer, channel) in &INPUTS {
             let flags = match (alternate, saved.initial & (1 << pin) != 0) {
                 (false, _) => 7,
                 (true, false) => 5, // currently low: capture the next rising edge
@@ -79,7 +79,7 @@ impl Capture {
         let flags = TIMERS.map(|t| read(t + IR));
         let mut seen = 0;
         let mut stamps = [0; INPUTS.len()];
-        for (port, (_, timer, channel)) in INPUTS.into_iter().enumerate() {
+        for (port, &(_, timer, channel)) in INPUTS.iter().enumerate() {
             if flags[timer] & (1 << (4 + channel)) != 0 {
                 seen |= 1 << port;
                 stamps[port] = read(TIMERS[timer] + CR0 + 4 * channel);

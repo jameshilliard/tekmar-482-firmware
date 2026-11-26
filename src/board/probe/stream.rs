@@ -1,14 +1,8 @@
 use super::super::transmit::{Attempt, LineDriver};
-use super::super::{LSR, THRE, UART0};
+use super::super::{LSR, THRE, UART0, hex};
 use super::{CCR, CR0, Capture, FIO0PIN, INPUTS, IR, TC, TIMERS, read, send, write};
 use tekmar_482_firmware::Stream;
 use tekmar_482_firmware::tn4::{Frame, LinkAck, Receiver, Trailer};
-
-fn hex(dst: &mut [u8], value: u32) {
-    for (i, byte) in dst.iter_mut().rev().enumerate() {
-        *byte = b"0123456789abcdef"[((value >> (4 * i)) & 15) as usize];
-    }
-}
 
 struct Outbox {
     buf: [u8; 1024],
@@ -97,7 +91,7 @@ impl Receivers {
         mut report: impl FnMut(usize, Frame<'_>),
     ) {
         let pending = TIMERS.map(|t| read(t + IR));
-        for (port, (_, timer, ch)) in INPUTS.into_iter().enumerate() {
+        for (port, &(_, timer, ch)) in INPUTS.iter().enumerate() {
             let t = TIMERS[timer];
             let flag = 1 << (4 + ch);
             let mut emit = |f: Frame<'_>| report(port, f);
@@ -229,6 +223,15 @@ pub fn stream(mode: &Stream, panel: &mut super::super::panel::Panel) {
                 ((initial >> pin) & 1) | (((final_levels >> pin) & 1) << 1),
             ] {
                 super::super::send_word(n);
+            }
+            if let Some((start, body)) = r.last_crc_failure() {
+                super::super::send_word(start);
+                send(b" ");
+                for &byte in body {
+                    let mut digits = [0; 2];
+                    hex(&mut digits, u32::from(byte));
+                    send(&digits);
+                }
             }
             send(b"\r\n");
         }

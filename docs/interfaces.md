@@ -165,6 +165,12 @@ UART frame drops, maximum edge service delay in microseconds, and last
 received and calculated mismatching CRCs (zero until a mismatch), and
 the sampled physical input levels (bit 0 at capture start, bit 1 at stop;
 1 = dominant). Archives with the earlier twelve-word rows still replay.
+If a CRC mismatch occurred, new diagnostic rows append the last rejected
+candidate's eight-digit SOF timestamp and hex header/payload. The host checks
+the header length, recomputes the CRC from those bytes and compares it with
+both reported CRCs. Rejected bodies are never delivered as decoded messages
+or acknowledged. Only the most recent mismatch per port is retained and the
+extra bytes are sent after capture stops.
 At startup the decoder samples the pin to choose its first edge. A port
 that stays high with no captured edges cannot provide the idle interval
 required for transmit; the firmware does not force a send on it.

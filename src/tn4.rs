@@ -35,6 +35,8 @@ pub struct Receiver {
     pub stats: RxStats,
     state: State,
     bytes: [u8; MAX_BYTES],
+    last_bad_body: [u8; MAX_BYTES],
+    last_bad_start: u32,
     bits: usize,
     history: u8,
     crc: u16,
@@ -65,6 +67,8 @@ impl Default for Receiver {
             stats: RxStats::default(),
             state: State::Seek(0),
             bytes: [0; MAX_BYTES],
+            last_bad_body: [0; MAX_BYTES],
+            last_bad_start: 0,
             bits: 0,
             history: 0,
             crc: 0,
@@ -79,6 +83,14 @@ impl Default for Receiver {
 }
 
 impl Receiver {
+    pub fn last_crc_failure(&self) -> Option<(u32, &[u8])> {
+        if self.stats.crc_mismatch == 0 {
+            return None;
+        }
+        let len = 4 + usize::from(self.last_bad_body[3] & 63);
+        Some((self.last_bad_start, &self.last_bad_body[..len]))
+    }
+
     /// The physical slot boundary, fixed when the verified CRC delimiter was sampled.
     pub fn ack_slot(&self) -> Option<(u32, u32)> {
         match self.state {
@@ -180,6 +192,8 @@ impl Receiver {
                     self.stats.crc_mismatch = self.stats.crc_mismatch.saturating_add(1);
                     self.stats.last_received_crc = self.received;
                     self.stats.last_expected_crc = self.crc;
+                    self.last_bad_start = self.start;
+                    self.last_bad_body = self.bytes;
                     State::Seek(0)
                 }
             }

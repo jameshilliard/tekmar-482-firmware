@@ -156,6 +156,17 @@ class PayloadTests(unittest.TestCase):
             with self.subTest(bad_summary=bad_summary), self.assertRaisesRegex(ValueError, "local ACK"):
                 list(replay(lines))
 
+    def test_rejected_crc_snapshot(self):
+        def row(*, body=b"12300001a5", received=0xe2e, expected=0xe2f, failures=1):
+            counts = [30, failures, 0, failures, 0, 0, 0, 0, 0, 11, received, expected, 0]
+            return ("D 2" + "".join(f" {v:08x}" for v in counts)).encode() + b" 00000010 " + body + b"\r\n"
+        report = FrameAudit().record(row())
+        self.assertIn("last_crc=0e2e expected=0e2f rejected_start_us=16 rejected_body=12300001a5", report)
+        for bad in (row(body=b"12300001a4"), row(body=b"12300001"), row(received=0xe2f),
+                    row(received=0x8000), row(expected=0xde), row(received=0, expected=0, failures=0)):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                FrameAudit().record(bad)
+
 
 if __name__ == "__main__":
     unittest.main()

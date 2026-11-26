@@ -13,7 +13,7 @@ from contextlib import nullcontext
 from pathlib import Path
 from typing import NamedTuple
 
-from frames import FrameAudit, dropped_records
+from frames import MAX_RECORD_BYTES, FrameAudit, dropped_records
 from port import connect
 
 
@@ -217,7 +217,7 @@ async def capture(port, seconds: float, *, diagnostics=False, tx=None, on_record
     loop = asyncio.get_running_loop()
     deadline = loop.time() + seconds
     async def read_record(deadline):
-        line = await port.readline(160, timeout=max(0, deadline - loop.time()))
+        line = await port.readline(MAX_RECORD_BYTES, timeout=max(0, deadline - loop.time()))
         if archive is not None:
             archive.write(line)
         return line
