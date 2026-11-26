@@ -96,6 +96,44 @@ When no enumeration is known, zero is a useful first probe, not a maximum.
 Keep other selectors actually seen from that device. A present zero
 availability mask advertises no instances; a missing mask is unknown.
 
+## Addressed Writes
+
+A `2DF` body contains a destination subnet, a five-bit destination node
+(the report's lock flag is not copied), a little-endian block ID and the
+positional data bytes. There is **no field mask in an update**. An edit
+starts with `2D7` and a matching `2E7` from that port/subnet/node and
+instance. Copy the whole known positional image, change only the selected
+supported field bits, send once, then issue a new read. A link ACK does
+not confirm application, nor does a timeout authorize repeating the update.
+No protocol operation locks the block against edits by a second bus writer.
+
+The [field edit catalog](../tools/payloads/writes.py) covers all 54 explicit
+`BlockTypesIn.write` definitions in the 483 SW 11 software. These are
+known update encodings, **not** a promise every model accepts every edit.
+
+| Blocks (hex) | Editable data |
+| --- | --- |
+| 03, 05..07, 09 | Heating mode/CPH/air group; heat, cool, floor and ventilation targets in setback order. Floor also has a maximum. |
+| 0E, 0F | Scene settings, schedule IDs, cycling rate, daily event selection and optimum start. The 483 writer always sets the sixth schedule-setup byte to zero, even though its reader calls it RTC setback enable. Do not offer that byte as editable or clear it as a side effect when it is nonzero. |
+| 10..13, 38..3B | Seven weekdays per event; multi-schedule also packs master, cycling and event-count flags with the selector. Preserve the low three selector bits when editing these flags. Day byte 144 means disabled. |
+| 1C..21, 43, 44, 4C, 98..A2 | Relay, boiler, pump and heat-pump hours, savings-time and output counters. Indexed runtimes keep their complete selector byte. Counter updates can destroy operating history. |
+| 24..27 | DHW and setpoint exchange, application and operating setup. Unsupported placeholders can be nonzero and must survive unchanged. |
+| 28..31 | Setpoint, hot-tub, DHW, floor and pool targets. Use whole little-endian words. The six-byte `2E` floor variant omits maximum; do not extend it to eight bytes. |
+| 71, 72, 78, A4, A5 | Melt, idle, storm slab targets and humidification/dehumidification setback targets. Changing a slab target does not start a melt. |
+
+There is one additional model-level reset: SW 11's reset control sets the
+indexed `5A` TankUsage hours to zero. Its declarative layout is one tank
+ID and a little-endian word. The indexed Ruby reader has no standalone
+writer for this block; arbitrary replacements are not established.
+
+Reject ambiguous, incomplete or extended source images before changing a
+setting. In particular, a compact sparse report may be readable but has
+no bytes to preserve for the missing positions. All bytes of a selected
+word must be supported. On readback, an unambiguous compact report can
+confirm selected fields without requiring unchanged unrelated fields.
+The stock 482 also has a four-data-byte `0D` sensor-setup emitter branch;
+that shorter trace layout is decoded, not treated as a general sensor editor.
+
 ## Reading a 402
 
 Use block 00 to confirm the native source. A plant master need not have

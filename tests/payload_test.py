@@ -8,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 from frames import encode, replay
 from payloads import DECODERS, decode_payload
 from payloads.products import block_selectors, identify_product
+from payloads.writes import BlockPatch, NativeField as F, WritableBlock
 
 
 def decode(mid, hex_bytes):
@@ -15,6 +16,69 @@ def decode(mid, hex_bytes):
 
 
 class PayloadTests(unittest.TestCase):
+    def test_writer_registry_and_independent_full_widths(self):
+        # SW 11 BlockTypesIn.write lengths plus the model's TankUsage reset.
+        groups = {
+            2: (*range(0x1c, 0x22), 0x4c, 0x71, 0x72, 0x78, *range(0x99, 0xa3)),
+            3: (3, 0x43, 0x44, 0x5a, 0x98),
+            4: (*range(0x29, 0x32, 2),),
+            5: (5, 6, 9, 0xa4, 0xa5),
+            6: (7, 0x0f, 0x25),
+            7: tuple(range(0x10, 0x14)),
+            8: (0x0e, 0x24, 0x26, 0x27, *range(0x28, 0x32, 2), *range(0x38, 0x3c)),
+        }
+        self.assertEqual({i for ids in groups.values() for i in ids}, set(WritableBlock))
+        for width, ids in groups.items():
+            for block in map(WritableBlock, ids):
+                for field in block.fields:
+                    with self.subTest(block=block, field=field):
+                        value = 0 if block == 0x5a else 1
+                        patch = BlockPatch.from_fields(block, {field: value})
+                        support = (1 << width) - 1
+                        body = patch.apply(support, bytes(width))
+                        self.assertEqual(len(body), width)
+                        self.assertIs(patch.matches(support, body), True)
+                        self.assertEqual(body != bytes(width), bool(value))
+
+    def test_update_keeps_unsupported_bytes_selector_and_sibling_bits(self):
+        cases = (
+            (5, {F.OCCUPIED: 44}, 0x15, "292a2b2c2d", "292a2c2c2d"),
+            (0x38, {F.MONDAY: 37, F.SCHEDULE_CYCLING_RATE: 1}, 0x83,
+             "ab00010203040506", "9b25010203040506"),
+            (0x44, {F.HOURS: 0}, 7, "81efbe", "810000"),
+            (0x2e, {F.AWAY: 0x1234}, 0x33, "2301cafe2401", "2301cafe3412"),
+            (0x0f, {F.COOLING_SCHEDULE_ID: 2}, 0x13, "0100ffabcd00", "0102ffabcd00"),
+        )
+        for block, edits, mask, before, expected in cases:
+            with self.subTest(block=block):
+                patch = BlockPatch.from_fields(block, edits)
+                self.assertEqual(patch.apply(mask, bytes.fromhex(before)), bytes.fromhex(expected))
+                packed = bytes(b for i, b in enumerate(bytes.fromhex(expected)) if mask & (1 << i))
+                self.assertIs(patch.matches(mask, packed), True)
+                self.assertIs(patch.matches(mask, bytes.fromhex(before)), False)
+                self.assertIsNone(patch.matches(0, b""))
+
+    def test_unwritable_unsafe_or_partial_edits_are_refused(self):
+        for block, edits in ((0x4b, {F.HOURS: 0}), (0x5a, {F.HOURS: 2}), (5, {F.WAKE: 255}),
+                             (0x10, {F.MONDAY: 145}), (0x38, {F.SCHEDULE_CYCLING_RATE: 4}),
+                             (0x71, {F.SLAB_TARGET: 0}), (0x72, {F.SLAB_TARGET: 0xffff}),
+                             (0x0f, {F.MASTER_FLAG: 0}), (5, {}), (5, {"wake": 0})):
+            with self.subTest(block=block, fields=edits), self.assertRaises(ValueError):
+                BlockPatch.from_fields(block, edits)
+        for block, edits, support, body in (
+            (0x0f, {F.HEATING_SCHEDULE_ID: 2}, 63, bytes.fromhex("010203040501")),
+            (0x44, {F.HOURS: 0}, 3, bytes(3)),
+            (0x2e, {F.MAXIMUM: 0}, 0x3f, bytes(6)),
+            (5, {F.AWAY: 10}, 0x11, bytes(2)), (5, {F.WAKE: 10}, 0xff, bytes(5)),
+            (5, {F.WAKE: 10}, 0x1f, bytes(6)),
+        ):
+            with self.subTest(block=block, support=support), self.assertRaises(ValueError):
+                BlockPatch.from_fields(block, edits).apply(support, body)
+        fields = decode(0x2df, "0805 0d00 01020304")
+        self.assertEqual(fields["sensor3"], 4)
+        self.assertNotIn("sensor4", fields)
+        self.assertNotIn("truncated", fields)
+
     def test_read_selectors_use_wire_ids_and_known_availability(self):
         for product, block, subnet, masks, expected in (
             (101103, 0x38, 8, {}, (0, 1, 2, 3)),
