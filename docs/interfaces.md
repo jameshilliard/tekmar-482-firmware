@@ -232,3 +232,16 @@ temporarily takes the capture timers and does not decode frames. Use
 stream. A lit LED is not proof of delivery.
 The DIP state is diagnostic, not permission to drive a bus. Test at
 power-on retains the hardware ROM entry function.
+
+### Hardware verification
+
+| Interface | Repeatable check | What still requires a person or peer |
+| --- | --- | --- |
+| UART0 TX/RX and software ISP entry | An SRAM trial verifies the upload byte-for-byte, executes a command, returns through ROM and identifies the installed dev image. | Observe Power and UART TX/RX lamps during the transfer to check the lamps themselves. |
+| Five tN4 lines | Use `--echo-test` and `--frames 35 --diagnostics` in separate trials. Inspect per-port results, input levels and edge counts. | End-to-end verification needs an active peer on each physical port. A permanently dominant input is never driven. |
+| Five bus LEDs and Test LED | `--panel-after 25 --panel-test` reads idle activity, then follows the six individual output pin levels. | Watch Bus 0 through 4, then Test. Pin readback alone cannot detect a failed lamp or a swapped label. |
+| Test button and Reporting DIP | `board.py panel PORT` reports raw-at-boot and debounced states plus change counters. The ARM tests simulate switch bounce and verify a single press/change. | To verify the physical controls, observe the changed counter after a press or switch change with the panel build running. |
+
+The [482 installation manual, pp. 8-10](https://www.watts.com/dfsmedia/0533dbba17714b1ab581ab07a4cbb521/42923-source/638820695670000000/482-d-09.pdf)
+identifies DTR as programming-only, and the DIP as the stock reporting
+power-on default. Neither is an application flow-control signal.
