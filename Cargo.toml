@@ -7,6 +7,16 @@ publish = false
 [features]
 ram-trial = []
 
+[target.'cfg(target_os = "none")'.dependencies]
+critical-section = { version = "1", features = ["restore-state-u32"] }
+heapless = { version = "0.9", features = ["portable-atomic-critical-section"] }
+static_cell = "2"
+embassy-executor = { git = "https://github.com/embassy-rs/embassy", rev = "73d6f6c376d01e350e3270d75c46a6d636356905", features = ["portable-atomic", "platform-spin", "executor-thread"] }
+embassy-futures = { git = "https://github.com/embassy-rs/embassy", rev = "73d6f6c376d01e350e3270d75c46a6d636356905" }
+embassy-time = { git = "https://github.com/embassy-rs/embassy", rev = "73d6f6c376d01e350e3270d75c46a6d636356905", features = ["tick-hz-1_000_000"] }
+embassy-time-driver = { git = "https://github.com/embassy-rs/embassy", rev = "73d6f6c376d01e350e3270d75c46a6d636356905" }
+embassy-time-queue-utils = { git = "https://github.com/embassy-rs/embassy", rev = "73d6f6c376d01e350e3270d75c46a6d636356905" }
+
 [[bin]]
 name = "tekmar-482-firmware"
 path = "src/main.rs"

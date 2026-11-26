@@ -8,6 +8,7 @@ import argparse
 import binascii
 import os
 import struct
+import subprocess
 import sys
 from collections import deque
 from pathlib import Path
@@ -22,7 +23,7 @@ from frames import replay
 PORTS = [(4, 0, 1, 28), (11, 1, 1, 13), (6, 0, 2, 22), (10, 1, 0, 8), (2, 0, 0, 29)]
 
 
-def smoke(image: bytes, ram: bool, tx_port: int) -> None:
+def smoke(image: bytes, ram: bool, tx_port: int, stack: tuple[int, int]) -> int:
     tx_pin = PORTS[tx_port][3]
     # One inactive, dominant line is independent of the port under test.
     silent_port = 3 if tx_port == 4 else 4
@@ -33,6 +34,8 @@ def smoke(image: bytes, ram: bool, tx_port: int) -> None:
     cpu.mem_map(0x40000000, 0x8000)
     base = 0x40001000 if ram else 0
     cpu.mem_write(base, image)
+    floor, top = stack
+    cpu.mem_write(floor, b"\xa5" * (top - floor))
     cpu.mem_map(0x7FFFF000, 0x1000)
 
     # Outside explicit TX and receive-ACK commands only panel GPIO operations are allowed.
@@ -68,6 +71,8 @@ def smoke(image: bytes, ram: bool, tx_port: int) -> None:
     input_start = None
     tx_latch = 0
     clock = 0
+    stall = panel_samples = 0
+    pwm_clock = 0xffff0000  # exercise monotonic time across a 32-bit wrap during TX
 
     led_mask = sum(1 << pin for pin in (22, 21, 18, 23, 25, 16))
     unclaimed = 1 << 15
@@ -83,7 +88,10 @@ def smoke(image: bytes, ram: bool, tx_port: int) -> None:
         timer[0x2c + 4 * ch] = stamp
         timer[0] |= 1 << (4 + ch)
     def gpio_read(uc, offset, size, data):
+        nonlocal panel_samples
         assert size == 4 and offset in gpio
+        if stall and offset == 0x14:
+            panel_samples += 1
         return gpio[offset]
 
     def gpio_write(uc, offset, size, value, data):
@@ -116,6 +124,11 @@ def smoke(image: bytes, ram: bool, tx_port: int) -> None:
 
     cpu.mmio_map(0x3fffc000, 0x1000, gpio_read, None, gpio_write, None)
     cpu.mem_map(0xe0014000, 0x1000)
+    def advance_pwm(micros):
+        nonlocal pwm_clock
+        pwm_clock = (pwm_clock + micros) & 0xffffffff
+        cpu.mem_write(0xe0014008, struct.pack("<I", pwm_clock))
+    advance_pwm(0)
 
     def timer_write(uc, offset, size, value, index):
         nonlocal streaming, sending, acknowledging, ack_sessions, clock, edges
@@ -156,9 +169,9 @@ def smoke(image: bytes, ram: bool, tx_port: int) -> None:
         assert size == 4 and offset in (0, 8, 0x28, 0x2c, 0x30, 0x34)
         if (streaming or background_test or input_start is not None) and offset == 8:
             if index == 0:
-                clock += 100 if sending or acknowledging else 200
-                if background_test or input_start is not None:
-                    uc.mem_write(0xe0014008, struct.pack("<I", clock))
+                step = 100 if sending or acknowledging else 200
+                clock += step
+                advance_pwm(step)
                 if input_start is not None:
                     elapsed = clock - input_start
                     # A short bounce followed by a held press with the DIP flipped.
@@ -188,18 +201,23 @@ def smoke(image: bytes, ram: bool, tx_port: int) -> None:
         cpu.mmio_map(timer, 0x1000, timer_read, index, timer_write, index)
 
     def uart_read(uc, offset, size, user_data):
-        nonlocal drained, pending_polls
+        nonlocal drained, pending_polls, stall
         if offset == 0x14:
+            if stall and not incoming:
+                advance_pwm(1000)
+                stall -= 1
+                return 0
             if pending_polls:
                 pending_polls -= 1
             else:
                 drained = True
-            return 0x20 | (0x40 if drained else 0) | bool(incoming)
+            # Exercise suspended TX futures as well as the final-stop-bit wait.
+            return (0x20 if pending_polls < 3 else 0) | (0x40 if drained else 0) | bool(incoming)
         assert offset == 0 and not dlab
         return incoming.popleft()
 
     def uart_write(uc, offset, size, value, user_data):
-        nonlocal dlab, drained, pending_polls, background_test, input_start
+        nonlocal dlab, drained, pending_polls, background_test, input_start, stall
         writes.append((offset, value))
         if offset == 0x0C:
             dlab = bool(value & 0x80)
@@ -213,6 +231,8 @@ def smoke(image: bytes, ram: bool, tx_port: int) -> None:
                 input_start = clock
             else:
                 incoming.extend(command)
+                if command == b"A\nBUILD?\n":
+                    stall = 100
         elif offset == 0 and not dlab:
             outgoing.append(value)
             drained = False
@@ -221,6 +241,7 @@ def smoke(image: bytes, ram: bool, tx_port: int) -> None:
     def at_rom(uc, address, size, user_data):
         nonlocal reached_rom
         assert drained
+        assert panel_samples >= 4, "panel timer starved during UART TX backpressure"
         assert not frames
         assert uc.mem_read(0xE01FC080, 4) == bytes(4)
         passive, active = bytes(outgoing).split(b"OK TX\r\n")
@@ -277,6 +298,10 @@ def smoke(image: bytes, ram: bool, tx_port: int) -> None:
     assert reached_rom, "firmware did not hand off to ROM"
     assert (0x28, 0x10) in writes  # fractional divider disabled during measurement
     assert cpu.mem_read(0xE002C000, 4) == struct.pack("<I", 5)  # UART0 pins only
+    painted = bytes(cpu.mem_read(floor, top - floor))
+    free = len(painted) - len(painted.lstrip(b"\xa5"))
+    assert free >= 256, f"only {free} untouched bytes between static tasks and stack"
+    return free
 
 
 if __name__ == "__main__":
@@ -285,6 +310,10 @@ if __name__ == "__main__":
     parser.add_argument("image", type=Path)
     args = parser.parse_args()
     image = args.image.read_bytes()
-    for port in range(5):
-        smoke(image, args.ram, port)
+    symbols = subprocess.check_output(["arm-none-eabi-nm", args.image.with_suffix("")], text=True)
+    addresses = {name: int(address, 16) for address, _, name in
+                 (line.split() for line in symbols.splitlines() if len(line.split()) == 3)}
+    stack = addresses["__bss_end"], addresses["__stack_top"]
+    free = min(smoke(image, args.ram, port, stack) for port in range(5))
     print("ARM image: panel, passive RX, independent TX/echo on all five ports, and ROM ISP handoff")
+    print(f"Minimum untouched stack in these scenarios: {free} of {stack[1] - stack[0]} bytes")

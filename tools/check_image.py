@@ -6,7 +6,7 @@ from pathlib import Path
 
 
 def check(image: bytes, ram: bool = False) -> None:
-    base, capacity = (0x40001000, 0x4000) if ram else (0, 0x10000)
+    base, capacity = (0x40001000, 0x5000) if ram else (0, 0x10000)
     if not 0x200 < len(image) <= capacity:
         raise ValueError("image outside the intended memory region")
     vectors = struct.unpack_from("<8I", image)

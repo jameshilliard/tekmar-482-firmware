@@ -1,6 +1,6 @@
 # tekmar 482 development firmware
 
-A minimal standalone Rust image for the LPC2146-based 482 with the 12 MHz
+A standalone Rust/Embassy image for the LPC2146-based 482 with the 12 MHz
 crystal. Installing it replaces the factory firmware. The development image
 uses UART0 for identification, passive tN4 capture, single-attempt native
 tN4 sends, and entry into ROM ISP. It does not implement tRPC.
@@ -18,14 +18,33 @@ Rustup selects stable Rust 1.100.0 and supplies matching rust-src. The
 [ARMv4T bare-metal target](https://doc.rust-lang.org/rustc/platform-support/armv4t-none-eabi.html)
 needs Cargo to build core from source. This still uses the unstable
 `-Zbuild-std=core` Cargo option: the Makefile sets `RUSTC_BOOTSTRAP=1` only
-on cross-build and cross-Clippy commands, not globally. There are no
-third-party firmware crates.
+on cross-build and cross-Clippy commands, not globally. The production
+runtime uses the Embassy revision pinned in Cargo.lock.
 `make image` alone builds the ELF, binary and Intel HEX under
 `target/armv4t-none-eabi/release/tekmar-482-firmware{,.bin,.hex}`. The linker
 limits flash to the first 64 KiB. The build checks the LPC vector checksum,
 ARM entry addresses, code read protection word, size and HEX round trip.
 `make check` also exercises the parser and runs the built image against a
 simulated UART up to the ROM entry point, not through the NXP ROM itself.
+Both images exercise all five capture/TX paths, UART backpressure and panel
+deadlines. The emulator also checks the remaining stack against a canary.
+
+### Execution model
+
+The ARM7TDMI port uses Embassy's cooperative thread executor, ARM7 IRQ/FIQ
+critical sections and portable atomics. The bridge task handles UART
+autobaud, commands, streaming and ROM handoff. It captures idle bus traffic
+while waiting on commands and replies. A separate timed task debounces the
+panel inputs and updates the indicators even while the bridge awaits UART
+space. The command and stream wire formats are unchanged.
+
+Embassy time uses the free-running PWM counter at 1 MHz and extends its
+32-bit ticks across wraps. Timer0 and Timer1 remain dedicated to tN4 edge
+capture and may restart on mode changes without moving Embassy time.
+Peripheral readiness is polled, not VIC interrupt driven: the executor
+spins and streaming yields after each bounded service pass. Link ACK
+slots and transmit edges are driven from the capture timers, not from
+Embassy task delays.
 
 `make ram-trial` builds the same prototype linked to run at SRAM address
 `0x40001000`. Its binary is under `target/ram-trial/armv4t-none-eabi/release/`.

@@ -1,6 +1,8 @@
 use super::super::transmit::{Attempt, LineDriver};
-use super::super::{LSR, THRE, UART0, hex};
+use super::super::{LSR, Line, THRE, UART0, hex};
 use super::{CCR, CR0, Capture, FIO0PIN, INPUTS, IR, TC, TIMERS, read, send, write};
+use core::cell::RefCell;
+use embassy_futures::yield_now;
 use tekmar_482_firmware::Stream;
 use tekmar_482_firmware::tn4::{Frame, LinkAck, Receiver, Trailer};
 
@@ -120,7 +122,7 @@ impl Receivers {
     }
 }
 
-pub fn stream(mode: &Stream, panel: &mut super::super::panel::Panel) {
+pub async fn stream(mode: &Stream, panel: &RefCell<super::super::panel::Panel>) {
     let mut out = Outbox {
         buf: [0; 1024],
         tail: 0,
@@ -134,16 +136,17 @@ pub fn stream(mode: &Stream, panel: &mut super::super::panel::Panel) {
         Stream::Ack(n) => {
             let p = usize::from(*n);
             let Some(pin) = LineDriver::claim(*n, INPUTS[p].0) else {
-                send(b"ERR ACK-PIN\r\n");
+                send(b"ERR ACK-PIN\r\n").await;
                 return;
             };
             listener = Some((p, pin));
-            send(b"OK ACK ");
-            send(&[b'0' + *n, b'\r', b'\n']);
+            let mut hello = *b"OK ACK 0\r\n";
+            hello[7] += *n;
+            send(&hello).await;
         }
-        Stream::Send(_) => send(b"OK TX\r\n"),
-        Stream::Diagnostic => send(b"OK DIAG\r\n"),
-        Stream::Passive => send(b"OK FRAMES\r\n"),
+        Stream::Send(_) => send(b"OK TX\r\n").await,
+        Stream::Diagnostic => send(b"OK DIAG\r\n").await,
+        Stream::Passive => send(b"OK FRAMES\r\n").await,
     }
     let mut receivers = Receivers::start();
     let request = if let Stream::Send(r) = mode {
@@ -169,7 +172,7 @@ pub fn stream(mode: &Stream, panel: &mut super::super::panel::Panel) {
             }
         }
         receivers.poll(now, diagnostic, |port, f| {
-            panel.observe(port);
+            panel.borrow_mut().observe(port);
             let local =
                 matches!(&listener, Some((p, _)) if *p == port) && ack.drove_frame(f.start_us);
             out.frame(port, f, local);
@@ -181,7 +184,7 @@ pub fn stream(mode: &Stream, panel: &mut super::super::panel::Panel) {
             driver.drive(high);
         }
         out.pump();
-        panel.poll();
+        yield_now().await;
     }
     read(UART0); // any byte stops capture; subsequent commands use normal training
     if attempt.take().is_some()
@@ -195,19 +198,19 @@ pub fn stream(mode: &Stream, panel: &mut super::super::panel::Panel) {
     drop(listener); // nested GPIO mask claims are restored in reverse order
     while out.len != 0 {
         out.pump();
+        yield_now().await;
     }
     if diagnostic {
         if let Stream::Ack(port) = mode {
-            send(&[b'K', b' ', b'0' + port]);
-            super::super::send_word(ack.pulses);
-            super::super::send_word(ack.late);
-            send(b"\r\n");
+            let mut line = Line::new(&[b'K', b' ', b'0' + port]);
+            line.words([ack.pulses, ack.late]);
+            line.send().await;
         }
         for (port, r) in receivers.rx.iter().enumerate() {
             let s = &r.stats;
             let pin = INPUTS[port].0;
-            send(&[b'D', b' ', b'0' + port as u8]);
-            for n in [
+            let mut line = Line::new(&[b'D', b' ', b'0' + port as u8]);
+            line.words([
                 s.edges,
                 s.starts,
                 s.stuffing,
@@ -221,19 +224,12 @@ pub fn stream(mode: &Stream, panel: &mut super::super::panel::Panel) {
                 u32::from(s.last_received_crc),
                 u32::from(s.last_expected_crc),
                 ((initial >> pin) & 1) | (((final_levels >> pin) & 1) << 1),
-            ] {
-                super::super::send_word(n);
-            }
+            ]);
             if let Some((start, body)) = r.last_crc_failure() {
-                super::super::send_word(start);
-                send(b" ");
-                for &byte in body {
-                    let mut digits = [0; 2];
-                    hex(&mut digits, u32::from(byte));
-                    send(&digits);
-                }
+                line.words([start]);
+                line.body(body);
             }
-            send(b"\r\n");
+            line.send().await;
         }
     }
     let mut end = *b"END 00000000\r\n";
@@ -241,5 +237,5 @@ pub fn stream(mode: &Stream, panel: &mut super::super::panel::Panel) {
         &mut end[4..12],
         out.dropped.into_iter().fold(0, u32::saturating_add),
     );
-    send(&end);
+    send(&end).await;
 }

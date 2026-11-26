@@ -2,10 +2,10 @@ ENTRY(_start)
 MEMORY {
     /* Stay inside the sectors erased by the stock J1196J updater. */
     IMAGE (rx) : ORIGIN = DEFINED(__ram_trial) ? 0x40001000 : 0,
-                 LENGTH = DEFINED(__ram_trial) ? 16K : 64K
+                 LENGTH = DEFINED(__ram_trial) ? 20K : 64K
     /* Leave the bottom 0x200 and top 0x120 bytes to the bootloader. */
-    RAM (rw) : ORIGIN = DEFINED(__ram_trial) ? 0x40005000 : 0x40000200,
-               LENGTH = DEFINED(__ram_trial) ? 0x2ee0 : 0x7ce0
+    RAM (rw) : ORIGIN = DEFINED(__ram_trial) ? 0x40006000 : 0x40000200,
+               LENGTH = DEFINED(__ram_trial) ? 0x1ee0 : 0x7ce0
 }
 SECTIONS {
     .vectors ORIGIN(IMAGE) : { KEEP(*(.vectors)) } > IMAGE

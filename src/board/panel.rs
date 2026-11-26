@@ -1,5 +1,5 @@
 //! The six stock active-low indicators; never configure a tN4 driver pin here.
-use super::{PCONP, PINSEL0, read, send, send_word, write};
+use super::{PCONP, PINSEL0, read, write};
 
 const SCS: usize = 0xe01f_c1a0;
 const PINSEL2: usize = 0xe002_c014;
@@ -31,7 +31,7 @@ fn inputs() -> u8 {
     u8::from(low & DIP != 0) | (u8::from(low & BUTTON != 0) << 1)
 }
 
-fn now() -> u32 {
+pub(crate) fn now() -> u32 {
     read(PWM + 8)
 }
 
@@ -44,7 +44,6 @@ pub struct Panel {
     saved_mask0: u32,
     saved_mask1: u32,
     saved_power: u32,
-    last_tick: u32,
     last_sample: u8,
     stable: u8,
     boot: u8,
@@ -92,7 +91,6 @@ impl Panel {
             saved_mask0,
             saved_mask1,
             saved_power,
-            last_tick: now(),
             last_sample: boot,
             stable: boot,
             boot,
@@ -123,10 +121,6 @@ impl Panel {
 
     pub fn poll(&mut self) {
         let time = now();
-        if time.wrapping_sub(self.last_tick) < 20_000 {
-            return;
-        }
-        self.last_tick = time;
         let sample = inputs();
         if sample == self.last_sample && sample != self.stable {
             if (sample ^ self.stable) & 1 != 0 {
@@ -158,7 +152,7 @@ impl Panel {
         self.show(mask);
     }
 
-    pub fn report(&self) {
+    pub fn report(&self) -> [u32; 7] {
         let pin_state = !read(FIO1 + PIN);
         let mut actual = 0;
         for (i, pin) in PINS.iter().enumerate() {
@@ -166,8 +160,7 @@ impl Panel {
                 actual |= 1 << i;
             }
         }
-        send(b"PANEL");
-        for v in [
+        [
             u32::from(self.boot),
             u32::from(self.stable),
             self.presses,
@@ -175,10 +168,7 @@ impl Panel {
             u32::from(self.lit),
             actual,
             u32::from(self.test_start.is_some()),
-        ] {
-            send_word(v);
-        }
-        send(b"\r\n");
+        ]
     }
 
     pub fn stop(&mut self) {

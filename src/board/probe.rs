@@ -70,7 +70,7 @@ impl Capture {
         saved
     }
 
-    pub fn report(self) {
+    pub fn finish(self) -> [u32; 8] {
         for t in TIMERS {
             write(t + CCR, 0);
             write(t + TCR, 0);
@@ -85,12 +85,8 @@ impl Capture {
                 stamps[port] = read(TIMERS[timer] + CR0 + 4 * channel);
             }
         }
-        drop(self); // release the peripherals before the potentially slow serial reply
-        send(b"RX");
-        for word in elapsed.into_iter().chain([seen]).chain(stamps) {
-            super::send_word(word);
-        }
-        send(b"\r\n");
+        let [a, b, c, d, e] = stamps;
+        [elapsed[0], elapsed[1], seen, a, b, c, d, e]
     }
 }
 
