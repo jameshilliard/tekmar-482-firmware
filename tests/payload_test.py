@@ -16,6 +16,7 @@ from payloads.queries import NativeStatusQuery, ReplyPart, SnowmeltRole, StatusR
 from payloads.scenes import NativeScene, SceneReport, SceneResponse
 from payloads.schedules import DailyEvents, ScheduleBinding, ScheduleCycle, ScheduleEvent, ScheduleProfile
 from payloads.sensors import SensorRole as R, SensorSlot, ThermostatSensors
+from payloads.snowmelt import SnowmeltAddress, SnowmeltApplication, SnowmeltOperatingState, SnowmeltPair, SnowmeltReport, WaterDetection
 from payloads.water import HeatSource, LoopAssignment, LoopKind, LoopSetupSlot, LoopTopology
 from payloads.writes import BlockPatch, NativeField as F, WritableBlock
 
@@ -25,6 +26,40 @@ def decode(mid, hex_bytes):
 
 
 class PayloadTests(unittest.TestCase):
+    def test_snowmelt_endpoints_are_one_based_and_roles_are_independent(self):
+        for role in SnowmeltRole:
+            for n in (1, role.maximum):
+                addr = SnowmeltAddress(role, n)
+                self.assertEqual(SnowmeltAddress.from_report(addr.request_byte + 8), addr)
+            for n in (0, role.maximum + 1):
+                self.assertIsNone(SnowmeltAddress.from_report(n << 3 | role))
+        self.assertIsNone(SnowmeltAddress.from_report(0x1b))
+        for app in SnowmeltApplication:
+            query = NativeStatusQuery.for_snowmelt_device(app, 3)
+            self.assertEqual(query.keys, app.status_keys)
+            self.assertEqual(query.payload[0], 0x12 if app is SnowmeltApplication.SENSOR_ONLY else 0x11)
+
+    def test_snowmelt_pairs_retain_order_raw_words_and_faults(self):
+        payload = bytes.fromhex("19 05 220006 2200c0 1b1204 9900ca 190400 35")
+        r = Reader(payload)
+        report = SnowmeltReport.read(r)
+        self.assertEqual(report.address, SnowmeltAddress(SnowmeltRole.ZONE, 3))
+        self.assertEqual([p.key for p in report.pairs], [0x22, 0x22, 0x1b, 0x99, 0x19])
+        self.assertEqual(report.pairs[0].temperature_f, 68.6)
+        self.assertIsNone(report.pairs[1].temperature_f)
+        self.assertEqual(report.pairs[2].operating_state, SnowmeltOperatingState.MELTING)
+        self.assertEqual(report.pairs[4].water_detection, WaterDetection.OPEN)
+        self.assertEqual(r.remaining, b"\x35")
+        fields = decode_payload(0x17e, payload)
+        self.assertEqual((fields["pair2_operating_substate"], fields["pair3_value_raw"],
+                          fields["pair4_water_detect_state_name"], fields["extension_hex"]),
+                         (0x12, 0xca00, "open", "35"))
+        self.assertEqual([SnowmeltPair(0x2a, n).pump_on for n in (0, 1, 2)], [False, True, None])
+        self.assertIsNone(SnowmeltPair(0x2b, 1).pump_on)
+        self.assertIsNone(SnowmeltPair(0x19, 0xab03).water_detection)
+        self.assertIsNone(SnowmeltPair(0x1b, 0x1204).operating_state)
+        self.assertIn("truncated", decode_payload(0x17e, payload[:-2]))
+
     def test_air_group_mode_is_not_the_thermostat_setting(self):
         member = bytes.fromhex("a4 62 2a 0000 07 0080 aa")
         r = Reader(member)

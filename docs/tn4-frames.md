@@ -328,6 +328,16 @@ sets. They are useful requests, not a promise that every key is reported.
 The six-bit frame length fits at most 61 request keys or 20 report pairs.
 Multiple reports can contribute; a missing key is unknown, not zero.
 
+A single native source can emit **both** a zone report and a sensor
+report, even using the same configured number. SW 11 uses the zone's slab
+and water measurements for a control application and the sensor's for a
+sensor-only application. Keep each `(physical port, subnet, node, report
+role, report number)` separate. Match the currently configured endpoint
+before presenting a primary measurement. Within a report the triples are
+ordered, including duplicate keys; the last occurrence updates the value.
+An unknown role/number or a short final triple must not update device
+state. Trailing bytes after the declared count are extensions, not keys.
+
 Each value occupies two bytes even when it carries a small enum or a flag.
 The decoder does not convert a raw word to a percentage or temperature
 unless its encoding is known.
@@ -335,14 +345,14 @@ unless its encoding is known.
 | Hex key | Value |
 | --- | --- |
 | 01..18 | Command status; retain the individual key |
-| 19, 1a | Water detection, heat sequence |
+| 19, 1a | Water detection, heat sequence. For 19 the 483 names 1 absent, 2 dry, 3 wet, 4 open, 5 short and 6 overheated. Preserve the raw word for other states; an electrical fault is not a dry sensor. |
 | 1b | Operating substate in low byte, state in high byte (1 off, 2 idle, 3 storm, 4 melting) |
 | 1c, 1d, 1e, 1f | Warm-weather shutdown, cold-weather cutoff, zone type, electric off-time (15-second ticks) |
 | 20, 21 | Zone ID, sensor flags |
 | 22, 23, 24 | Slab temperature, slab setpoint, edge temperature (H) |
 | 25, 26 | Melt and storm group IDs |
 | 27, 28, 29 | Boiler, mixing and PWM outputs, raw |
-| 2a, 2b | System pump and alert-relay contacts |
+| 2a, 2b | System pump and alert-relay contacts. For 2a the 483 recognizes 0 off, 1 on. Do not infer pump state from output level or group demand. |
 | 2c, 2d, 2e | Return, supply and supply target temperatures (H); the 483 maps these keys to its degH temperature model. |
 | 2f, 30 | Keep-alive, melting time (minutes) |
 | Others | Preserve key and raw u16 |

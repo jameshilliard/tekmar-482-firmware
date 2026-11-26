@@ -26,11 +26,13 @@ RAW_SENDS = (SCENE, bytes.fromhex("21f00002 0401"), bytes.fromhex("31f00005 1ebf
              bytes.fromhex("01000003 000102"), bytes.fromhex("20000001 01"))
 WEEK_QUERY = bytes.fromhex("6d70000b 100000 00008000 00000000")
 WEEK_REPORT = bytes.fromhex("6e70060a 10007f 90020304050607")
-TELEMETRY = {1: bytes.fromhex("7cf25fca bc07 00c0 0000 19ff f9 ca"),
-             3: bytes.fromhex("7ce25fcb bc07 00c0 0000 19ff f9 ca35"),
-             2: bytes.fromhex("76f250c8 a4 62 2a 0000 07 0080"),
-             4: bytes.fromhex("777250cd 65 88 07 00 2c06 13 ff 00c0 e4 b005"),
-             0: bytes.fromhex("6e7250c6 030007 07 03 05")}
+TELEMETRY = ((1, bytes.fromhex("7cf25fca bc07 00c0 0000 19ff f9 ca")),
+             (3, bytes.fromhex("7ce25fcb bc07 00c0 0000 19ff f9 ca35")),
+             (2, bytes.fromhex("76f250c8 a4 62 2a 0000 07 0080")),
+             (4, bytes.fromhex("777250cd 65 88 07 00 2c06 13 ff 00c0 e4 b005")),
+             (0, bytes.fromhex("6e7250c6 030007 07 03 05")),
+             (0, bytes.fromhex("57e250cc 19 03 220006 220106 1b1704 ca")),
+             (0, bytes.fromhex("57e250c8 1a 02 22ff05 190300")))
 
 def protected_bits(body):
     data = "".join(f"{byte:08b}" for byte in body)
@@ -237,7 +239,7 @@ def run(path, ram, fast=False):
     invalid = set()
     results = set()
     weekly = set()
-    telemetry_ports = set()
+    telemetry = []
     overlap = False
     phase = "capture"
 
@@ -253,7 +255,7 @@ def run(path, ram, fast=False):
         nonlocal phase
         phase = "telemetry"
         after = None
-        for p, body in TELEMETRY.items():
+        for p, body in TELEMETRY:
             after = inject(body, p, after=after)
 
     def reply(kind, data):
@@ -464,9 +466,9 @@ def run(path, ram, fast=False):
             invalid.add(p)
         elif service == 0:
             if phase == "telemetry":
-                assert p not in telemetry_ports and data[6:] == TELEMETRY[p]
-                telemetry_ports.add(p)
-                if telemetry_ports == TELEMETRY.keys():
+                assert (p, data[6:]) == TELEMETRY[len(telemetry)]
+                telemetry.append((p, data[6:]))
+                if len(telemetry) == len(TELEMETRY):
                     extension(2, bytes(1), True)
                     at_line_rate()
                 return
@@ -591,7 +593,7 @@ def run(path, ram, fast=False):
     for p in range(5):
         assert (6, bytes.fromhex("0403f04b54") + bytes([p]) + bytes(8)) in actual
     assert weekly == {"result", "report"} and actual[-1] == (6, bytes.fromhex("0305f04b54"))
-    assert telemetry_ports == TELEMETRY.keys()
+    assert tuple(telemetry) == TELEMETRY
     painted = bytes(cpu.mem_read(floor, top - floor))
     free = len(painted) - len(painted.lstrip(b"\xa5"))
     assert free >= 256, free
