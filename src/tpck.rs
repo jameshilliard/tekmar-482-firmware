@@ -1,6 +1,7 @@
 //! UART framing shared by vendor tRPC and the binary raw bridge.
 pub mod raw;
 pub mod trace;
+use crate::diagnostics::errors::HostError;
 
 const MAX_PAYLOAD: usize = u8::MAX as usize;
 pub const SOF: u8 = 0xca;
@@ -82,16 +83,22 @@ impl Decoder {
         self.escaped = false;
     }
 
-    pub fn push(&mut self, byte: u8) -> Option<Packet<'_>> {
+    pub fn push(&mut self, byte: u8, mut fault: impl FnMut(HostError)) -> Option<Packet<'_>> {
         if !self.escaped {
             match byte {
                 SOF => {
+                    if !matches!(self.state, State::Idle | State::Length) {
+                        fault(HostError::TpckResync);
+                    }
                     self.state = State::Length;
                     return None;
                 }
                 _ if self.state == State::Idle => return None,
                 EOF => {
                     let valid = self.state == State::End;
+                    if !valid {
+                        fault(HostError::TpckFraming);
+                    }
                     self.reset();
                     return valid.then(|| Packet {
                         kind: self.kind,
@@ -133,7 +140,15 @@ impl Decoder {
                 }
             }
             State::Checksum if byte == self.sum => State::End,
-            _ => State::Idle,
+            State::Checksum => {
+                fault(HostError::TpckChecksum);
+                State::Idle
+            }
+            State::End => {
+                fault(HostError::TpckFraming);
+                State::Idle
+            }
+            State::Idle => State::Idle,
         };
         None
     }
@@ -150,7 +165,7 @@ mod tests {
             let mut decoder = Decoder::default();
             let mut packets = 0;
             encode(ESC, &payload[..n], |byte| {
-                if let Some(p) = decoder.push(byte) {
+                if let Some(p) = decoder.push(byte, |_| panic!("valid packet")) {
                     assert_eq!(p.kind, ESC);
                     assert_eq!(p.data, &payload[..n]);
                     packets += 1;
@@ -160,6 +175,26 @@ mod tests {
             assert_eq!(packets, 1);
         }
         assert_eq!(encode(1, &[0; 256], |_| panic!()), Err(TooLong));
+    }
+
+    #[test]
+    fn faults_discard_one_packet_and_training_is_not_a_fault() {
+        let mut decoder = Decoder::default();
+        let mut faults = heapless::Vec::<u8, 4>::new();
+        let mut good = 0;
+        for b in [
+            SOF, SOF, SOF, 0, 1, 2, EOF, SOF, 9, EOF, SOF, 0, 0, 0, 1, EOF, SOF, 2, 1, SOF, 0, 0,
+            0, EOF,
+        ] {
+            if decoder
+                .push(b, |code| faults.push(code as u8).unwrap())
+                .is_some()
+            {
+                good += 1;
+            }
+        }
+        assert_eq!(good, 1);
+        assert_eq!(&faults[..], [0x84, 0x85, 0x85, 0x86]);
     }
 
     #[test]
@@ -173,24 +208,24 @@ mod tests {
             &[SOF, 9, 8],
         ] {
             for &b in data {
-                assert!(d.push(b).is_none());
+                assert!(d.push(b, |_| {}).is_none());
             }
         }
         for b in [SOF, 2, ESC, ESC, ESC, SOF, ESC, EOF, 0x30] {
-            assert!(d.push(b).is_none());
+            assert!(d.push(b, |_| {}).is_none());
         }
         assert_eq!(
-            d.push(EOF),
+            d.push(EOF, |_| panic!()),
             Some(Packet {
                 kind: ESC,
                 data: &[SOF, EOF]
             })
         );
         for b in [SOF, 1, 1, 0x33, ESC, EOF] {
-            assert!(d.push(b).is_none());
+            assert!(d.push(b, |_| {}).is_none());
         }
         assert_eq!(
-            d.push(EOF),
+            d.push(EOF, |_| panic!()),
             Some(Packet {
                 kind: 1,
                 data: &[0x33]

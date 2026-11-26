@@ -1,4 +1,5 @@
 use super::{PINSEL0, lpc2146::gpio, read, write};
+use tekmar_482_firmware::diagnostics::errors::{ErrorBook, LineError};
 use tekmar_482_firmware::tn4::PORT_COUNT;
 use tekmar_482_firmware::tn4::tx::{Action, Mode, Outcome, Request, Sender};
 
@@ -22,7 +23,7 @@ pub(super) struct LineDriver {
 }
 
 impl LineDriver {
-    pub(super) fn claim(port: u8, rx_pin: u32) -> Option<Self> {
+    pub(super) fn claim(port: u8, rx_pin: u32, errors: &mut ErrorBook, ms: u32) -> Option<Self> {
         let pin = TX_PINS[usize::from(port)];
         let tx = 1 << pin;
         let rx = 1 << rx_pin;
@@ -32,6 +33,7 @@ impl LineDriver {
                 & gpio::MUX_MASK
                 != 0
         {
+            errors.line(usize::from(port), LineError::PinUnavailable, ms);
             return None; // not an unclaimed GPIO input
         }
         let mask = read(MASK);
@@ -88,9 +90,16 @@ impl Attempt {
         }
     }
 
-    pub(super) fn new(request: &Request, rx_pin: u32, now: u32, mode: Mode) -> Option<Self> {
+    pub(super) fn new(
+        request: &Request,
+        rx_pin: u32,
+        now: u32,
+        mode: Mode,
+        errors: &mut ErrorBook,
+        ms: u32,
+    ) -> Option<Self> {
         Some(Self {
-            pin: LineDriver::claim(request.port, rx_pin)?,
+            pin: LineDriver::claim(request.port, rx_pin, errors, ms)?,
             sender: Sender::new(request, now, mode),
         })
     }

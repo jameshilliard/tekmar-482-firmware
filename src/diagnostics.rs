@@ -2,6 +2,8 @@
 //! hardware capture registers and pin masks remain u32.
 use crate::tn4::PORT_COUNT;
 
+pub mod errors;
+
 pub const CAPTURE_BYTES: usize =
     (2 + PORT_COUNT) * size_of::<u32>() + PORT_COUNT * size_of::<u64>();
 pub const PANEL_BYTES: usize = 5 * size_of::<u32>() + 2 * size_of::<u64>();

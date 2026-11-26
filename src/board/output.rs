@@ -1,5 +1,6 @@
 //! Bounded binary UART records. Only an unstarted record may be displaced.
-use super::{lpc2146::uart0, read, write};
+use super::{lpc2146::uart0, write};
+use tekmar_482_firmware::diagnostics::errors::{ErrorBook, LineError};
 use tekmar_482_firmware::tn4::{MAX_BYTES, PORT_COUNT};
 const REPORT_WATERMARK: usize = 2;
 const RX_WATERMARK: usize = 6;
@@ -19,6 +20,7 @@ pub(super) enum Kind {
     Overlap(u8),
     Control,
     Trace,
+    Diagnostic,
     Fence,
     Reboot,
 }
@@ -35,8 +37,7 @@ pub(super) struct Output {
     len: usize,
     traces: usize,
     offset: usize,
-    pub(super) drops: [[u64; 2]; PORT_COUNT],
-    pub(super) trace_drops: [u64; PORT_COUNT],
+    diagnostic: bool,
 }
 
 impl Output {
@@ -55,8 +56,7 @@ impl Output {
                 len: 0,
                 traces: 0,
                 offset: 0,
-                drops: [[0; 2]; PORT_COUNT],
-                trace_drops: [0; PORT_COUNT],
+                diagnostic: false,
             });
         QUEUE.take()
     }
@@ -66,9 +66,20 @@ impl Output {
     pub(super) fn can_receive(&self) -> bool {
         self.len - self.traces < COMMAND_WATERMARK
     }
-    pub(super) fn trace(&mut self, event: u8, p: usize, ms: u32, detail: &[u8], body: &[u8]) {
+    pub(super) fn can_diagnose(&self) -> bool {
+        !self.diagnostic && self.can_report()
+    }
+    pub(super) fn trace(
+        &mut self,
+        event: u8,
+        p: usize,
+        ms: u32,
+        detail: &[u8],
+        body: &[u8],
+        errors: &mut ErrorBook,
+    ) {
         if self.traces == TRACE_SLOTS {
-            self.trace_drops[p] = self.trace_drops[p].saturating_add(1);
+            errors.line(p, LineError::TraceDrop, ms);
             return;
         }
         // Invalid frames include a reason, bit count and up to two CRC bytes.
@@ -84,14 +95,13 @@ impl Output {
         self.enqueue(Kind::Trace, tpck::NORMAL_TRACE, &data[..len]);
         self.traces += 1;
     }
-    fn lost(&mut self, kind: Kind) {
-        let (p, i) = match kind {
-            Kind::Rx(p) => (p, 0),
-            Kind::Invalid(p) => (p, 1),
+    fn lost(kind: Kind, ms: u32, errors: &mut ErrorBook) {
+        let (p, code) = match kind {
+            Kind::Rx(p) => (p, LineError::RawValidDrop),
+            Kind::Invalid(p) => (p, LineError::RawInvalidDrop),
             _ => unreachable!(),
         };
-        let n = &mut self.drops[usize::from(p)][i];
-        *n = n.saturating_add(1);
+        errors.line(usize::from(p), code, ms);
     }
     fn remove(&mut self, pos: usize) -> Kind {
         let slot = self.order[pos];
@@ -103,37 +113,47 @@ impl Output {
         let kind = self.records[usize::from(slot)].kind;
         if kind == Kind::Trace {
             self.traces -= 1;
+        } else if kind == Kind::Diagnostic {
+            self.diagnostic = false;
         }
         kind
     }
-    pub(super) fn enqueue(&mut self, kind: Kind, ty: u8, data: &[u8]) {
+    pub(super) fn capture(&mut self, kind: Kind, data: &[u8], ms: u32, errors: &mut ErrorBook) {
         let first = usize::from(self.offset != 0);
-        if matches!(kind, Kind::Rx(_) | Kind::Invalid(_)) && self.len - self.traces >= RX_WATERMARK
-        {
+        if self.len - self.traces >= RX_WATERMARK {
             if matches!(kind, Kind::Rx(_))
                 && let Some(i) = self.order[first..self.len]
                     .iter()
                     .position(|&s| matches!(self.records[usize::from(s)].kind, Kind::Invalid(_)))
             {
                 let old = self.remove(first + i);
-                self.lost(old);
+                Self::lost(old, ms, errors);
             } else {
-                self.lost(kind);
+                Self::lost(kind, ms, errors);
                 return;
             }
         }
+        self.enqueue(kind, tpck::TN4, data);
+    }
+    pub(super) fn enqueue(&mut self, kind: Kind, ty: u8, data: &[u8]) {
+        let first = usize::from(self.offset != 0);
         let pos = if let Kind::Overlap(port) = kind {
             self.order[first..self.len]
                 .iter()
                 .position(|&s| self.records[usize::from(s)].kind == Kind::Result(port))
                 .map(|n| first + n)
-        } else if kind == Kind::Control && self.traces != 0 {
+        } else if kind == Kind::Control && (self.traces != 0 || self.diagnostic) {
             // Control may overtake pending diagnostics, but never a partial
             // frame, a trace configuration fence, or an older control record.
             Some(
                 self.order[first..self.len]
                     .iter()
-                    .rposition(|&s| self.records[usize::from(s)].kind != Kind::Trace)
+                    .rposition(|&s| {
+                        !matches!(
+                            self.records[usize::from(s)].kind,
+                            Kind::Trace | Kind::Diagnostic
+                        )
+                    })
                     .map_or(first, |i| first + i + 1),
             )
         } else {
@@ -150,14 +170,22 @@ impl Output {
             self.order.swap(i, i + 1);
         }
         self.len += 1;
+        if kind == Kind::Diagnostic {
+            self.diagnostic = true;
+        }
     }
-    pub(super) fn pump(&mut self) -> Option<Kind> {
+    pub(super) fn pump(
+        &mut self,
+        uart: &mut super::UartRx,
+        errors: &mut ErrorBook,
+        ms: u32,
+    ) -> Option<Kind> {
         if self.len == 0 {
             return None;
         }
         let r = &self.records[usize::from(self.order[0])];
         if self.offset < r.bytes.len() {
-            if read(uart0::LSR) & uart0::THRE == 0 {
+            if uart.status(errors, ms) & uart0::THRE == 0 {
                 return None;
             }
             let end = (self.offset + uart0::FIFO_BYTES).min(r.bytes.len());
@@ -169,7 +197,9 @@ impl Output {
         if self.offset != r.bytes.len() {
             return None;
         }
-        if matches!(r.kind, Kind::Result(_) | Kind::Reboot) && read(uart0::LSR) & uart0::TEMT == 0 {
+        if matches!(r.kind, Kind::Result(_) | Kind::Reboot)
+            && uart.status(errors, ms) & uart0::TEMT == 0
+        {
             return None;
         }
         self.offset = 0;

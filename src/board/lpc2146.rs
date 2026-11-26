@@ -16,7 +16,11 @@ pub mod uart0 {
     pub const FORMAT_8N1: u32 = 3;
     pub const DLAB: u32 = 1 << 7;
     pub const RX_READY: u32 = 1;
-    pub const RX_ERRORS: u32 = 0x1e; // overrun, parity, framing, break
+    pub const OVERRUN: u32 = 1 << 1;
+    pub const PARITY: u32 = 1 << 2;
+    pub const FRAMING: u32 = 1 << 3;
+    pub const BREAK: u32 = 1 << 4;
+    pub const RX_ERRORS: u32 = OVERRUN | PARITY | FRAMING | BREAK;
     pub const THRE: u32 = 1 << 5;
     pub const TEMT: u32 = 1 << 6;
     pub const AUTOBAUD_START: u32 = 1;

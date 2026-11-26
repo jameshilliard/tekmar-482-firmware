@@ -82,13 +82,41 @@ mod board {
         write(uart0::TER, uart0::TX_ENABLE);
     }
 
-    pub fn try_receive() -> Result<Option<u8>, ()> {
-        let status = read(uart0::LSR);
-        let byte = (status & uart0::RX_READY != 0).then(|| read(uart0::DATA) as u8);
-        if status & uart0::RX_ERRORS != 0 {
-            Err(())
-        } else {
-            Ok(byte)
+    use tekmar_482_firmware::diagnostics::errors::{ErrorBook, HostError};
+
+    #[derive(Default)]
+    struct UartRx {
+        damaged: bool,
+    }
+
+    impl UartRx {
+        // LSR clears receive error flags even when read just to check TX readiness.
+        fn status(&mut self, errors: &mut ErrorBook, ms: u32) -> u32 {
+            let status = read(uart0::LSR);
+            if status & uart0::RX_ERRORS != 0 {
+                self.damaged = true;
+                for (flag, reason) in [
+                    (uart0::OVERRUN, HostError::UartOverrun),
+                    (uart0::PARITY, HostError::UartParity),
+                    (uart0::FRAMING, HostError::UartFraming),
+                    (uart0::BREAK, HostError::UartBreak),
+                ] {
+                    if status & flag != 0 {
+                        errors.host(reason, ms);
+                    }
+                }
+            }
+            status
+        }
+
+        fn try_receive(&mut self, errors: &mut ErrorBook, ms: u32) -> Result<Option<u8>, ()> {
+            let status = self.status(errors, ms);
+            let byte = (status & uart0::RX_READY != 0).then(|| read(uart0::DATA) as u8);
+            if core::mem::take(&mut self.damaged) {
+                Err(())
+            } else {
+                Ok(byte)
+            }
         }
     }
 

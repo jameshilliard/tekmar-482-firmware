@@ -30,7 +30,7 @@ that many payload bytes, and the low eight bits of their sum including
 length and type. Prefix every interior CA, 35 or 2F byte with 2F, including
 length and checksum. Wrap the result in CA and 35. An unescaped CA restarts
 the decoder. Dispatch only on a valid checksum followed immediately by an
-unescaped 35. An invalid frame has no reply or side effects.
+unescaped 35. An invalid frame never executes a command or receives a reply.
 
 Frames may follow each other with no inter-frame delay. In particular, a host
 can submit one Send on each of several different ports without waiting for the
@@ -50,7 +50,7 @@ the request body is empty. All integers are little endian.
 | --- | --- | --- |
 | 00000187 FirmwareRevision | Request, zero or two placeholder bytes | u16 numeric revision, 0 for this unnumbered custom image |
 | 0000018F ProtocolVersion | Request, zero or two placeholder bytes | u16 tHA protocol version, currently 3 |
-| 544BF001 BridgeCapabilities | Request | Four u8 values: extension wire version (2), current mode (0 Normal, 1 Raw), port count (5), feature flags (bit 0 bidirectional Raw, bit 1 ROM update, bit 2 Normal trace) |
+| 544BF001 BridgeCapabilities | Request | Four u8 values: extension wire version (2), current mode (0 Normal, 1 Raw), port count (5), feature flags (bit 0 bidirectional Raw, bit 1 ROM update, bit 2 Normal trace, bit 3 error reporting) |
 | 544BF002 SetBridgeMode | Update, mode u8 | Echo mode: 0 Normal, 1 Raw. Busy during an inventory walk, a started transmission, an outstanding host send or a local ACK. Switching modes clears the Normal inventory; returning to Normal also clears the ACK mask. |
 | 544BF003 PortDrops | Request, port u8 | Port u8, valid records dropped u64, invalid records dropped u64. |
 | 544BF004 FirmwareBuild | Request | Build revision without a terminator: 40 lowercase hexadecimal digits or `unversioned` |
@@ -61,6 +61,7 @@ the request body is empty. All integers are little endian.
 | 544BF009 LinkAckMask | Update, mask u8 in Raw mode | Echo mask (bit N for port N). Zero disables local ACK. |
 | 544BF00A CaptureCounters | Request | Two timer readings in microseconds (u32), five edge counts (u64), five last capture ticks (u32); both port arrays in physical port order. |
 | 544BF00B NormalTrace | Request, empty; Update, port mask u8 | Normal only. Request returns the mask and five cumulative u64 trace-drop counts in port order. Update replaces the mask and echoes it; zero stops tracing. |
+| 544BF00C ErrorReporting | Request, Update, Report | Both modes. Read/replace the source mask, read one error counter, or receive changed counters (below). |
 
 Version 2 event counts start at zero at boot, survive mode changes and
 saturate at 2^64-1 instead of wrapping. Subtract snapshots from the same
@@ -81,7 +82,7 @@ Byte-exact frames (spaces separate fields, not transmitted bytes):
 ProtocolVersion request:   CA 07 06 01 8F010000 0000 9E 35
 ProtocolVersion response:  CA 07 06 04 8F010000 0300 A4 35
 BridgeCapabilities:        CA 05 06 01 01F04B54 9C 35
-Normal, Raw/update/trace:  CA 09 06 04 01F04B54 02000507 B1 35
+Normal, all four features: CA 09 06 04 01F04B54 0200050F B9 35
 EnterFirmwareUpdate:       CA 05 06 00 05F04B54 9F 35
 Drained before handoff:    CA 05 06 03 05F04B54 A2 35
 ```
@@ -133,3 +134,36 @@ Trace has three dedicated slots; a full queue drops new trace records,
 increments the affected port's lifetime drop counter and leaves Normal
 operations running. Counters do not include Raw-mode drops. Restrict the
 port mask or use a higher negotiated baud on busy installations.
+
+## Error reporting
+
+Independent of stock reporting, Normal trace, Raw capture and the ACK mask.
+Off at boot; switching between Normal and Raw leaves the selection intact.
+There is no subscription in ROM ISP. A disconnected host cannot clear its
+selection; a subsequent host can read or replace it without switching modes.
+
+- Request with no body: returns the one-byte source mask. Update with one
+  byte: replace and echo the mask. Bits 0..4 select physical ports; bit 5
+  selects the gateway itself. Zero stops reports; reserved bits are rejected.
+- Request with two bytes, source and reason: returns that counter, even
+  when disabled. An invalid source/reason combination is rejected.
+- Response to a counter read and unsolicited Report (service 02) use
+  identical bodies: source u8, reason u8, last observation uptime in ms u32,
+  lifetime count u64. A zero count means never observed. The timestamp wraps.
+
+| Source | Reason codes (hex) |
+| --- | --- |
+| Port 0..4: receive | 01 stuffing, 02 CRC, 03 CRC delimiter, 04 bad end, 05 valid frame without link ACK (can include own echo), 06 early start, 07 onset of stuck dominant, 08 local link response drive fault |
+| Port 0..4: transmit | 09 no ACK, 0A arbitration lost, 0B echo mismatch, 0C bad end, 0D missed timing, 0E pin unavailable |
+| Port 0..4: output loss | 0F Raw valid record dropped, 10 Raw invalid record dropped, 11 Normal trace dropped. Same totals as PortDrops and NormalTrace. |
+| Gateway (5) | 80 UART overrun, 81 parity, 82 framing, 83 break, 84 TPCK checksum, 85 TPCK framing, 86 new SOF interrupting a partial packet, 87 pending address-change notice evicted |
+
+Counters start at boot, not at subscription. Enabling does not replay old
+events. While enabled, repeats of a source/reason can share a single report
+with the latest timestamp and total. Change the mask to zero to stop the
+stream; already queued reports precede the acknowledgement. This is not a
+frame log: diagnostics yield to normal traffic. Use trace or Raw capture
+for frame bytes. Neither no ACK nor arbitration loss alone proves a fault.
+TX totals count physical attempts, not host commands. UART counters count
+hardware flag assertions, not the number of missing bytes (see the UART0
+line status register in [NXP UM10139](https://www.nxp.com/docs/en/user-guide/UM10139.pdf)).

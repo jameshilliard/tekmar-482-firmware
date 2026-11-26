@@ -452,6 +452,10 @@ def run(path, ram, fast=False):
     reads = deque(RAW_READS)
     read_events = set()
     telemetry = []
+    error_reports = []
+    error_reads = []
+    error_masks = []
+    uart_rx_fault = 0
     overlap = False
     phase = "line-cold"
 
@@ -509,6 +513,7 @@ def run(path, ram, fast=False):
             telemetry_capture()
 
     def reply(kind, data):
+        nonlocal uart_rx_fault
         nonlocal trace_resume, trace_check_at
         nonlocal phase, overlap, raw_mode, raw_ack_mask, uptime_offset, retry_isp_at
         if kind == 0xd0:
@@ -527,6 +532,24 @@ def run(path, ram, fast=False):
             method = int.from_bytes(data[1:5], "little")
             if method == 0x544BF004:
                 line_progress()
+                extension(12)
+                extension(12, bytes.fromhex("0584"))
+                extension(12, b"\x24", True)  # port 2 and gateway
+            elif method == 0x544bf00c:
+                if data[0] == 2:
+                    source, code, ms, count = struct.unpack("<BBIQ", data[5:])
+                    assert source in (2, 5) and count > 0
+                    error_reports.append((raw_mode, source, code, ms, count))
+                    actual.pop()  # independent of the ordinary reply ordering assertions
+                elif data[0] == 4 and len(data[5:]) != 1:
+                    error_reads.append(struct.unpack("<BBIQ", data[5:]))
+                else:
+                    error_masks.append((data[0], data[5:]))
+                    if data[0] == 3 and data[5:] == b"\x24":
+                        # The next LSR read (including a TX poll) clears the flags.
+                        uart_rx_fault = 0x12  # overrun and break
+                        incoming.append(0)
+                        incoming.extend(corrupt)
             elif method == 0x167 and data[5:] == bytes(2):
                 assert actual[-2] == (6, bytes.fromhex("04670100000100"))
                 call(0x197, bytes.fromhex("010000000000"))
@@ -767,6 +790,8 @@ def run(path, ram, fast=False):
                     bytes.fromhex("03a7010000dc07061a020a1b"),
                 ]
                 assert len(clock_ports) == 5
+                extension(12)
+                incoming.extend(corrupt)
                 call(0x187, bytes(2))
                 panel_edges.extend([(clock + 200_000, True), (clock + 300_000, False)])
                 extension(9, bytes([1 << 2]), True)
@@ -776,6 +801,8 @@ def run(path, ram, fast=False):
                 plant_inputs()
             elif method == 0x544BF002 and data[5:] == bytes([0]):
                 raw_mode, raw_ack_mask = False, 0
+                extension(12, bytes.fromhex("0584"))
+                extension(12, b"\0", True)
                 extension(7)
             elif method == 0x544BF007:
                 _, inputs, presses, _, _, _, sweep = struct.unpack("<2I2Q3I", data[5:])
@@ -868,7 +895,7 @@ def run(path, ram, fast=False):
     entered = False
 
     def read(uc, off, size, user):
-        nonlocal draining, acr, dll, dlm
+        nonlocal draining, acr, dll, dlm, uart_rx_fault
         if training and clock >= training[0]:
             at = training.popleft()
             if at < 170_000:
@@ -884,10 +911,12 @@ def run(path, ram, fast=False):
             return dll if off == 0 else dlm
         if off == 0x14:
             draining = max(0, draining - 1)
+            flags, uart_rx_fault = uart_rx_fault, 0
             return (
                 (0 if draining > 1 or clock < trace_resume else 0x20)
                 | (0 if draining else 0x40)
                 | bool(incoming)
+                | flags
             )
         assert off == 0 and not dlab
         return incoming.popleft()
@@ -927,7 +956,7 @@ def run(path, ram, fast=False):
                      line_sends, expected_rx_acks - received_rx_acks, list(wire_log))
     assert actual[:4] == [
         (6, bytes.fromhex(x))
-        for x in ("048f0100000300", "0400000000", "0401f04b5402000507")
+        for x in ("048f0100000300", "0400000000", "0401f04b540200050f")
     ] + [
         (
             6,
@@ -936,6 +965,11 @@ def run(path, ram, fast=False):
         )
     ]
     assert (6, bytes.fromhex("0306f04b5402f04b5401")) in actual
+    assert error_masks == [(4, b"\0"), (3, b"\x24"), (4, b"\x24"), (3, b"\0")], error_masks
+    assert [(s, k, n) for s, k, _, n in error_reads] == [(5, 0x84, 1), (5, 0x84, 3)], error_reads
+    assert [(raw, n) for raw, s, k, _, n in error_reports if (s,k) == (5,0x84)] == [(False,2), (True,3)]
+    assert [(k,n) for _,s,k,_,n in error_reports if s == 5 and k < 0x84] == [(0x80,1), (0x83,1)]
+    assert {raw for raw, s, k, _, n in error_reports if (s,k) == (2,2)} == {False,True}
     assert phase == "enter-update" and (6, bytes.fromhex("0306f04b5405f04b5401")) in actual
     for p in range(5):
         assert (6, bytes.fromhex("0403f04b54") + bytes([p]) + bytes(16)) in actual
