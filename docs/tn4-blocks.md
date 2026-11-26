@@ -134,6 +134,21 @@ confirm selected fields without requiring unchanged unrelated fields.
 The stock 482 also has a four-data-byte `0D` sensor-setup emitter branch;
 that shorter trace layout is decoded, not treated as a general sensor editor.
 
+### Scene response settings
+
+Block `0E` applies to one addressed device. In positional order it contains
+the away period, hold period, responses for scenes **1, 4, 5, 7, 8**, and
+the scene participation setting (0 disabled, 1 enabled). The 483
+`SceneResponse` codes are 0 Wake, 1 Unoccupied, 2 Occupied, 3 Sleep,
+4 Away, 5 Schedule. They are not tHA setback IDs. Unknown values stay raw.
+The other three scenes have no writable response slot.
+
+Use only supported report bytes; limited devices can omit response slots
+or set participation through a physical switch. To edit a response,
+preserve the other seven positional bytes and verify the specific field
+with a second read. Changing a response does not select that scene, and
+reading this block does not return the active scene.
+
 ## Reading a 402
 
 Use block 00 to confirm the native source. A plant master need not have

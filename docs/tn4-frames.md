@@ -184,6 +184,35 @@ See the [654 manual](https://www.watts.com/dfsmedia/0533dbba17714b1ab581ab07a4cb
 for operating conditions and the distinction between set temperatures
 and enabling a group.
 
+### System scenes
+
+The 483 SW 11 `MessageQueue#push_scene_change` sends a priority-zero
+`0x2FF SceneReport` on all ports. The address in the native header is the
+sender, not a target thermostat. The three data bytes are the zero-based
+scene ID and a little-endian duration in minutes. For example, at source
+0/0 the entire native body for scene 8 is `2f f0 00 03 07 e0 01`.
+A Raw host chooses physical ports explicitly and gets a separate link
+result for each. There is no per-device scene confirmation in this exchange.
+
+| Display | Wire ID | 483 duration (minutes) | Participating device's response |
+| --- | --- | ---: | --- |
+| 1 Normal | 0 | 0 | Configurable |
+| 2 Away | 1 | 0 | Away |
+| 3 Unoccupied | 2 | 0 | Unoccupied |
+| 4 | 3 | 0 | Configurable |
+| 5 | 4 | 0 | Configurable |
+| 6 Temporary Occupied | 5 | 180 | Occupied |
+| 7 | 6 | 240 | Configurable |
+| 8 | 7 | 480 | Configurable |
+
+The [User Switch 480 manual](https://www.watts.com/dfsmedia/0533dbba17714b1ab581ab07a4cbb521/81552-source/480-u-06.pdf)
+describes device participation and the return to the previous permanent
+scene on expiry. Listen for `2FF` and retain its source, port and actual
+duration. A local transmit echo or link ACK is not a report from a
+thermostat. No current-scene query is identified in the 483 registry.
+A listener joining mid-scene cannot reconstruct it from a device's
+[scene setup](tn4-blocks.md#scene-response-settings) or its current setback.
+
 ### Weekly schedules
 
 The 483's `ScheduleEvent` model defines a time byte in ten-minute units
@@ -307,7 +336,7 @@ supports them. Fields are listed in transmitted order.
 | `0x287` | CalibrationMode | One mode byte. |
 | `0x2ef` | NetworkLock | Access/address lock flags. |
 | `0x2f7` | ScheduleStatus | Byte 0: schedule ID [1:0], master [2], previous ID [4:3], previous master [5], event configuration [7:6]. Byte 1: current/next states [1:0]/[3:2], duplicate response [4]. Byte 2: time to next edge. This is status, not a weekly transition table. |
-| `0x2ff` | SceneReport | Current scene, duration u16. |
+| `0x2ff` | SceneReport | [System scene announcement](#system-scenes), not addressed device state. |
 | `0x307` | WWSDRequest | No payload defined. |
 | `0x30f` | WWSDStatus | Warm-weather shutdown flags [0..4]: Wake, Unoccupied, Occupied, Sleep, Away. |
 | `0x317` | RealTimeClockRequest | No payload defined. |

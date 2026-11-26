@@ -9,6 +9,7 @@ from frames import encode, replay
 from payloads import DECODERS, decode_payload
 from payloads.products import block_selectors, identify_product
 from payloads.queries import NativeStatusQuery, ReplyPart, SnowmeltRole, StatusRequest
+from payloads.scenes import NativeScene, SceneReport, SceneResponse
 from payloads.writes import BlockPatch, NativeField as F, WritableBlock
 
 
@@ -17,6 +18,35 @@ def decode(mid, hex_bytes):
 
 
 class PayloadTests(unittest.TestCase):
+    def test_scene_report_numbers_durations_and_future_fields(self):
+        vectors = ("000000", "010000", "020000", "030000", "040000", "05b400", "06f000", "07e001")
+        for scene, vector in zip(NativeScene, vectors, strict=True):
+            with self.subTest(scene=scene):
+                self.assertEqual(scene.payload().hex(), vector)
+                self.assertEqual(SceneReport.from_payload(bytes.fromhex(vector)).scene, scene)
+                self.assertEqual(decode(0x2ff, vector)["scene_number"], scene.value)
+        self.assertEqual(decode(0x2ff, "ff1100cc"), dict(scene=255, duration=17, duration_minutes=17, extension_hex="cc"))
+        self.assertEqual(SceneReport.from_payload(bytes.fromhex("05efbeab")), SceneReport(5, 0xbeef, b"\xab"))
+        self.assertIn("truncated", decode(0x2ff, "05b4"))
+
+    def test_scene_response_settings_are_not_applied_scenes(self):
+        for scene in NativeScene:
+            self.assertNotEqual(scene.fixed_response is None, scene.response_field is None)
+        self.assertEqual(NativeScene.TEMPORARY_OCCUPIED.fixed_response, SceneResponse.OCCUPIED)
+        # Compact report, bits 2 and 6 only. No interpretation of an unknown response.
+        fields = decode(0x2e7, "0e0044 05ed")
+        self.assertEqual(fields["permanent_scene_1_name"], "schedule")
+        self.assertEqual(fields["temporary_scene_8"], 0xed)
+        self.assertNotIn("temporary_scene_8_name", fields)
+        self.assertNotIn("scenes_enabled", fields)
+        for field, value in ((F.PERMANENT_SCENE_4, 6), (F.SCENES_ENABLED, 2)):
+            with self.assertRaises(ValueError):
+                BlockPatch.from_fields(0x0e, {field: value})
+        patch = BlockPatch.from_fields(0x0e, {F.PERMANENT_SCENE_4: SceneResponse.WAKE})
+        self.assertEqual(patch.apply(0x08, bytes.fromhex("aabbcc04ddeeff01")).hex(), "aabbcc00ddeeff01")
+        with self.assertRaises(ValueError):
+            patch.apply(0x04, bytes(8))
+
     def test_native_status_request_reply_vectors(self):
         cases = (
             (NativeStatusQuery(StatusRequest.ZONE_SYNC), 0x011, "", 0x010, "000102", 0, 1),

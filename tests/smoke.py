@@ -21,6 +21,7 @@ from frames import Decoder, encode
 PORTS = [(4, 0, 1, 28), (11, 1, 1, 13), (6, 0, 2, 22), (10, 1, 0, 8), (2, 0, 0, 29)]
 BITS = "10001001000110000010000010000010000110100101000111000101111"
 BODY = bytes.fromhex("12300001a5")
+SCENE = bytes.fromhex("2ff00003 07e001")  # 483 scene 8, eight hours.
 
 def protected_bits(body):
     data = "".join(f"{byte:08b}" for byte in body)
@@ -213,7 +214,7 @@ def run(path, ram, fast=False):
         edges.extend(sorted(all_edges))
 
     def send(p):
-        incoming.extend(encode(1, bytes([1, p]) + BODY))
+        incoming.extend(encode(1, bytes([1, p]) + SCENE))
 
     corrupt = bytearray(encode(6, bytes.fromhex("0005f04b54")))
     corrupt[-2] ^= 1
@@ -444,13 +445,14 @@ def run(path, ram, fast=False):
             assert protected & 0x7FFF == 0x0E2E
             invalid.add(p)
         elif service == 0:
-            assert data[6:] == BODY
+            assert data[6:] == (BODY if phase == "capture" else SCENE)
             if phase == "capture":
                 assert p in invalid
                 valid.add(p)
                 if len(valid) == 5:
                     phase = "sending"
                     for n in range(5):
+                        exchanges[n].append((SCENE, None))
                         send(n)
                     send(0)
                     extension(2, b"\x00", True)
@@ -463,6 +465,7 @@ def run(path, ram, fast=False):
             assert p not in results and (p != 0 or overlap)
             results.add(p)
             if len(results) == 5:
+                assert not any(exchanges)
                 extension(2, b"\x00", True)
                 at_line_rate()  # The host cannot reply before the last stop bit.
         else:
