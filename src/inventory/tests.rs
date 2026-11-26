@@ -742,6 +742,74 @@ fn device_targets_follow_application_and_setback_not_heat_setpoint_slots() {
 }
 
 #[test]
+fn setpoint_identification_withdraws_pending_thermostat_reports_and_writes() {
+    let mut inv = Inventory::new();
+    inv.set_reporting(true);
+    observe(&mut inv, 0, 0, 1, 0x36f, &[0; 8], 0);
+    assert!(call(&mut inv, 0x127, 0, &[24, 0, 2], 0).is_none());
+    expect_block_read(&mut inv, 3);
+    for block in [3, 5, 6] {
+        let data = if block == 3 {
+            &[3, 0, 7, 1, 4, 5][..]
+        } else {
+            &[block, 0, 1, 48][..]
+        };
+        observe(&mut inv, 0, 0, 1, 0x2e7, data, 1);
+    }
+    // A status from another node or non-operating status isn't evidence for this device.
+    let status = [0, 0x18, 21, 3, 41, 3, 33, 4, 0, 0, 0];
+    observe(&mut inv, 0, 0, 2, 0x22f, &status, 1);
+    observe(&mut inv, 0, 0, 1, 0x22f, &[0; 11], 1);
+    assert!(inv.ports[0].job.frame_waiting());
+    observe(&mut inv, 0, 0, 1, 0x22f, &status, 1);
+    // Read-only unsupported replies do not contend for the outstanding native job's slot.
+    for (service, body) in [(1, &[24, 0][..]), (0, &[24, 0, 1][..])] {
+        assert_eq!(
+            call(&mut inv, 0x127, service, body, 1).unwrap().payload(),
+            &[3 + service, 0x27, 1, 0, 0, 24, 0, 255]
+        );
+    }
+    assert!(inv.command_frame(0).is_none());
+    assert_eq!(inv.command_reply(0).unwrap().payload()[7], 255);
+    observe(&mut inv, 0, 0, 1, 0x2e7, &[3, 0, 1, 4], 1);
+    let mut seen = 0;
+    while let Some(reply) = inv.next_report(1) {
+        if reply.payload()[5] != 24 {
+            continue;
+        }
+        match (reply.payload()[1], &reply.payload()[7..]) {
+            (0x38, [255, 255]) => seen |= 1,
+            (0x2f, [0]) => seen |= 2,
+            (0x3e, [0, 21, 3]) => seen |= 4,
+            (0x27 | 0x3f | 0x47, _) => panic!("stale thermostat report"),
+            _ => {}
+        }
+    }
+    assert_eq!(seen, 7);
+}
+
+#[test]
+fn setpoint_status_refreshes_addressed_setup_without_probing_on_every_report() {
+    let mut inv = Inventory::new();
+    let status = [0, 0x10, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let sample = |i: &mut Inventory, now| observe(i, 2, 9, 4, 0x22f, &status, now);
+    assert_eq!(sample(&mut inv, 0).unwrap()[4], 0);
+    let setup = [0x6d, 0x70, 0, 7, 0x26, 0, 9, 8, 0, 0, 0];
+    assert_eq!(
+        observe(&mut inv, 2, 9, 4, 0x2e7, &[0, 0, 63, 1, 1, 1, 1, 1, 1], 0),
+        Some(setup)
+    );
+    assert!(sample(&mut inv, 59).is_none());
+    assert_eq!(sample(&mut inv, 60), Some(setup));
+    observe(&mut inv, 2, 9, 4, 0x2e7, &[0x26, 0, 1, 2], 70);
+    for now in [170, 280, 369] {
+        assert!(sample(&mut inv, now).is_none());
+    }
+    assert!(observe(&mut inv, 2, 9, 4, 0x22f, &[0; 11], 370).is_none());
+    assert_eq!(sample(&mut inv, 370), Some(setup));
+}
+
+#[test]
 fn device_target_reports_coalesce_with_their_own_slot_and_sentinel() {
     let mut inv = Inventory::new();
     inv.set_reporting(true);
@@ -810,6 +878,7 @@ fn device_target_rejects_ambiguous_writes_and_reads_supported_word_pairs() {
         &[0x28, 0, 255, 1, 2, 3, 4, 5, 6, 7, 8, 9],
         &[0x28, 0, 0x37, 1, 2, 3, 4, 5, 6, 7, 8],
         &[0x26, 0, 1, 4],
+        &[0x26, 0, 1, 3], // Same table as on/off, but a different application.
     ] {
         start(&mut inv, 0, &[24, 0, 0, 10, 1]);
         sample(&mut inv, &[0x26, 0, 1, 0]);

@@ -30,7 +30,9 @@ RAW_READS = ((bytes.fromhex("6d70000b 100000 00008000 00000000"), bytes.fromhex(
              (bytes.fromhex("17f00003 11 01 1b"), bytes.fromhex("57e250c5 19 01 1b1204")),
              (bytes.fromhex("17f00004 12 02 1922"), bytes.fromhex("57e250c8 1a 02 220006 190300")),
              (bytes.fromhex("1f600002 43a5"), bytes.fromhex("5f5250ce 43a5e7 01 410042caff00 08 3412 35")),
-             (bytes.fromhex("1f400003 43a5e7"), bytes.fromhex("5f3250c6 43a5e7 08 7856")))
+             (bytes.fromhex("1f400003 43a5e7"), bytes.fromhex("5f3250c6 43a5e7 08 7856")),
+             (bytes.fromhex("6d70000b 260000 00008000 00000000"), bytes.fromhex("6e700605 260041 0408")),
+             (bytes.fromhex("6d70000b 2e0000 00008000 00000000"), bytes.fromhex("6e700609 2e003f 3506 ca05 e404")))
 TELEMETRY = ((1, bytes.fromhex("7cf25fca bc07 00c0 0000 19ff f9 ca")),
              (3, bytes.fromhex("7ce25fcb bc07 00c0 0000 19ff f9 ca35")),
              (2, bytes.fromhex("76f250c8 a4 62 2a 0000 07 0080")),
@@ -48,7 +50,8 @@ TELEMETRY = ((1, bytes.fromhex("7cf25fca bc07 00c0 0000 19ff f9 ca")),
              (4, bytes.fromhex("6f7250c3 68 0d ff")),
              (0, bytes.fromhex("57e250cc 19 03 220006 220106 1b1704 ca")),
              (0, bytes.fromhex("57e250c8 1a 02 22ff05 190300")),
-             (2, bytes.fromhex("5f2250c7 43a5e7 08 ca35 e4")))
+             (2, bytes.fromhex("5f2250c7 43a5e7 08 ca35 e4")),
+             (4, bytes.fromhex("62f250cc bd d4 3500 ca00 00c0 e4 35 ca e4")))
 
 def protected_bits(body):
     data = "".join(f"{byte:08b}" for byte in body)
@@ -245,7 +248,11 @@ def run(path, ram, fast=False):
                     assert wire == protected_bits(expected) + "0" * 11, (p, phase, expected.hex(), wire)
                     drive_bits.clear()
                     if device_reply:
-                        inject(device_reply)
+                        end = inject(device_reply)
+                        if phase in ("device-target", "setpoint-mode", "await-setpoint-setup"):
+                            # Separate the background setup probe from the host's later transaction.
+                            assert expected == bytes.fromhex("6d700007 2600 00 00008000")
+                            inject(bytes.fromhex("62f0060b 0610 3506 1006 0000000000"), after=end)
                     if phase == "group" and not any(exchanges):
                         inject(bytes.fromhex("60f00002 0c01"), port=4)
                     if phase == "outdoor-supply" and not any(exchanges):
@@ -486,6 +493,8 @@ def run(path, ram, fast=False):
                 extension(2, b"\x01", True)
             elif method == 0x10f and data[5:] == b"\x01":
                 if phase == "device-target":
+                    setting_exchange.append((bytes.fromhex("6d700007 2600 00 00008000"),
+                                             bytes.fromhex("6e700604 260001 05")))
                     inject(bytes.fromhex("62f0060b 0610 3406 1006 0000000000"))
                 elif phase == "group":
                     for exchange in exchanges:
@@ -531,6 +540,13 @@ def run(path, ram, fast=False):
                     (query, report),
                 ])
                 call(0x127, bytes.fromhex("010002"), True)
+            elif method == 0x127 and phase == "setpoint-mode":
+                assert data[5:] == bytes.fromhex("0100ff")
+                if data[0] == 4:
+                    call(0x127, bytes.fromhex("010002"), True)
+                else:
+                    assert data[0] == 3
+                    phase = "await-setpoint-setup"
             elif method == 0x127 and data[0] == 3:
                 assert not setting_exchange and data[5:] == bytes.fromhex("010001")
                 query = bytes.fromhex("6d700007 0700 00 00008000")
@@ -547,7 +563,14 @@ def run(path, ram, fast=False):
                 phase = "device-target"
                 call(0x10f,b"\x01",True)
             elif method == 0x13e and data[0] == 2:
-                assert data[5:] == bytes.fromhex("0100033406")
+                if phase == "device-target":
+                    assert data[5:] == bytes.fromhex("0100033406")
+                    phase = "setpoint-mode"
+                    call(0x127, bytes.fromhex("0100"))
+                    return
+                assert phase == "await-setpoint-setup" and data[5:] == bytes.fromhex("0100033506")
+                assert not setting_exchange
+                phase = "device-target-write"
                 query = bytes.fromhex("6d700007 3000 00 00008000")
                 setting_exchange.extend([
                     (bytes.fromhex("6d700007 2600 00 00008000"),

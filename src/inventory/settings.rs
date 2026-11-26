@@ -117,7 +117,7 @@ pub(super) struct Operation {
     node: u8,
     pub(super) setting: Setting,
     block: u8,
-    recheck_target: Option<u8>,
+    application: Option<u8>,
     selector: u8,
     write: Option<u16>,
     mask: u8,
@@ -135,7 +135,7 @@ impl Operation {
         node: 0,
         setting: Setting::Mode,
         block: 0,
-        recheck_target: None,
+        application: None,
         selector: 0,
         write: None,
         mask: 0,
@@ -210,7 +210,7 @@ impl Operation {
             node,
             setting,
             block: setting.setup().or_else(|| setting.block(None))?,
-            recheck_target: None,
+            application: None,
             selector,
             write,
             mask,
@@ -282,7 +282,6 @@ impl Operation {
                 // The winner may have changed a sibling byte or reassigned the
                 // application. Rebuild from fresh evidence, within the same deadline.
                 if let Some(setup) = self.setting.setup() {
-                    self.recheck_target = Some(self.block);
                     self.block = setup;
                 }
                 Step::Read
@@ -307,16 +306,20 @@ impl Operation {
             return;
         }
         if Some(*block) == self.setting.setup() {
-            let Some(next) = self.setting.block(block_byte(*support, values, 0)) else {
+            let app = block_byte(*support, values, 0);
+            let Some(next) = self.setting.block(app) else {
                 self.fail();
                 return;
             };
             if !live.configured(self.setting)
-                || self.recheck_target.is_some_and(|wanted| wanted != next)
+                || self.application.is_some() && self.application != app
                 || self.block != *block && next != self.block
             {
                 self.fail(); // also cancel if the application changed during a transaction
             } else if self.block == *block && self.step == Step::Sample {
+                if self.setting == Setting::DeviceTarget {
+                    self.application = app;
+                }
                 self.block = next;
                 self.step = Step::Read;
             }
@@ -410,11 +413,11 @@ impl Default for Operation {
     }
 }
 pub(super) fn accept(slot: &mut Operation, op: Operation, call: &Call<'_>) -> Answer {
-    if slot.active() {
-        return Answer::Reply(call.error(1));
-    }
     if let Some(reply) = op.reply() {
         return Answer::Reply(reply);
+    }
+    if slot.active() {
+        return Answer::Reply(call.error(1));
     }
     *slot = op;
     Answer::Silent

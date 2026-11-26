@@ -130,6 +130,7 @@ impl Telemetry {
 
     pub(super) fn mark_setpoint_device(&mut self) {
         self.attributes |= Self::SETPOINT_DEVICE;
+        self.dirty &= !(Field::Mode.mask() | Field::Heat.mask() | Field::Cool.mask());
     }
     pub(super) fn is_setpoint_device(&self) -> bool {
         self.attributes & Self::SETPOINT_DEVICE != 0
@@ -213,8 +214,11 @@ impl Telemetry {
     pub(super) fn configured(&self, setting: Setting) -> bool {
         match setting {
             Setting::DeviceTarget => self.is_setpoint_device(),
+            Setting::Mode => !self.is_setpoint_device(),
             Setting::Slab => matches!(self.floor, Floor::Only | Floor::Mixed),
-            Setting::Heat | Setting::Cool => self.floor != Floor::Only,
+            Setting::Heat | Setting::Cool => {
+                !self.is_setpoint_device() && self.floor != Floor::Only
+            }
             Setting::HumidityMin => self.attributes & Self::RH_MIN != 0,
             Setting::HumidityMax => self.attributes & Self::RH_MAX != 0,
             _ => true,
@@ -228,7 +232,7 @@ impl Telemetry {
             return 0;
         };
         match *block {
-            3 => {
+            3 if self.configured(Setting::Mode) => {
                 let Some(mode) = block_byte(*mask, values, 0) else {
                     return 0;
                 };
@@ -383,6 +387,7 @@ impl Telemetry {
         self.setback = setback;
         let mut changed = Temperature.mask() | Demand.mask() | Setback.mask();
         if message == 0x22f {
+            changed |= Field::Floor.mask();
             if setback < 7 {
                 let [lo, hi] = temperature(data, 2).to_le_bytes();
                 self.device_target = [setback, lo, hi];

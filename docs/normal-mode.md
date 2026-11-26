@@ -22,7 +22,7 @@ behavior or compatibility with every serial client's timeout.
 | 10F ReportingState | Request and Update read back the active reporting flag. A Test-mode Report carries the physical DIP position instead. |
 | 117 OutdoorTemp | Read the selected network temperature, supply a four-minute local sample, and report changes. Respond to native outdoor requests on all five ports. |
 | 11F DeviceAttributes | Read the observed u16 mask, echo it on Update, and report changes. See below for the evidence behind each bit. |
-| 127 ModeSetting | Addressed Request and Update use heating setup (block 3). Report on observed mode. This is not ActiveDemand. |
+| 127 ModeSetting | Thermostats use heating setup (block 3). For a recognized setpoint controller, Request and Update return FF without a native read or write. No thermostat mode Report follows. This is not ActiveDemand. |
 | 12F ActiveDemand, 137 CurrentTemperature, 138 CurrentFloorTemperature | Request, read-only Update echo and Report. Source and availability rules below. |
 | 13D SetpointGroupEnable | Request cached state for group 1..12; Update broadcasts on all five lines. Report from observed group status. |
 | 13E SetpointDevice | Addressed Request and Update of a 16-bit target by setback. Reports from setpoint control status, not group enable. |
@@ -93,6 +93,22 @@ There are still differences from J1196J:
   report the value the device actually retained, or indicate a busy port.
   It does not reproduce the stock two-minute deferral of background
   queries on native WaterCycleStart (`37F`, handler `0x68e4`).
+
+The stock **native application dispatcher** at `0x6d98` is a separate
+check from the 26 serial methods. Its cases are:
+
+| Native IDs (hex) | Normal-mode coverage |
+| --- | --- |
+| 20F, 22F | Setpoint group enable and addressed setpoint controller status. These are independent. |
+| 25F, 26F, 323, 36F, 377 | Fan, slab, humidity and air-group member/master observations. |
+| 2E7, 2F7 | Supported configuration blocks and schedule status; setting readback and cache timing differ as described here. |
+| 327, 32F | Outdoor temperature request and source report. |
+| 37F | No stock-style two-minute gate on lower-priority reads. The frame is visible in Raw. |
+| 3D7, 3DF, 3E7, 3FF | Network error, network initialization, address move and master/subnet presence. |
+
+A Raw decoder for an additional 483 message is not evidence that the stock
+482 exposes it over tHA. Conversely, exercising every dispatcher ID is
+not a timing or electrical equivalence test on real controllers.
 
 ## Gateway diagnostics
 
@@ -271,9 +287,28 @@ Do not interpret the two-bit native current-state field as a tHA setback.
 Setpoint controllers use a different layout from thermostat HeatSetpoint.
 In native 22F operating mode 1, bytes 2..3 are the active target, not
 the measured temperature (bytes 4..5). A Report carries the address, the
-setback from that same status, and the little-endian degH target.
+setback from that same status, and the little-endian target word. Like
+J1196J at `0x66a4`, Normal mode passes the word through except for native
+fault sentinels; it does not rescale it for a particular application.
 Reporting does not require SetbackEnable. With an unknown active slot
 there is no attributable target report.
+
+Operating status also schedules CurrentFloorTemperature (FFFF without a
+configured floor reading), not ModeSetting. Recognition withdraws pending
+thermostat mode, heat and cool reports and prevents unstarted writes to
+those thermostat blocks. Operating heat/cool direction is not a mode setting.
+Normal mode probes application setup on operating status. If identity was
+missing it requests block 0 first, then setup on the identity reply or a
+subsequent operating status. Unanswered setup probes are limited to one per
+minute; a recognized application remains fresh for five minutes.
+
+For Raw consumers, the 483 SW 11 model for the 161/162 presents the **live**
+target and temp1 as E for DHW (application 2), H otherwise. Do not assume
+units without setup from that device, assign a role to temp2, or interpret
+the relay and enable codes as a group acknowledgement. There is no known
+status request to force a 22F sample. Stored target blocks use H even for
+DHW. A confirmed optional second table (primary block + 1) supplies separate
+wake and sleep words; an absent table is not two zero targets.
 
 For an explicit 13E read or write, the gateway requires evidence of a
 setpoint controller and reads application setup (0026) from that device.
@@ -337,4 +372,5 @@ returns FF for the value, not the requested setting. After a failed update
 the on-device state may be unknown. Read it before deciding whether to try
 again. The transaction budget is ten seconds; allow more than that on the
 host to receive a negative reply from a quiet device. An overlapping setting
-command on the same port returns BridgeError (Busy). Raw mode is unaffected.
+command requiring the same port returns BridgeError (Busy). An unsupported
+value can be returned immediately without reserving the port. Raw mode is unaffected.

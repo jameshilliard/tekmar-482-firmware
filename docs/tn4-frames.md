@@ -85,7 +85,7 @@ Lengths describe known fields, not a reason to discard extensions.
 | --- | --- | --- |
 | `0x17e` | SnowmeltZoneStatus | Byte 0: source type [2:0], source ID [7:3]. Byte 1: count N. Then N ordered triples: key, low byte, high byte. Repeated keys are not collapsed. See key table below. |
 | `0x1f2` | IOChangeReport | Subnet, node, channel, type (one byte each), then value u16. Channel type determines interpretation. |
-| `0x22f` | SetpointStatus | Byte 0: enabled [0], setback [3:1], optimum start [5:4], priority [7:6]. Byte 1: actuator [1:0], demand [2], heat/cool [3], operating mode [5:4], thermostat priority [7:6]. Offsets 2/4/6: target, temp1, temp2 (H). Byte 8: auxiliary relay [1:0], requested enable [3:2], actual enable [5:4]. Bytes 9/10: status excuse codes. A twelfth byte seen on the bus is an extension. |
+| `0x22f` | SetpointStatus | Byte 0: enabled [0], setback [3:1], optimum start [5:4], priority [7:6]. Byte 1: actuator [1:0], demand [2], heat/cool [3], operating mode [5:4], thermostat priority [7:6]. Offsets 2/4/6: little-endian target, temp1 and temp2 words. No units or application selector in the frame. Byte 8: auxiliary relay [1:0], requested enable [3:2], actual enable [5:4], reserved [7:6]. Bytes 9/10: status excuse codes. Preserve extensions. |
 | `0x23f` | DHWStatus | Byte 0 as in SetpointStatus. Byte 1: actuator [1:0], demand [2], heat/cool [4:3], operating mode [7:5]. Bytes 2/3: target and tank (E). |
 | `0x24f` | PlantOutputStatus | Byte 0: device count [3:0], device ID [7:4]. Byte 1: subtype. Remaining bytes use the subtype layouts below. |
 | `0x2d7` | BlockRequest | Block ID u16, destination subnet, target nodes u32 bitmap. The 483 layout optionally appends arguments u32. An empty bitmap selects no node. |

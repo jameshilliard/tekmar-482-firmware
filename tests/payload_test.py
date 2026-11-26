@@ -18,6 +18,7 @@ from payloads.queries import NativeStatusQuery, ReplyPart, SnowmeltRole, StatusR
 from payloads.scenes import NativeScene, SceneReport, SceneResponse
 from payloads.schedules import DailyEvents, ScheduleBinding, ScheduleCycle, ScheduleEvent, ScheduleProfile, ScheduleStatus
 from payloads.sensors import SensorRole as R, SensorSlot, ThermostatSensors
+from payloads.setpoint import SetpointApplication, SetpointStatus, SetpointTargets
 from payloads.snowmelt import SnowmeltAddress, SnowmeltApplication, SnowmeltOperatingState, SnowmeltPair, SnowmeltReport, WaterDetection
 from payloads.thermostat import FanDuctStatus, FanSetup, HumiditySetup, HumidityStatus, SlabStatus, TargetSlot, TargetTable, ThermostatTarget as T
 from payloads.water import BoilerMaximum, HeatSource, LoopAssignment, LoopKind, LoopSetupSlot, LoopTopology, StageDemand
@@ -29,6 +30,31 @@ def decode(mid, hex_bytes):
 
 
 class PayloadTests(unittest.TestCase):
+    def test_setpoint_words_require_application_context(self):
+        payload = bytes.fromhex("d7 cb 5800 4800 00c0 6c 35 ca e4")
+        fields = decode_payload(0x22f, payload)
+        self.assertEqual(fields["extension_hex"], "e4")
+        self.assertFalse(any(name.endswith("_f") for name in fields))
+        for n in range(11):
+            self.assertIn("truncated", decode_payload(0x22f, payload[:n]))
+        report = SetpointStatus.read(Reader(payload))
+        self.assertTrue(report.cooling)
+        self.assertFalse(report.demand)
+        self.assertEqual(report.readings(SetpointApplication.DHW).temperature_f, 96.8)
+        for app, block in zip(SetpointApplication, (0x28, 0x2a, 0x2c, 0x28, 0x2e, 0x30)):
+            self.assertEqual(app.target_block, block)
+            for raw in (0, 0x4000, 0x8000, 0xc000, 0xffff):
+                p = SetpointStatus(0, 0, raw, raw, 0, 0, 0, 0).readings(app)
+                self.assertEqual((p.target_f, p.temperature_f), (None, None))
+        self.assertEqual(report.readings(SetpointApplication.FLOOR).temperature_f, -77.8)
+        self.assertIsNone(SetpointStatus(0, 0, 256, 0xff, 0, 0, 0, 0).readings(SetpointApplication.DHW).target_f)
+        with self.assertRaises(TypeError):
+            report.readings(2)
+        primary = decode(0x2e7, "2e003f 0106 0206 0306")
+        secondary = decode(0x2e7, "2f000d ff ca05")
+        self.assertEqual(SetpointTargets.from_reports(primary, secondary),
+                         SetpointTargets(0x601, 0x602, 0x603, None, None, 0x5ca))
+
     def test_plant_output_keys_do_not_use_device_total_or_stage_counts_as_masks(self):
         for header in (0, 0x20, 0x2f):
             r = Reader(bytes([header]) + bytes.fromhex("04 c2 65 34 56 f3 ca"))
@@ -780,7 +806,7 @@ class PayloadTests(unittest.TestCase):
                                          type_id=5, io_value=0xaa55)),
             0x22f: ("fbe7a406000080044e42de99", dict(enabled=1, setback_state=5,
                        priority=3, actuator_status=3, demand_status=1, heat_cool_mode=0,
-                       operating_mode=2, stat_priority=3, target_temp_f=85.0,
+                       operating_mode=2, stat_priority=3, target_temp_raw=1700,
                        temp1_raw=0, temp2_raw=0x480, aux_relay_status=2, reserved=1,
                        requested_enable_status=3, actual_enable_status=0,
                        status_excuse1=0x42, status_excuse2=0xde, extension_hex="99")),
