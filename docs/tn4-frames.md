@@ -226,6 +226,26 @@ are raw; field width alone does not establish a temperature scale.
 
 ### Snowmelt status keys
 
+The 483 SW 11 `snowmelt_request_for` uses application block D0 to choose
+an address. In control modes 0..3 it reads the configured **zone number**
+from C0 (1..12); in sensor-only mode 4 it reads the **sensor number** from
+C1 (1..24). The 17F destination byte is `((number - 1) << 3) | role`,
+with role 1 for a zone and 2 for a sensor. The 17E report source byte is
+`(number << 3) | role`. Neither number is the native node in the header
+or a melt/storm enable group. On a physical 654, a read using the SW 11
+gateway priority (0) returned all three requested telemetry keys from the
+expected native source, **not in request order**. Match actual keys in
+complete triples; never count an extension byte as a fourth key.
+
+The 483 requests water detection and slab temperature for every application.
+For a controller it also requests operating state and slab target, then
+application-specific outputs: PWM/boiler/mixing use supply temperature
+and system pump; boiler/mixing also use supply target. Electric uses PWM
+output. The [query catalog](../tools/payloads/queries.py) supplies those
+sets. They are useful requests, not a promise that every key is reported.
+The six-bit frame length fits at most 61 request keys or 20 report pairs.
+Multiple reports can contribute; a missing key is unknown, not zero.
+
 Each value occupies two bytes even when it carries a small enum or a flag.
 The decoder does not convert a raw word to a percentage or temperature
 unless its encoding is known.
@@ -244,6 +264,25 @@ unless its encoding is known.
 | 2c, 2d, 2e | Return, supply and supply target temperatures (H); the 483 maps these keys to its degH temperature model. |
 | 2f, 30 | Keep-alive, melting time (minutes) |
 | Others | Preserve key and raw u16 |
+
+### Other read-only queries
+
+The same catalog pairs zone synchronization 011/010, clock 317/31F,
+warm-weather shutdown 307/30F, outdoor temperature 327/32F and master
+presence 3F7/3FF. Each request has an empty payload. MasterPresent lists
+subnets, not water temperatures. The clock belongs to the reporting peer,
+not the 482. Neither a positive link result nor silence establishes the
+presence, value or absence of the requested service.
+
+I/O discovery 1F6/1F5 and channel reads 1F4/1F3 use the full payload
+subnet and node bytes, distinct from the six-bit native header node.
+Discovery also carries a channel count; count distinct channel IDs per
+reporting source, without assuming numbering starts at zero. For a
+channel read match the payload channel too. An unsolicited 1F2 change
+report remains telemetry, not the 1F3 service. Humidity query 322 carries
+a subnet and four-byte little-endian selector. The 483 calls it
+`node_id`; a BlockRequest bitmap conversion is not established here.
+Keep the selector raw and match 323 by its reporting source.
 
 ## Other IDs in the 483 registry
 

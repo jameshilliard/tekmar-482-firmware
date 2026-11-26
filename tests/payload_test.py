@@ -8,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 from frames import encode, replay
 from payloads import DECODERS, decode_payload
 from payloads.products import block_selectors, identify_product
+from payloads.queries import NativeStatusQuery, ReplyPart, SnowmeltRole, StatusRequest
 from payloads.writes import BlockPatch, NativeField as F, WritableBlock
 
 
@@ -16,6 +17,51 @@ def decode(mid, hex_bytes):
 
 
 class PayloadTests(unittest.TestCase):
+    def test_native_status_request_reply_vectors(self):
+        cases = (
+            (NativeStatusQuery(StatusRequest.ZONE_SYNC), 0x011, "", 0x010, "000102", 0, 1),
+            (NativeStatusQuery(StatusRequest.WWSD), 0x307, "", 0x30f, "0a", 0, 1),
+            (NativeStatusQuery(StatusRequest.CLOCK), 0x317, "", 0x31f, "2a61070119", 0, 1),
+            (NativeStatusQuery(StatusRequest.OUTDOOR), 0x327, "", 0x32f, "0004", 0, 1),
+            (NativeStatusQuery(StatusRequest.MASTER), 0x3f7, "", 0x3ff, "1122", 0, 1),
+            (NativeStatusQuery.humidity(0x12, 0x80000004), 0x322, "1204000080", 0x323, "000010112233", 0, 1),
+            (NativeStatusQuery.io(0x43, 0x85), 0x1f6, "4385", 0x1f5, "43850702410042434445011234", 7, 2),
+            (NativeStatusQuery.io(0x43, 0x85, 7), 0x1f4, "438507", 0x1f3, "438507018000", 7, 1),
+            (NativeStatusQuery.snowmelt(SnowmeltRole.SENSOR, 24, b"\x1b"), 0x17f, "ba011b", 0x17e, "c2011b0001", 0x1b, 1),
+        )
+        self.assertEqual(set(StatusRequest), {q.kind for q, *_ in cases})
+        for query, req, payload, reply, body, item, count in cases:
+            with self.subTest(query=query):
+                self.assertEqual(query.kind, req)
+                self.assertEqual(query.payload, bytes.fromhex(payload))
+                self.assertEqual(query.match(reply, 0x12, bytes.fromhex(body)), ReplyPart(frozenset([item]), count))
+                self.assertIsNone(query.match(req, 0x12, bytes.fromhex(body)))
+                self.assertIsNone(query.match(reply, 0x12, b""))
+        self.assertIsNone(NativeStatusQuery.humidity(5, 4).match(0x323, 6, bytes(6)))
+        self.assertIsNone(NativeStatusQuery.io(1, 2, 3).match(0x1f3, 0, bytes([1, 2, 4, 0, 0, 0])))
+
+    def test_snowmelt_query_address_count_order_and_application(self):
+        req = NativeStatusQuery.snowmelt(SnowmeltRole.ZONE, 12, bytes.fromhex("23221b22"))
+        self.assertEqual(req.payload.hex(), "590423221b22")
+        payload = bytes.fromhex("61 03 220002 229901 1b0103 230000")
+        self.assertEqual(req.match(0x17e, 0, payload), ReplyPart(frozenset([0x22, 0x1b]), 3))
+        self.assertIsNone(req.match(0x17e, 0, b"\x59" + payload[1:]))
+        self.assertIsNone(req.match(0x17e, 0, b"\x62" + payload[1:]))
+        self.assertIsNone(req.match(0x17e, 0, bytes.fromhex("6102230000")))
+        self.assertIsNone(req.match(0x17e, 0, bytes.fromhex("6101190000")))
+        for app, keys in enumerate(("19221b232d2a29", "19221b232d2a2e27", "19221b232d2a2e28", "19221b2329", "1922")):
+            req = NativeStatusQuery.for_snowmelt_device(app, 1)
+            self.assertEqual(req.payload[0], 2 if app == 4 else 1)
+            self.assertEqual(req.keys, bytes.fromhex(keys))
+        for role, number in ((SnowmeltRole.ZONE, 0), (SnowmeltRole.ZONE, 13), (SnowmeltRole.SENSOR, 25)):
+            with self.assertRaises(ValueError):
+                NativeStatusQuery.snowmelt(role, number, b"\x19")
+        for keys in (b"", bytes(62)):
+            with self.assertRaises(ValueError):
+                NativeStatusQuery.for_snowmelt_device(4, 1, keys)
+        with self.assertRaises(ValueError):
+            NativeStatusQuery.for_snowmelt_device(255, 1)
+
     def test_writer_registry_and_independent_full_widths(self):
         # SW 11 BlockTypesIn.write lengths plus the model's TankUsage reset.
         groups = {
