@@ -1,4 +1,6 @@
 use super::*;
+use crate::uptime::Sample;
+mod read_scheduler;
 
 fn observe(
     cache: &mut Inventory,
@@ -8,15 +10,18 @@ fn observe(
     method: u32,
     body: &[u8],
     now: u32,
-) -> Option<[u8; 11]> {
+) {
     let mut frame = [0; 67];
     let h = method << 20 | u32::from(subnet) << 12 | u32::from(node) << 6 | body.len() as u32;
     frame[..4].copy_from_slice(&h.to_be_bytes());
     frame[4..4 + body.len()].copy_from_slice(body);
-    match cache.observe(port, &frame[..4 + body.len()], now, true)? {
-        Observation::Probe(body) => Some(body),
-        Observation::Moved(_) => None,
-    }
+    cache.observe(port, &frame[..4 + body.len()], now);
+}
+
+fn probe(cache: &mut Inventory, now: u32) -> Option<[u8; 11]> {
+    (0..PORTS)
+        .find_map(|p| cache.next_probe(p, Sample::from_seconds(now)))
+        .map(BlockProbe::body)
 }
 
 fn call(cache: &mut Inventory, method: u32, service: u8, body: &[u8], now: u32) -> Option<Reply> {
@@ -100,8 +105,8 @@ fn master_routes_from_its_header_without_a_hydronic_payload() {
     assert_eq!(present(&mut inv), u16::MAX);
     observe(&mut inv, 3, 1, 24, 0x36f, &[0; 8], 1);
     assert_eq!(present(&mut inv), u16::MAX);
-    let probe = observe(&mut inv, 3, 9, 24, 0x36f, &[0; 8], 1).unwrap();
-    assert_eq!(probe[6], 9);
+    observe(&mut inv, 3, 9, 24, 0x36f, &[0; 8], 1);
+    assert_eq!(probe(&mut inv, 1).unwrap()[6], 9);
     assert_eq!(present(&mut inv), 3101);
 }
 
@@ -303,10 +308,8 @@ fn taking_address_is_report_only_and_follows_the_known_device() {
     let move_to = |inv: &mut Inventory, subnet: u8, old: [u8; 2], now| {
         let header = 0x3e7_00000 | u32::from(subnet) << 12 | 23 << 6 | 2;
         let [a, b, c, d] = header.to_be_bytes();
-        match inv.observe(0, &[a, b, c, d, old[0], old[1]], now, false)? {
-            Observation::Moved(moved) => Some(moved.report()),
-            _ => panic!("an address change must not trigger a probe"),
-        }
+        inv.observe(0, &[a, b, c, d, old[0], old[1]], now)
+            .map(AddressMove::report)
     };
     observe(&mut inv, 0, 0, 24, 0x2e7, &[0, 0, 7, 7, 8, 9], 0);
     observe(&mut inv, 0, 0, 23, 0x2e7, &[0, 0, 7, 1, 2, 3], 0);
@@ -621,10 +624,12 @@ fn slab_requires_enabled_floor_sensor_and_preserves_maximum_in_all_slot_updates(
 #[test]
 fn fan_uses_ventilation_block_not_duct_status_or_an_unoccupied_away_alias() {
     let mut inv = Inventory::new();
-    observe(&mut inv, 0, 0, 1, 0x36f, &[0; 8], 0);
-    let q = observe(&mut inv, 0, 0, 1, 0x25f, &[0x33, 0, 0, 0, 0], 0).unwrap();
-    assert_eq!(q[4], 9);
-    assert!(observe(&mut inv, 0, 0, 1, 0x25f, &[0; 5], 1).is_none());
+    observe(&mut inv, 0, 0, 1, 0x2e7, &[0, 0, 63, 1, 0, 0, 1, 0, 0], 0);
+    observe(&mut inv, 0, 0, 1, 0x25f, &[0x33, 0, 0, 0, 0], 0);
+    assert_eq!(probe(&mut inv, 0).unwrap()[4], 9);
+    observe(&mut inv, 0, 0, 1, 0x25f, &[0; 5], 1);
+    assert!(probe(&mut inv, 1).is_none());
+    observe(&mut inv, 0, 0, 1, 0x36f, &[0; 8], 1);
     call(&mut inv, 0x16f, 0, &[1], 1);
     assert!(call(&mut inv, 0x157, 0, &[24, 0, 6, 60], 1).is_none());
     expect_block_read(&mut inv, 9);
@@ -793,20 +798,24 @@ fn setpoint_status_refreshes_addressed_setup_without_probing_on_every_report() {
     let mut inv = Inventory::new();
     let status = [0, 0x10, 0, 0, 0, 0, 0, 0, 0, 0, 0];
     let sample = |i: &mut Inventory, now| observe(i, 2, 9, 4, 0x22f, &status, now);
-    assert_eq!(sample(&mut inv, 0).unwrap()[4], 0);
+    sample(&mut inv, 0);
     let setup = [0x6d, 0x70, 0, 7, 0x26, 0, 9, 8, 0, 0, 0];
-    assert_eq!(
-        observe(&mut inv, 2, 9, 4, 0x2e7, &[0, 0, 63, 1, 1, 1, 1, 1, 1], 0),
-        Some(setup)
-    );
-    assert!(sample(&mut inv, 59).is_none());
-    assert_eq!(sample(&mut inv, 60), Some(setup));
+    assert_eq!(probe(&mut inv, 0), Some(setup));
+    assert_eq!(probe(&mut inv, 1).unwrap()[4], 0);
+    observe(&mut inv, 2, 9, 4, 0x2e7, &[0, 0, 63, 1, 1, 1, 1, 1, 1], 1);
+    sample(&mut inv, 59);
+    assert!(probe(&mut inv, 59).is_none());
+    sample(&mut inv, 60);
+    assert_eq!(probe(&mut inv, 60), Some(setup));
     observe(&mut inv, 2, 9, 4, 0x2e7, &[0x26, 0, 1, 2], 70);
     for now in [170, 280, 369] {
-        assert!(sample(&mut inv, now).is_none());
+        sample(&mut inv, now);
+        assert!(probe(&mut inv, now).is_none());
     }
-    assert!(observe(&mut inv, 2, 9, 4, 0x22f, &[0; 11], 370).is_none());
-    assert_eq!(sample(&mut inv, 370), Some(setup));
+    observe(&mut inv, 2, 9, 4, 0x22f, &[0; 11], 370);
+    assert!(probe(&mut inv, 370).is_none());
+    sample(&mut inv, 370);
+    assert_eq!(probe(&mut inv, 371), Some(setup));
 }
 
 #[test]
@@ -1089,8 +1098,10 @@ fn full_walk_is_a_snapshot_with_one_terminator() {
 fn identity_handles_partial_masks_clock_wrap_and_reuse() {
     let mut inv = Inventory::default();
     let start = u32::MAX - 10;
-    let q = observe(&mut inv, 2, 0x11, 33, 0x36f, &[0; 8], start).unwrap();
+    observe(&mut inv, 2, 0x11, 33, 0x25f, &[0; 5], start);
+    let q = probe(&mut inv, start).unwrap();
     assert_eq!(q, [0x6d, 0x70, 0, 7, 0, 0, 0x11, 1, 0, 0, 0]);
+    assert_eq!(probe(&mut inv, start + 1).unwrap()[4], 9);
     let key = 2124u16.to_le_bytes();
     let val = |inv: &mut Inventory, m, now| {
         u32::from_le_bytes(
@@ -1100,7 +1111,8 @@ fn identity_handles_partial_masks_clock_wrap_and_reuse() {
         )
     };
     assert_eq!(val(&mut inv, PRODUCT, start), UNKNOWN);
-    assert!(observe(&mut inv, 2, 0x11, 1, 0x2e7, &[0, 0, 7, 1, 2, 3], 4).is_none());
+    observe(&mut inv, 2, 0x11, 1, 0x2e7, &[0, 0, 7, 1, 2, 3], 4);
+    assert!(probe(&mut inv, 4).is_none());
     assert_eq!(val(&mut inv, PRODUCT, 4), 0x030201);
     observe(
         &mut inv,
@@ -1112,7 +1124,9 @@ fn identity_handles_partial_masks_clock_wrap_and_reuse() {
         5,
     );
     assert_eq!(val(&mut inv, VERSION, 5), 29104);
-    assert!(observe(&mut inv, 2, 0x11, 1, 0x36f, &[0; 8], 100).is_none());
+    observe(&mut inv, 2, 0x11, 1, 0x25f, &[0; 5], 100);
+    assert_eq!(probe(&mut inv, 100).unwrap()[4], 9);
+    assert!(probe(&mut inv, 101).is_none());
     assert!(call(&mut inv, VERSION, 1, &key, 251).is_none());
     observe(&mut inv, 2, 0x11, 1, 0x36f, &[0; 8], 252);
     assert_eq!(val(&mut inv, VERSION, 252), UNKNOWN);
@@ -1195,9 +1209,9 @@ fn demand_is_not_the_configured_mode_and_read_only_updates_echo_actual_values() 
 #[test]
 fn floor_source_follows_observed_configuration_and_resets_on_expiration() {
     let mut inv = Inventory::new();
-    observe(&mut inv, 0, 0, 24, 0x36f, &[0, 0, 0, 0x11, 6, 0, 0, 0], 1);
-    let q = observe(&mut inv, 0, 0, 24, 0x26f, &[0, 0, 0x33, 6], 2).unwrap();
-    assert_eq!(q[4], 13);
+    observe(&mut inv, 0, 0, 24, 0x26f, &[0, 0, 0x33, 6], 1);
+    assert_eq!(probe(&mut inv, 1).unwrap()[4], 13);
+    observe(&mut inv, 0, 0, 24, 0x36f, &[0, 0, 0, 0x11, 6, 0, 0, 0], 2);
     let value = |inv: &mut Inventory, m, now| {
         let r = call(inv, m, 1, &[1, 0], now).unwrap();
         u16::from_le_bytes(r.payload()[7..].try_into().unwrap())

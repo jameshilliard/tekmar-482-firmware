@@ -14,6 +14,7 @@ pub const OUTDOOR_TEMPERATURE_REQUEST: u32 = 0x327;
 pub const OUTDOOR_TEMPERATURE_REPORT: u32 = 0x32f;
 pub const AIR_GROUP_MEMBER_STATUS: u32 = 0x36f;
 pub const AIR_GROUP_MASTER_STATUS: u32 = 0x377;
+pub const WATER_CYCLE_START: u32 = 0x37f;
 pub const NETWORK_ERROR: u32 = 0x3d7;
 pub const NETWORK_INIT_REQUEST: u32 = 0x3df;
 pub const TAKING_ADDRESS: u32 = 0x3e7;

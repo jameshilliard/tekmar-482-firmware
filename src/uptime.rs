@@ -3,6 +3,22 @@
 const MICROS_PER_SECOND: u32 = 1_000_000;
 const MILLIS_PER_SECOND: u32 = 1000;
 const MICROS_PER_MILLI: u32 = MICROS_PER_SECOND / MILLIS_PER_SECOND;
+#[derive(Clone, Copy)]
+pub struct Sample {
+    pub seconds: u32,
+    pub millis: u32,
+}
+
+#[cfg(test)]
+impl Sample {
+    pub(crate) fn from_seconds(seconds: u32) -> Self {
+        Self {
+            seconds,
+            millis: seconds.wrapping_mul(MILLIS_PER_SECOND),
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct Uptime {
     epoch_us: u32,
@@ -10,12 +26,16 @@ pub struct Uptime {
 }
 
 impl Uptime {
-    pub fn sample(&mut self, us: u32) {
+    pub fn sample(&mut self, us: u32) -> Sample {
         let elapsed = us.wrapping_sub(self.epoch_us);
         if elapsed >= MICROS_PER_SECOND {
             let seconds = elapsed / MICROS_PER_SECOND;
             self.epoch_us = self.epoch_us.wrapping_add(seconds * MICROS_PER_SECOND);
             self.seconds = self.seconds.wrapping_add(seconds);
+        }
+        Sample {
+            seconds: self.seconds,
+            millis: self.millis(us),
         }
     }
 

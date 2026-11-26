@@ -13,7 +13,7 @@ const RAW_MODE: u8 = 1;
 use embassy_futures::yield_now;
 use tekmar_482_firmware::uptime::Uptime;
 use tekmar_482_firmware::{
-    inventory::{AddressMove, Answer, Broadcast, Inventory, LineProbe, Observation},
+    inventory::{AddressMove, Answer, BlockProbe, Broadcast, Inventory, LineProbe},
     tn4::{
         Frame, LinkResponse, Receiver, Trailer,
         tx::{Mode, Outcome, Request},
@@ -65,7 +65,8 @@ impl Receivers {
 }
 #[derive(Clone, Copy)]
 enum NormalTx {
-    Probe,
+    Idle,
+    Probe(BlockProbe),
     Discovery(LineProbe),
     Setting,
     Broadcast(Broadcast),
@@ -89,7 +90,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
     let mut raw = false;
     let mut reboot = false;
     let mut occupied = [false; PORT_COUNT];
-    let mut owner = [NormalTx::Probe; PORT_COUNT];
+    let mut owner = [NormalTx::Idle; PORT_COUNT];
     #[unsafe(link_section = ".low_bss")]
     static SENDERS: static_cell::StaticCell<[Option<Attempt>; PORT_COUNT]> =
         static_cell::StaticCell::new();
@@ -102,8 +103,8 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
     let mut last_service = None;
     loop {
         let us = crate::board::panel::now();
-        uptime.sample(us);
-        let seconds = uptime.seconds;
+        let time = uptime.sample(us);
+        let seconds = time.seconds;
         if !raw && !reboot && last_service != Some(seconds) {
             last_service = Some(seconds);
             inventory.tick(seconds);
@@ -118,7 +119,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                 let mut data = [0; raw::RX_PREFIX + MAX_BYTES];
                 data[0] = raw::RX;
                 data[1] = p as u8;
-                data[2..raw::RX_PREFIX].copy_from_slice(&uptime.millis(us).to_le_bytes());
+                data[2..raw::RX_PREFIX].copy_from_slice(&time.millis.to_le_bytes());
                 data[raw::RX_PREFIX..raw::RX_PREFIX + frame.bytes.len()]
                     .copy_from_slice(frame.bytes);
                 out.enqueue(
@@ -131,33 +132,12 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                 // RX sees our own frame before TX finishes. Only a peer counts as
                 // link-up, suppresses a line probe or supplies an outdoor sample.
                 && !sending[p].as_ref().is_some_and(Attempt::started)
-                && let Some(observed) = inventory.observe(
-                    p,
-                    frame.bytes,
-                    seconds,
-                    sending[p].is_none() && !response[p].busy()
-                        && !inventory.has_command(p)
-                        && !inventory.has_broadcast(p),
-                )
+                && let Some(moved) = inventory.observe(p, frame.bytes, seconds)
             {
-                match observed {
-                    Observation::Probe(body) => {
-                        if let Some(req) = Request::new(p as u8, &body) {
-                            sending[p] = Attempt::new(
-                                &req,
-                                INPUTS[p].pin,
-                                now[INPUTS[p].timer],
-                                Mode::Normal,
-                            );
-                        }
-                    }
-                    Observation::Moved(moved) => {
-                        if moves.is_full() {
-                            moves.pop_front();
-                        }
-                        let _ = moves.push_back(moved);
-                    }
+                if moves.is_full() {
+                    moves.pop_front();
                 }
+                let _ = moves.push_back(moved);
             }
         });
         for p in 0..PORT_COUNT {
@@ -178,7 +158,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                     let mut data = [0; raw::INVALID_PREFIX + MAX_BYTES + size_of::<u16>()];
                     data[0] = raw::RX_INVALID;
                     data[1] = p as u8;
-                    data[2..raw::RX_PREFIX].copy_from_slice(&uptime.millis(us).to_le_bytes());
+                    data[2..raw::RX_PREFIX].copy_from_slice(&time.millis.to_le_bytes());
                     data[raw::RX_PREFIX] = fault.reason;
                     data[raw::RX_PREFIX + 1..raw::INVALID_PREFIX]
                         .copy_from_slice(&fault.bits.to_le_bytes());
@@ -208,7 +188,10 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                 let discovery = inventory.line(p).pending();
                 inventory.command_expire(p, seconds);
                 let cancel = match owner[p] {
-                    NormalTx::Probe => foreground,
+                    NormalTx::Probe(probe) => {
+                        foreground || !inventory.probe_current(probe, seconds)
+                    }
+                    NormalTx::Idle => false,
                     NormalTx::Discovery(probe) => foreground || discovery != Some(probe),
                     NormalTx::Setting => inventory.command_finished(p),
                     NormalTx::Broadcast(tx) => inventory.stale_broadcast(p, tx, seconds),
@@ -218,9 +201,12 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                     && sending[p].as_ref().is_some_and(|a| !a.started())
                 {
                     sending[p] = None;
-                    owner[p] = NormalTx::Probe;
+                    if let NormalTx::Probe(probe) = owner[p] {
+                        inventory.defer_probe(probe, seconds);
+                    }
+                    owner[p] = NormalTx::Idle;
                 }
-                if (foreground || discovery.is_some())
+                if (foreground || discovery.is_some() || inventory.has_reads(p))
                     && sending[p].is_none()
                     && !response[p].busy()
                 {
@@ -249,6 +235,14 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                         sending[p] = Attempt::new(&req, INPUTS[p].pin, t, Mode::Normal);
                         if sending[p].is_some() {
                             owner[p] = NormalTx::Discovery(probe);
+                        }
+                    } else if !foreground
+                        && let Some(probe) = inventory.next_probe(p, time)
+                        && let Some(req) = Request::new(p as u8, &probe.body())
+                    {
+                        sending[p] = Attempt::new(&req, INPUTS[p].pin, t, Mode::Normal);
+                        if sending[p].is_some() {
+                            owner[p] = NormalTx::Probe(probe);
                         }
                     }
                 }
@@ -300,8 +294,9 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                         response[p].recover(&mut bus.rx[p], at);
                     }
                     inventory.line(p).sent(result);
-                    match core::mem::replace(&mut owner[p], NormalTx::Probe) {
+                    match core::mem::replace(&mut owner[p], NormalTx::Idle) {
                         NormalTx::Setting => inventory.command_sent(p, result),
+                        NormalTx::Probe(probe) => inventory.probe_sent(probe, time.millis),
                         NormalTx::Discovery(probe) => inventory.line(p).finished(probe),
                         _ => {}
                     }
@@ -426,12 +421,15 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                                     if !response[p].busy()
                                         && matches!(
                                             owner[p],
-                                            NormalTx::Probe | NormalTx::Discovery(_)
+                                            NormalTx::Probe(_) | NormalTx::Discovery(_)
                                         )
                                         && attempt.as_ref().is_some_and(|a| !a.started())
                                     {
                                         *attempt = None;
-                                        owner[p] = NormalTx::Probe;
+                                        if let NormalTx::Probe(probe) = owner[p] {
+                                            inventory.defer_probe(probe, seconds);
+                                        }
+                                        owner[p] = NormalTx::Idle;
                                     }
                                 }
                             }

@@ -5,6 +5,9 @@ defines the host-visible operations. The 482 CS 02 sample supplies the packed
 field layouts; the 482 SW 06 J1196J handlers and the native
 [frame catalog](tn4-frames.md) connect them to bus behavior. Recognizing a
 native message in Raw mode does not implement its tRPC services in Normal mode.
+Compatibility means that existing software can use the same framing, services,
+addresses, payloads and units. Private stock task schedules and stale-cache
+behavior are not part of that contract.
 
 The J1196J input dispatcher at `0xae8c` has **26** named cases. All 26
 are handled here. NullMethod is the fallback, and TakingAddress is an
@@ -98,10 +101,24 @@ and send outcomes to the host instead.
 
 Stock settings often reply from cache. This implementation reads the device
 for supported setting operations, so a response can take longer, report
-the value the device actually retained, or indicate a busy port. The
-stock gate on discretionary block queries after WaterCycleStart (`37F`,
-handler `0x68e4`) and the one-device-per-minute background refresh are not
-implemented.
+the value the device actually retained, or indicate a busy port.
+
+**Targeted reads.** Status frames queue reads for missing identity, mode,
+setpoints or setup on the source port. Repeated requests for the same device
+and block occupy one entry. A busy port retains its reads; another port can
+make progress independently. A matching block report immediately releases
+that line's next read. If the peer doesn't answer, the line allows another
+background read after one second. This window is not a delay on serial
+reports, explicit host operations or verified write readback.
+
+A change in demand, setback or the active air target justifies re-reading
+configured mode, not guessing its value. A temperature-only change does not
+trigger another mode read while the mode sample is fresh. No inventory sweep
+runs on a quiet bus. J1196J independently walks one device per minute
+(`0x76c4`), spaces block requests globally (`0x7538`), and suppresses
+optional reads for two minutes after WaterCycleStart (`0x68e4`). Those are
+stock cache policies, not tHA operations. This firmware keeps the native
+arbitration and error recovery without imposing those cross-port delays.
 
 **Live room setpoints.** An eligible air-group status updates the target
 cache directly. A member supplies its enabled side; a master with both
@@ -129,7 +146,7 @@ check from the 26 serial methods. Its cases are:
 | 25F, 26F, 323, 36F, 377 | Fan, slab, humidity and air-group member/master observations. |
 | 2E7, 2F7 | Supported configuration blocks and schedule status; setting readback and cache timing differ as described here. |
 | 327, 32F | Outdoor temperature request and source report. |
-| 37F | No stock-style two-minute gate on lower-priority reads. The frame is visible in Raw. |
+| 37F | WaterCycleStart is native plant telemetry, not a serial tHA method. Raw forwards it; Normal does not suspend unrelated reads. |
 | 3D7, 3DF, 3E7, 3FF | Network error, network initialization, address move and master/subnet presence. |
 
 A Raw decoder for an additional 483 message is not evidence that the stock

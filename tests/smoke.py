@@ -185,8 +185,12 @@ def run(path, ram, fast=False):
             assert body == master
             idle_delay = started - uptime_offset - backoff_after
             assert 800_000 < idle_delay < 1_100_000, (idle_delay, tuple(wire_log))
-            phase = "capture"
-            inventory_at = inject(bytes.fromhex("6e700609 00003f 828301 2301 04"))
+            phase = "cycle-read"
+            # A water-cycle announcement on port 1 is not a lock on port 3.
+            end = inject(bytes.fromhex("77f05001 81"), port=1)
+            end = inject(bytes.fromhex("6e700609 00003f 010000 0100 00"), port=3, after=end)
+            exchanges[3].append((bytes.fromhex("6d700007 0900 00 00008000"), None))
+            inject(bytes.fromhex("65f00605 0000000000"), port=3, after=end)
 
     def level(p, high, at):
         pin, t, ch, _ = PORTS[p]
@@ -200,7 +204,7 @@ def run(path, ram, fast=False):
             timers[t][0] = timers[t].get(0, 0) | (1 << (4 + ch))
 
     def gpio_write(uc, off, size, value, data):
-        nonlocal pins, phase
+        nonlocal pins, phase, inventory_at
         if off in (0x18, 0x1C, 0):
             for p, exchange in enumerate(exchanges):
                 tx = 1 << PORTS[p][3]
@@ -263,13 +267,18 @@ def run(path, ram, fast=False):
                         line_progress()
                         continue
                     if not exchange:
-                        assert not raw_mode and not phase.startswith("line-"), (p, phase, wire)
+                        assert not raw_mode and not phase.startswith("line-") and phase != "cycle-read", (p, phase, wire)
                         drive_bits.clear()
                         continue
                     expected, device_reply = exchange.popleft()
                     # Ten delimiter/ACK/EOF bits, then the driver's final release.
                     assert wire == protected_bits(expected) + "0" * tail, (p, phase, expected.hex(), wire)
                     drive_bits.clear()
+                    if phase == "cycle-read":
+                        assert p == 3 and ack_seen[p] and not exchange
+                        phase = "capture"
+                        end = inject(bytes.fromhex("7ff09000"), port=3)  # retire this synthetic subnet
+                        inventory_at = inject(bytes.fromhex("6e700609 00003f 828301 2301 04"), after=end)
                     if device_reply:
                         end = inject(device_reply)
                         if phase in ("device-target", "setpoint-mode", "await-setpoint-setup"):

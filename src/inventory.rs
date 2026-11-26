@@ -7,8 +7,10 @@ mod codes;
 mod groups;
 mod line;
 mod outdoor;
+mod reads;
 pub use broadcast::Broadcast;
 pub use line::{LineProbe, NormalLine};
+pub use reads::BlockProbe;
 mod settings;
 mod telemetry;
 use crate::tn4::tx::{Outcome, Request};
@@ -28,6 +30,7 @@ const WATER_SUBNET_BUS_MASK: u8 = 7;
 const DEVICE_TTL_SECONDS: u32 = 150;
 const PROBE_RETRY_SECONDS: u8 = 60;
 const SETPOINT_SETUP_SECONDS: u16 = 300;
+const MODE_REFRESH_SECONDS: u16 = 300;
 const SENSOR_SETUP_SECONDS: u16 = 3600;
 const STEPPED_FAN_PRODUCTS: core::ops::RangeInclusive<u32> = 99201..=99203;
 const MAX_FAN_STEP: u8 = 10;
@@ -43,7 +46,9 @@ struct Device {
     last_seen: u32,
     product: u32,
     version: u32,
+    incarnation: u16,
     identity_delay: u8,
+    mode_delay: u16,
     sensor_delay: u16,
     setpoint_setup_delay: u16,
     fan_delay: u8,
@@ -58,7 +63,9 @@ impl Device {
         last_seen: 0,
         product: 0,
         version: 0,
+        incarnation: 0,
         identity_delay: 0,
+        mode_delay: 0,
         sensor_delay: 0,
         setpoint_setup_delay: 0,
         fan_delay: 0,
@@ -73,6 +80,7 @@ impl Device {
 #[derive(Default)]
 struct Port {
     link: NormalLine,
+    reads: reads::Reads,
     subnet: Option<u8>,
     devices: [Device; NODES],
     pending: u32,
@@ -84,6 +92,7 @@ pub struct Inventory {
     groups: groups::Groups,
     broadcasts: broadcast::Broadcasts,
     outdoor: outdoor::Outdoor,
+    incarnation: u16,
     ports: [Port; PORTS],
     walk: [u16; SLOTS],
     cursor: usize,
@@ -108,9 +117,11 @@ impl Inventory {
             groups: groups::Groups::EMPTY,
             broadcasts: broadcast::Broadcasts::EMPTY,
             outdoor: outdoor::Outdoor::EMPTY,
+            incarnation: 0,
             ports: [const {
                 Port {
                     link: NormalLine::COLD,
+                    reads: reads::Reads::EMPTY,
                     subnet: None,
                     devices: [Device::EMPTY; NODES],
                     pending: 0,
@@ -183,20 +194,9 @@ impl AddressMove {
     }
 }
 
-pub enum Observation {
-    Probe([u8; BLOCK_REQUEST_FRAME_BYTES]),
-    Moved(AddressMove),
-}
-
 impl Inventory {
     /// Consume a validated native frame. Never initiate an application write.
-    pub fn observe(
-        &mut self,
-        port: usize,
-        frame: &[u8],
-        now: u32,
-        can_probe: bool,
-    ) -> Option<Observation> {
+    pub fn observe(&mut self, port: usize, frame: &[u8], now: u32) -> Option<AddressMove> {
         let (&[a, b, c, d], data) = frame.split_first_chunk::<4>()?;
         let header = u32::from_be_bytes([a, b, c, d]);
         if data.len() != usize::from(d & tn4::PAYLOAD_MASK) {
@@ -206,6 +206,10 @@ impl Inventory {
         let subnet = (header >> tn4::SUBNET_SHIFT) as u8;
         let bus = self.ports.get_mut(port)?;
         bus.link.peer(message);
+        if message == message::WATER_CYCLE_START {
+            // Native plant telemetry, not a tHA report or a bus lock.
+            return None;
+        }
         if message == message::OUTDOOR_TEMPERATURE_REPORT {
             self.outdoor
                 .observe(data, now, self.reporting, &mut self.broadcasts);
@@ -235,6 +239,7 @@ impl Inventory {
                 }
                 bus.devices.fill(Device::default());
                 bus.pending = 0;
+                bus.reads = reads::Reads::EMPTY;
             }
             return None;
         }
@@ -262,13 +267,17 @@ impl Inventory {
             if old != node {
                 bus.devices[node] = core::mem::take(&mut bus.devices[old]);
             }
+            bus.reads.forget(old);
+            bus.reads.forget(node);
+            self.incarnation = self.incarnation.wrapping_add(1);
             bus.pending &= !(1 << old | 1 << node);
             let row = &mut bus.devices[node];
+            row.incarnation = self.incarnation;
             row.live.dirty = 0;
             row.address = address;
             row.subnet = subnet;
             row.last_seen = now;
-            return Some(Observation::Moved(moved));
+            return Some(moved);
         }
         let required = match message {
             message::SETPOINT_STATUS => message::payload_bytes::SETPOINT_STATUS,
@@ -302,19 +311,21 @@ impl Inventory {
             if bus.job.active() && bus.job.address == address {
                 bus.job.fail();
             }
-            row.product = UNKNOWN;
-            row.version = UNKNOWN;
-            row.identity_delay = 0;
-            row.sensor_delay = 0;
-            row.setpoint_setup_delay = 0;
-            row.fan_delay = 0;
-            row.rh_delay = 0;
-            row.live = Telemetry::UNKNOWN;
+            bus.reads.forget(node);
+            self.incarnation = self.incarnation.wrapping_add(1);
+            *row = Device {
+                incarnation: self.incarnation,
+                product: UNKNOWN,
+                version: UNKNOWN,
+                live: Telemetry::UNKNOWN,
+                ..Device::EMPTY
+            };
             bus.pending &= !(1 << node);
         } else {
             // A present row was observed within 150 seconds, including at clock wrap.
             let elapsed = now.wrapping_sub(row.last_seen) as u8;
             row.identity_delay = row.identity_delay.saturating_sub(elapsed);
+            row.mode_delay = row.mode_delay.saturating_sub(u16::from(elapsed));
             row.sensor_delay = row.sensor_delay.saturating_sub(u16::from(elapsed));
             row.setpoint_setup_delay = row.setpoint_setup_delay.saturating_sub(u16::from(elapsed));
             row.fan_delay = row.fan_delay.saturating_sub(elapsed);
@@ -324,6 +335,16 @@ impl Inventory {
         row.subnet = subnet;
         row.last_seen = now;
         let previous_attributes = row.live.attributes;
+        let prior_hint = matches!(
+            message,
+            message::AIR_GROUP_MEMBER_STATUS | message::AIR_GROUP_MASTER_STATUS
+        )
+        .then(|| row.live.mode_hint());
+        if message == message::BLOCK_REPORT
+            && let [id, 0, _, ..] = data
+        {
+            bus.reads.reported(node, *id);
+        }
         let setpoint_running = message == message::SETPOINT_STATUS
             && data[1] & codes::setpoint::STATUS_MODE_MASK == codes::setpoint::STATUS_RUNNING;
         if setpoint_running
@@ -348,12 +369,14 @@ impl Inventory {
         }
         if message == message::BLOCK_REPORT
             && let [block::SETPOINT_SETUP, 0, mask, values @ ..] = data
-            && matches!(
-                block_byte(*mask, values, 0),
-                Some(codes::setpoint::ON_OFF..=codes::setpoint::POOL)
-            )
+            && let Some(app) = block_byte(*mask, values, 0)
         {
-            row.setpoint_setup_delay = SETPOINT_SETUP_SECONDS;
+            row.setpoint_setup_delay = if Setting::DeviceTarget.block(Some(app)).is_some() {
+                SETPOINT_SETUP_SECONDS
+            } else {
+                0
+            };
+            bus.reads.discard(node, block::SETPOINT_SETUP);
         }
         if message == message::BLOCK_REPORT
             && let [block::DEVICE_INFO, 0, mask, values @ ..] = data
@@ -372,6 +395,7 @@ impl Inventory {
             && let Some(changed) = row.live.sensor_setup(*mask, values)
         {
             row.sensor_delay = SENSOR_SETUP_SECONDS;
+            bus.reads.discard(node, block::SENSOR_SETUP);
             changed
         } else if message == message::BLOCK_REPORT {
             row.live.setting_report(data)
@@ -401,47 +425,72 @@ impl Inventory {
             row.live.dirty |= changed;
             bus.pending |= 1 << node;
         }
-        if !can_probe {
-            return None;
-        }
-        let block = if (row.product == UNKNOWN || row.version == UNKNOWN) && row.identity_delay == 0
-        {
-            row.identity_delay = PROBE_RETRY_SECONDS;
-            block::DEVICE_INFO
-        } else if row.setpoint_setup_delay == 0
+        if row.setpoint_setup_delay == 0
             && (setpoint_running
                 || message == message::BLOCK_REPORT
                     && data.starts_with(&[block::DEVICE_INFO, 0])
                     && row.live.is_setpoint_device())
         {
+            bus.reads.queue(node, block::SETPOINT_SETUP);
             row.setpoint_setup_delay = u16::from(PROBE_RETRY_SECONDS);
-            block::SETPOINT_SETUP
-        } else if message == message::SLAB_STATUS && row.sensor_delay == 0 {
+        }
+        if message == message::SLAB_STATUS && row.sensor_delay == 0 {
+            bus.reads.queue(node, block::SENSOR_SETUP);
             row.sensor_delay = u16::from(PROBE_RETRY_SECONDS);
-            block::SENSOR_SETUP
-        } else if message == message::FAN_DUCT_STATUS && row.fan_delay == 0 {
+        }
+        if (row.product == UNKNOWN || row.version == UNKNOWN) && row.identity_delay == 0 {
+            bus.reads.queue(node, block::DEVICE_INFO);
+            row.identity_delay = PROBE_RETRY_SECONDS;
+        }
+        if let Some(before) = prior_hint {
+            for id in [block::HEAT_SETPOINTS, block::COOL_SETPOINTS] {
+                if row.live.missing_target(id) {
+                    bus.reads.queue(node, id);
+                }
+            }
+            if row.live.configured(Setting::Mode)
+                && (row.mode_delay == 0 || before != row.live.mode_hint())
+            {
+                bus.reads.queue(node, block::HEATING_SETUP);
+                row.mode_delay = if row.live.mode_known() {
+                    MODE_REFRESH_SECONDS
+                } else {
+                    u16::from(PROBE_RETRY_SECONDS)
+                };
+            }
+        }
+        if message == message::BLOCK_REPORT
+            && let [block::HEATING_SETUP, 0, mask, values @ ..] = data
+            && block_byte(*mask, values, 0).is_some()
+            && row.live.mode_known()
+        {
+            row.mode_delay = MODE_REFRESH_SECONDS;
+            bus.reads.discard(node, block::HEATING_SETUP);
+        }
+        if message == message::SLAB_STATUS && row.live.missing_target(block::SLAB_SETPOINTS) {
+            bus.reads.queue(node, block::SLAB_SETPOINTS);
+        }
+        if message == message::FAN_DUCT_STATUS
+            && row.fan_delay == 0
+            && row.live.missing_target(block::FAN_PERCENT)
+        {
+            bus.reads.queue(node, block::FAN_PERCENT);
             row.fan_delay = PROBE_RETRY_SECONDS;
-            block::FAN_PERCENT
-        } else if message == message::RH_REPORT && row.rh_delay == 0 {
+        }
+        if message == message::RH_REPORT && row.rh_delay == 0 {
+            bus.reads.queue(node, block::HUMIDITY_SETUP);
             row.rh_delay = PROBE_RETRY_SECONDS;
-            block::HUMIDITY_SETUP
-        } else if message == message::BLOCK_REPORT
-            && matches!(data, [block::HUMIDITY_SETUP, 0, ..])
-            && row.live.configured(Setting::HumidityMin)
+        }
+        if message == message::RH_REPORT
+            || message == message::BLOCK_REPORT && data.starts_with(&[block::HUMIDITY_SETUP, 0])
         {
-            block::HUMIDIFY_TARGETS
-        } else if message == message::BLOCK_REPORT
-            && matches!(
-                data,
-                [block::HUMIDITY_SETUP | block::HUMIDIFY_TARGETS, 0, ..]
-            )
-            && row.live.configured(Setting::HumidityMax)
-        {
-            block::DEHUMIDIFY_TARGETS
-        } else {
-            return None;
-        };
-        Some(Observation::Probe(block_request(block, subnet, node)))
+            for id in [block::HUMIDIFY_TARGETS, block::DEHUMIDIFY_TARGETS] {
+                if row.live.missing_target(id) {
+                    bus.reads.queue(node, id);
+                }
+            }
+        }
+        None
     }
 
     pub fn reset(&mut self) {
@@ -450,6 +499,7 @@ impl Inventory {
         self.broadcasts = broadcast::Broadcasts::EMPTY;
         self.outdoor = outdoor::Outdoor::EMPTY;
         for port in &mut self.ports {
+            port.reads = reads::Reads::EMPTY;
             port.link = NormalLine::COLD;
             port.subnet = None;
             port.devices.fill(Device::default());

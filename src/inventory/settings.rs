@@ -52,7 +52,7 @@ impl Setting {
             Self::HumidityMax => method::HUMIDITY_MAX,
         }
     }
-    fn block(self, app_mode: Option<u8>) -> Option<u8> {
+    pub(super) fn block(self, app_mode: Option<u8>) -> Option<u8> {
         Some(match self {
             Self::DeviceTarget => match app_mode? {
                 setpoint::ON_OFF | setpoint::PWM => block::SETPOINT_TARGETS,

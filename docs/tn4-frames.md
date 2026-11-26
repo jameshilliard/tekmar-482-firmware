@@ -528,7 +528,7 @@ supports them. Fields are listed in transmitted order.
 | `0x363` | GeneralDemand | Water subnet; cooling [6] and demand [7]. |
 | `0x36a` | AirGroupMasterConfig | Group [4:0], no-response [6], group master [7]. Second byte: previous group [4:0] and previous master [7]. |
 | `0x377` | AirGroupMasterStatus | Group and inhibit flags, cycle length/start, heat and cool status/targets/readings, output states, remote reading. Not interchangeable with a member report. |
-| `0x37f` | WaterCycleStart | Cycle length [6:0], hold override [7]. |
+| `0x37f` | WaterCycleStart | Cycle length [6:0], hold override [7]. These are plant fields, not a serial response deadline; see [Normal-mode read scheduling](normal-mode.md#bus-compatibility). |
 | `0x387` | NetworkTestTime | Additional time u16. |
 | `0x38f` | NetworkTestMode | Test mode byte and expected duration u16. |
 | `0x397` | EndPurge | Target subnet, output level [6:0] and stage [7], target node bitmap. |

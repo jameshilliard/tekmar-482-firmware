@@ -154,6 +154,9 @@ impl Telemetry {
     pub(super) fn is_setpoint_device(&self) -> bool {
         self.attributes & Self::SETPOINT_DEVICE != 0
     }
+    pub(super) fn mode_known(&self) -> bool {
+        self.mode != UNAVAILABLE
+    }
     pub(super) fn setback(&self) -> u8 {
         self.setback
     }
@@ -248,6 +251,57 @@ impl Telemetry {
     pub(super) fn has_rh(&self) -> bool {
         self.attributes & Self::RH_SOURCE != 0
     }
+    fn refreshable(&self, id: u8) -> bool {
+        let attributes = match id {
+            block::HEAT_SETPOINTS => Self::HEAT,
+            block::COOL_SETPOINTS => Self::COOL,
+            block::SLAB_SETPOINTS => Self::FLOOR_ONLY | Self::FLOOR_SENSOR,
+            block::FAN_PERCENT => Self::FAN,
+            _ => return false,
+        };
+        self.attributes & attributes != 0
+    }
+    /// Changes justify reading configured mode; demand alone cannot tell us the mode.
+    pub(super) fn mode_hint(&self) -> (u8, u8, [u8; 2]) {
+        let active = slots(self.setback);
+        (
+            self.demand,
+            self.setback,
+            self.air_slots
+                .map(|side| active.map_or(UNAVAILABLE, |(i, _)| side[i])),
+        )
+    }
+    pub(super) fn missing_target(&self, id: u8) -> bool {
+        match id {
+            block::HEAT_SETPOINTS | block::COOL_SETPOINTS => {
+                let side = if id == block::HEAT_SETPOINTS {
+                    HEAT_REPORT
+                } else {
+                    COOL_REPORT
+                };
+                self.configured(Setting::Heat)
+                    && self.refreshable(id)
+                    && slots(self.setback)
+                        .is_none_or(|(i, _)| self.air_slots[side][i] == UNAVAILABLE)
+            }
+            block::SLAB_SETPOINTS | block::FAN_PERCENT => {
+                let index = if id == block::SLAB_SETPOINTS {
+                    SLAB_REPORT
+                } else {
+                    FAN_REPORT
+                };
+                let [selector, value] = self.targets[index];
+                self.refreshable(id) && (selector != self.setback || value == UNAVAILABLE)
+            }
+            block::HUMIDIFY_TARGETS => {
+                self.configured(Setting::HumidityMin) && self.rh_targets[0] == UNAVAILABLE
+            }
+            block::DEHUMIDIFY_TARGETS => {
+                self.configured(Setting::HumidityMax) && self.rh_targets[1] == UNAVAILABLE
+            }
+            _ => false,
+        }
+    }
     pub(super) fn setting_report(&mut self, data: &[u8]) -> u16 {
         let [block, 0, mask, values @ ..] = data else {
             return 0;
@@ -307,6 +361,7 @@ impl Telemetry {
                     if block_byte(*mask, values, i).is_some_and(|v| v != 0 && v != UNAVAILABLE) {
                         self.attributes |= bit;
                     } else {
+                        self.rh_targets[i] = UNAVAILABLE;
                         self.dirty &= !f.mask();
                     }
                 }
