@@ -93,11 +93,17 @@ class SensorInput:
 
     @property
     def minimum_f(self) -> float | None:
-        return _fahrenheit(self.minimum_raw) if self.display_role not in (None, SensorRole.OFF) else None
+        return self._historical_f(self.minimum_raw)
 
     @property
     def maximum_f(self) -> float | None:
-        return _fahrenheit(self.maximum_raw) if self.display_role not in (None, SensorRole.OFF) else None
+        return self._historical_f(self.maximum_raw)
+
+    def _historical_f(self, raw: int | None) -> float | None:
+        # SW 11's OFF-as-floor display workaround applies only to the current sample.
+        if self.status_role is SensorRole.OFF or self.display_role in (None, SensorRole.OFF):
+            return None
+        return _fahrenheit(raw)
 
     @classmethod
     def _decode(cls, slot: SensorSlot, model: str, z: int | None, setup: int | None,

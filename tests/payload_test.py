@@ -47,12 +47,15 @@ class PayloadTests(unittest.TestCase):
             (102302, 1, 2, 1520, R.FLOOR, R.FLOOR), (102302, 1, 0xfe, 1520, None, None),
         ):
             with self.subTest(number=number, z=z, raw=raw, word=word):
-                block = decode_payload(0x2e7, bytes([0x17, 0, 7, raw]) + word.to_bytes(2, "little"))
+                block = decode_payload(0x2e7, bytes([0x17, 0, 0x7f, raw]) + word.to_bytes(2, "little")
+                                       + bytes.fromhex("f005 f305"))
                 reading = ThermostatSensors.from_blocks(identify_product(number), z, {0x17: block})
                 sensor, = reading.inputs
                 self.assertEqual((sensor.reported_raw, sensor.status_role, sensor.display_role), (raw, role, display))
                 self.assertEqual(sensor.current_raw, word)
                 self.assertEqual(sensor.current_f is not None, display == R.FLOOR)
+                self.assertEqual((sensor.minimum_f, sensor.maximum_f),
+                                 (67.0, 67.3) if role == R.FLOOR else (None, None))
                 self.assertEqual(reading.average_floor_f is not None, role == R.FLOOR)
 
     def test_sensor_statistics_sparse_words_roles_and_complete_floor_mean(self):

@@ -86,7 +86,7 @@ The 483 SW 11 inbound block fixups and thermostat model distinguish:
 | --- | --- | --- |
 | 544 A..I; 545 and 546 A..J | `16` onboard only | Swap status codes 0 and 1. Other roles, setup and external inputs are unchanged. |
 | 538 A..D | `17` external 1 | Ignore the unreliable role byte. A complete current word below 270 degH implies off; at least 270 implies floor. A missing or reserved word cannot establish a working sensor. |
-| 528 A..B; 538 A..E | `17` external 1 | A status of off with a nonzero usable current can be displayed as floor. This is not evidence of an enabled floor assignment. |
+| 528 A..B; 538 A..E | `17` external 1 | A status of off with a nonzero usable current can be displayed as floor. This applies only to the current reading, not the extrema or the floor assignment. |
 
 These are model/revision-specific rules, not temperature limits. When a
 revision is unknown, do not guess a correction. Preserve the wire role,
