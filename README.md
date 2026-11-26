@@ -77,6 +77,11 @@ ROM ISP. The prefix is exactly A then LF; the command accepts LF or CRLF.
 Wait for the reply before sending another command. The host helper sends
 the prefix automatically.
 
+`A\nBUILD?\n` returns `BUILD <revision>\r\n`. Unstamped development
+images report `unversioned`. When packaging a clean release build, set
+`TEKMAR_BUILD_REVISION` to the full Git commit ID. Older images still
+answer `ID?` but do not implement `BUILD?`.
+
 UART0 measures the first two falling edges of the A using hardware autobaud
 mode 0 ([UM10139 section 10.3.13](https://www.nxp.com/docs/en/user-guide/UM10139.pdf#page=158)).
 PLL0 supplies a 48 MHz peripheral clock during application operation. The

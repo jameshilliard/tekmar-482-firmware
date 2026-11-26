@@ -6,6 +6,7 @@
 
 import argparse
 import binascii
+import os
 import struct
 import sys
 from collections import deque
@@ -43,7 +44,7 @@ def smoke(image: bytes, ram: bool, tx_port: int) -> None:
     tx_cmd = f"A\nTX {tx_port} {tx_body.hex()} {tx_check:04x}\n".encode()
     ack_cmd = f"A\nRX-ACK {tx_port}\n".encode()
     ack_greeting = f"OK ACK {tx_port}\r\n".encode()
-    frames = deque([b"?", b"A!", b"A\nBAD-ENTER-ISP\n", b"A\nID?\n", None, "inputs",
+    frames = deque([b"?", b"A!", b"A\nBAD-ENTER-ISP\n", b"A\nID?\n", b"A\nBUILD?\n", None, "inputs",
                     b"A\nLED-TEST\n", b"A\nPANEL?\n", b"A\nRX-END\n", b"A\nRX-BEGIN\n", b"A\nRX-BEGIN\n",
                     b"A\nRX-END\n", b"A\nRX-STREAM\n", ack_cmd, ack_cmd, tx_cmd, b"A\nRX-BEGIN\n", b"A\nENTER-ISP\r\n"])
     incoming = deque()
@@ -241,7 +242,8 @@ def smoke(image: bytes, ram: bool, tx_port: int) -> None:
             assert 0 <= on[1] - slot < 625 and 0 <= off[1] - slot - 2500 < 625
         assert stopped.startswith(f"K {tx_port} 00000001 00000000\r\n".encode())
         assert stopped.endswith(b"END 00000000\r\n")
-        assert passive == (b"TEKMAR-482-DEV\r\n"
+        build = os.getenv("TEKMAR_BUILD_REVISION", "unversioned").encode()
+        assert passive == (b"TEKMAR-482-DEV\r\nBUILD " + build + b"\r\n"
                             b"PANEL 00000001 00000001 00000000 00000000 00000001 00000001 00000000\r\n"
                             b"PANEL 00000001 00000000 00000001 00000001 00000001 00000001 00000001\r\nOK LED\r\n"
                             b"PANEL 00000001 00000000 00000001 00000001 00000001 00000001 00000001\r\n"

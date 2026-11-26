@@ -155,6 +155,9 @@ extern "C" fn firmware_main() -> ! {
             });
             match command {
                 Command::Identify => board::send(IDENTITY),
+                Command::Build => {
+                    board::send(concat!("BUILD ", env!("TEKMAR_BUILD_REVISION"), "\r\n").as_bytes())
+                }
                 Command::Panel => {
                     panel.poll();
                     panel.report();
