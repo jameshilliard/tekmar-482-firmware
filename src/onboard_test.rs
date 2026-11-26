@@ -1,5 +1,11 @@
 //! Normal-mode diagnostics started by the physical Test button (J1196J 0x342c).
-use crate::trpc::{GatewayVersion, Reply};
+use crate::trpc::{GatewayVersion, Reply, method};
+
+const STAGE_US: u32 = 10_000_000;
+const HELD_TIMEOUT_US: u32 = 300_000_000;
+const FINISH_LOCKOUT_US: u32 = 3_000_000;
+const DIP_SAMPLE_US: u32 = 1_000_000;
+const HELD_BLINK_US: u32 = 500_000;
 
 #[derive(Clone, Copy, Default)]
 enum Stage {
@@ -20,7 +26,7 @@ impl Notice {
     pub fn method(self) -> u32 {
         match self {
             Self::Version(v) => v as u32,
-            Self::ReportingDip(_) => 0x10f,
+            Self::ReportingDip(_) => method::REPORTING_STATE,
         }
     }
 
@@ -46,10 +52,10 @@ impl OnboardTest {
         let next = match self.stage {
             Stage::Idle if pressed => Some(Stage::Running(GatewayVersion::Firmware)),
             Stage::Running(v) if pressed => Some(Stage::Held(v)),
-            Stage::Running(v) if elapsed >= 10_000_000 => Some(Self::advance(v)),
+            Stage::Running(v) if elapsed >= STAGE_US => Some(Self::advance(v)),
             Stage::Held(v) if pressed => Some(Self::advance(v)),
-            Stage::Held(_) if elapsed >= 300_000_000 => Some(Stage::Idle),
-            Stage::Finishing if elapsed >= 3_000_000 => Some(Stage::Idle),
+            Stage::Held(_) if elapsed >= HELD_TIMEOUT_US => Some(Stage::Idle),
+            Stage::Finishing if elapsed >= FINISH_LOCKOUT_US => Some(Stage::Idle),
             _ => None,
         };
         if let Some(stage) = next {
@@ -59,7 +65,7 @@ impl OnboardTest {
                 notify(Notice::Version(v));
             }
         }
-        if us.wrapping_sub(self.sampled) >= 1_000_000 {
+        if us.wrapping_sub(self.sampled) >= DIP_SAMPLE_US {
             self.sampled = us;
             // The DIP is a Test diagnostic, not the mutable reporting-enable flag.
             if matches!(self.stage, Stage::Running(_)) && self.last_dip != dip {
@@ -79,7 +85,7 @@ impl OnboardTest {
     pub fn indicator(&self, us: u32) -> bool {
         match self.stage {
             Stage::Running(_) => true,
-            Stage::Held(_) => (us.wrapping_sub(self.since) / 500_000) & 1 == 0,
+            Stage::Held(_) => (us.wrapping_sub(self.since) / HELD_BLINK_US) & 1 == 0,
             Stage::Finishing | Stage::Idle => false,
         }
     }

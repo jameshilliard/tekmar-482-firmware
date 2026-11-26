@@ -1,4 +1,19 @@
 //! Air-group master/member observations. The master's inhibit code is gateway-wide.
+use super::codes::{demand, setback};
+use crate::tn4::message;
+const INDEXED_GROUPS: usize = 17;
+const GROUP_MASK: u8 = 0x1f;
+const MEMBER_COOL: u8 = 1 << 5;
+const MASTER_INHIBIT_SHIFT: u8 = 5;
+const MASTER_INHIBIT_MASK: u8 = 3;
+const INHIBIT_HEAT: u8 = 1;
+const INHIBIT_COOL: u8 = 2;
+const ENABLED: u8 = 1;
+const DEMAND: u8 = 1 << 1;
+const CALLING: u8 = ENABLED | DEMAND;
+const SETBACK_SHIFT: u8 = 2;
+const OPTIMUM_START_HIGH: u8 = 1 << 6;
+const WEATHER_SHUTDOWN: u8 = 1 << 7;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Side {
@@ -14,59 +29,62 @@ pub(super) struct AirStatus {
     pub target: Option<(Side, u8)>,
 }
 
-pub(super) struct AirGroups([u8; 17]);
+pub(super) struct AirGroups([u8; INDEXED_GROUPS]);
 
 impl AirGroups {
-    pub const EMPTY: Self = Self([0; 17]);
+    pub const EMPTY: Self = Self([0; INDEXED_GROUPS]);
 
     pub fn observe(&mut self, message: u32, data: &[u8]) -> Option<AirStatus> {
         let (&group, rest) = data.split_first()?;
-        let index = usize::from(group & 31);
+        let index = usize::from(group & GROUP_MASK);
         let (heat, cool, setback, temperature, cool_capable) = match (message, rest) {
-            (0x36f, &[flags, target, lo, hi, _, _, _, ..]) => {
+            (message::AIR_GROUP_MEMBER_STATUS, &[flags, target, lo, hi, _, _, _, ..]) => {
                 let side = (flags, target);
-                let cool = group & 32 != 0;
+                let cool = group & MEMBER_COOL != 0;
                 (
                     if cool { (0, 0) } else { side },
                     if cool { side } else { (0, 0) },
                     flags,
                     [lo, hi],
-                    cool && flags & 1 != 0,
+                    cool && flags & ENABLED != 0,
                 )
             }
-            (0x377, &[_, h, ht, lo, hi, c, ct, _, _, _, _, _, ..]) => {
+            (message::AIR_GROUP_MASTER_STATUS, &[_, h, ht, lo, hi, c, ct, _, _, _, _, _, ..]) => {
                 if let Some(mode) = self.0.get_mut(index) {
-                    *mode = (group >> 5) & 3;
+                    *mode = (group >> MASTER_INHIBIT_SHIFT) & MASTER_INHIBIT_MASK;
                 }
                 ((h, ht), (c, ct), h, [lo, hi], true)
             }
             _ => return None,
         };
         let inhibit = self.0.get(index).copied().unwrap_or(0);
-        let calling_heat = heat.0 & 3 == 3;
-        let calling_cool = cool.0 & 3 == 3;
+        let calling_heat = heat.0 & CALLING == CALLING;
+        let calling_cool = cool.0 & CALLING == CALLING;
         // When only one side is enabled it supplies the target even without demand.
         // When both are enabled and idle neither does. Heat wins simultaneous calls.
-        let selected = if heat.0 & 1 != 0 && (cool.0 & 1 == 0 || calling_heat) {
-            Some((Side::Heat, heat, 1))
-        } else if cool.0 & 1 != 0 && (heat.0 & 1 == 0 || calling_cool) {
-            Some((Side::Cool, cool, 2))
+        let selected = if heat.0 & ENABLED != 0 && (cool.0 & ENABLED == 0 || calling_heat) {
+            Some((Side::Heat, heat, INHIBIT_HEAT))
+        } else if cool.0 & ENABLED != 0 && (heat.0 & ENABLED == 0 || calling_cool) {
+            Some((Side::Cool, cool, INHIBIT_COOL))
         } else {
             None
         };
         Some(AirStatus {
             temperature,
-            setback: (setback >> 2) & 7,
+            setback: (setback >> SETBACK_SHIFT) & setback::MASK,
             demand: if calling_heat {
-                1
+                demand::HEAT
             } else if calling_cool {
-                3
+                demand::COOL
             } else {
-                0
+                demand::NONE
             },
             cool_capable,
             target: selected.and_then(|(side, (flags, value), denied)| {
-                (inhibit != denied && flags & 0xc0 == 0 && value != 0).then_some((side, value))
+                (inhibit != denied
+                    && flags & (OPTIMUM_START_HIGH | WEATHER_SHUTDOWN) == 0
+                    && value != 0)
+                    .then_some((side, value))
             }),
         })
     }

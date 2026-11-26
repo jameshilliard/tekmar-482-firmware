@@ -1,9 +1,15 @@
 use super::super::baud::Acquisition;
+use super::super::lpc2146::{timer, uart0};
 use super::super::output::{Kind, Output};
 use super::super::panel::Panel;
 use super::super::transmit::{Attempt, LineDriver};
-use super::{CCR, CR0, Capture, INPUTS, IR, TC, TIMERS, read, write};
+use super::{CCR, Capture, CaptureInput, INPUTS, IR, TC, TIMERS, next_edge_flags, read, write};
 use core::cell::RefCell;
+use tekmar_482_firmware::tn4::{ALL_PORTS_MASK, LAST_PORT, MAX_BYTES, PORT_COUNT};
+use tekmar_482_firmware::tpck::raw;
+const MOVE_QUEUE_CAPACITY: usize = 128;
+const NORMAL_MODE: u8 = 0;
+const RAW_MODE: u8 = 1;
 use embassy_futures::yield_now;
 use tekmar_482_firmware::uptime::Uptime;
 use tekmar_482_firmware::{
@@ -13,19 +19,19 @@ use tekmar_482_firmware::{
         tx::{Mode, Outcome, Request},
     },
     tpck,
-    trpc::{AfterDrain, Call},
+    trpc::{AfterDrain, BridgeError, Call, method, service},
 };
 
 pub struct Receivers {
     _capture: Capture,
-    rx: [Receiver; 5],
-    rising: [bool; 5],
+    rx: [Receiver; PORT_COUNT],
+    rising: [bool; PORT_COUNT],
 }
 
 impl Receivers {
     pub fn start() -> Self {
-        let capture = Capture::arm(true);
-        let high = INPUTS.map(|(pin, _, _)| capture.initial & (1 << pin) != 0);
+        let capture = Capture::arm();
+        let high = INPUTS.map(|input| capture.initial & (1 << input.pin) != 0);
         Self {
             rx: high.map(Receiver::starting_at),
             rising: high.map(|level| !level),
@@ -35,17 +41,20 @@ impl Receivers {
 
     pub fn poll(&mut self, now: [u32; 2], mut report: impl FnMut(usize, Frame<'_>)) {
         let pending = TIMERS.map(|t| read(t + IR));
-        for (port, &(_, timer, ch)) in INPUTS.iter().enumerate() {
+        for (port, input) in INPUTS.iter().enumerate() {
+            let (timer, ch) = (input.timer, input.channel);
             let t = TIMERS[timer];
-            let flag = 1 << (4 + ch);
+            let flag = 1 << (timer::FIRST_CAPTURE_IRQ + ch);
             let mut emit = |f: Frame<'_>| report(port, f);
             if pending[timer] & flag != 0 {
-                let at = read(t + CR0 + 4 * ch);
+                let at = input.timestamp();
                 write(t + IR, flag);
-                let next = if self.rising[port] { 6 } else { 5 };
+                let next = next_edge_flags(self.rising[port]);
                 write(
                     t + CCR,
-                    (read(t + CCR) & !(7 << (3 * ch))) | (next << (3 * ch)),
+                    (read(t + CCR)
+                        & !(timer::CAPTURE_FIELD_MASK << (timer::CAPTURE_FIELD_BITS * ch)))
+                        | (next << (timer::CAPTURE_FIELD_BITS * ch)),
                 );
                 self.rx[port].edge(at, self.rising[port], &mut emit);
                 self.rising[port] = !self.rising[port];
@@ -68,23 +77,26 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
         static_cell::ConstStaticCell::new(Inventory::new());
     let inventory = INVENTORY.take();
     #[unsafe(link_section = ".low_bss")]
-    static MOVES: static_cell::ConstStaticCell<heapless::Deque<AddressMove, 128>> =
+    static MOVES: static_cell::ConstStaticCell<heapless::Deque<AddressMove, MOVE_QUEUE_CAPACITY>> =
         static_cell::ConstStaticCell::new(heapless::Deque::new());
     let moves = MOVES.take();
-    inventory.set_reporting(panel.borrow().report()[0] & 1 != 0);
+    inventory
+        .set_reporting(panel.borrow().report()[0] & u32::from(super::super::panel::DIP_INPUT) != 0);
     let mut bus = Receivers::start();
     let mut decoder = tpck::Decoder::default();
     let out = Output::take();
     let mut baud = Acquisition::default();
     let mut raw = false;
     let mut reboot = false;
-    let mut occupied = [false; 5];
-    let mut owner = [NormalTx::Probe; 5];
+    let mut occupied = [false; PORT_COUNT];
+    let mut owner = [NormalTx::Probe; PORT_COUNT];
     #[unsafe(link_section = ".low_bss")]
-    static SENDERS: static_cell::StaticCell<[Option<Attempt>; 5]> = static_cell::StaticCell::new();
+    static SENDERS: static_cell::StaticCell<[Option<Attempt>; PORT_COUNT]> =
+        static_cell::StaticCell::new();
     let sending = SENDERS.init_with(|| core::array::from_fn(|_| None));
-    let mut response: [LinkResponse; 5] = core::array::from_fn(|_| LinkResponse::default());
-    let mut response_pin: [Option<LineDriver>; 5] = core::array::from_fn(|_| None);
+    let mut response: [LinkResponse; PORT_COUNT] =
+        core::array::from_fn(|_| LinkResponse::default());
+    let mut response_pin: [Option<LineDriver>; PORT_COUNT] = core::array::from_fn(|_| None);
     let mut ack_mask = 0u8;
     let mut uptime = Uptime::default();
     let mut last_service = None;
@@ -103,11 +115,17 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                 return;
             }
             if raw {
-                let mut data = [0; 73];
+                let mut data = [0; raw::RX_PREFIX + MAX_BYTES];
+                data[0] = raw::RX;
                 data[1] = p as u8;
-                data[2..6].copy_from_slice(&uptime.millis(us).to_le_bytes());
-                data[6..6 + frame.bytes.len()].copy_from_slice(frame.bytes);
-                out.enqueue(Kind::Rx(p as u8), tpck::TN4, &data[..6 + frame.bytes.len()]);
+                data[2..raw::RX_PREFIX].copy_from_slice(&uptime.millis(us).to_le_bytes());
+                data[raw::RX_PREFIX..raw::RX_PREFIX + frame.bytes.len()]
+                    .copy_from_slice(frame.bytes);
+                out.enqueue(
+                    Kind::Rx(p as u8),
+                    tpck::TN4,
+                    &data[..raw::RX_PREFIX + frame.bytes.len()],
+                );
             } else if !reboot
                 && !frame.early_start
                 // RX sees our own frame before TX finishes. Only a peer counts as
@@ -125,8 +143,12 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                 match observed {
                     Observation::Probe(body) => {
                         if let Some(req) = Request::new(p as u8, &body) {
-                            sending[p] =
-                                Attempt::new(&req, INPUTS[p].0, now[INPUTS[p].1], Mode::Normal);
+                            sending[p] = Attempt::new(
+                                &req,
+                                INPUTS[p].pin,
+                                now[INPUTS[p].timer],
+                                Mode::Normal,
+                            );
                         }
                     }
                     Observation::Moved(moved) => {
@@ -138,7 +160,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                 }
             }
         });
-        for p in 0..5 {
+        for p in 0..PORT_COUNT {
             let listening = !reboot && !sending[p].as_ref().is_some_and(Attempt::started);
             let mut fault_at = bus.rx[p].take_drive_fault();
             if fault_at.is_some() {
@@ -153,17 +175,19 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
             }
             if let Some(fault) = bus.rx[p].take_failure() {
                 if raw {
-                    let mut data = [0; 78];
-                    data[0] = 4;
+                    let mut data = [0; raw::INVALID_PREFIX + MAX_BYTES + size_of::<u16>()];
+                    data[0] = raw::RX_INVALID;
                     data[1] = p as u8;
-                    data[2..6].copy_from_slice(&uptime.millis(us).to_le_bytes());
-                    data[6] = fault.reason;
-                    data[7..9].copy_from_slice(&fault.bits.to_le_bytes());
-                    data[9..9 + fault.bytes.len()].copy_from_slice(fault.bytes);
+                    data[2..raw::RX_PREFIX].copy_from_slice(&uptime.millis(us).to_le_bytes());
+                    data[raw::RX_PREFIX] = fault.reason;
+                    data[raw::RX_PREFIX + 1..raw::INVALID_PREFIX]
+                        .copy_from_slice(&fault.bits.to_le_bytes());
+                    data[raw::INVALID_PREFIX..raw::INVALID_PREFIX + fault.bytes.len()]
+                        .copy_from_slice(fault.bytes);
                     out.enqueue(
                         Kind::Invalid(p as u8),
                         tpck::TN4,
-                        &data[..9 + fault.bytes.len()],
+                        &data[..raw::INVALID_PREFIX + fault.bytes.len()],
                     );
                 } else if listening && fault_at.is_none() {
                     inventory.line(p).frame_error();
@@ -176,7 +200,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
             if !raw && bus.rx[p].stuck_dominant() {
                 inventory.line(p).down();
             }
-            let t = read(TIMERS[INPUTS[p].1] + TC);
+            let t = read(TIMERS[INPUTS[p].timer] + TC);
             let may_start =
                 raw || inventory.line(p).may_start(t, bus.rx[p].idle()) && !bus.rx[p].recovering();
             if !raw && !reboot {
@@ -201,7 +225,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                     && !response[p].busy()
                 {
                     if let Some(req) = inventory.command_frame(p) {
-                        sending[p] = Attempt::new(&req, INPUTS[p].0, t, Mode::Normal);
+                        sending[p] = Attempt::new(&req, INPUTS[p].pin, t, Mode::Normal);
                         if sending[p].is_some() {
                             owner[p] = NormalTx::Setting;
                         } else {
@@ -214,7 +238,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                     } else if let Some(tx) = inventory.next_broadcast(p, seconds)
                         && let Some(req) = tx.frame(p as u8)
                     {
-                        sending[p] = Attempt::new(&req, INPUTS[p].0, t, Mode::Normal);
+                        sending[p] = Attempt::new(&req, INPUTS[p].pin, t, Mode::Normal);
                         if sending[p].is_some() {
                             owner[p] = NormalTx::Broadcast(tx);
                         }
@@ -222,7 +246,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                         && let Some(probe) = discovery
                         && let Some(req) = probe.frame(p as u8)
                     {
-                        sending[p] = Attempt::new(&req, INPUTS[p].0, t, Mode::Normal);
+                        sending[p] = Attempt::new(&req, INPUTS[p].pin, t, Mode::Normal);
                         if sending[p].is_some() {
                             owner[p] = NormalTx::Discovery(probe);
                         }
@@ -245,7 +269,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                 if let Some(waiting) = sending[p].as_mut() {
                     waiting.respond(high);
                 } else if high {
-                    response_pin[p] = LineDriver::claim(p as u8, INPUTS[p].0);
+                    response_pin[p] = LineDriver::claim(p as u8, INPUTS[p].pin);
                     if let Some(pin) = response_pin[p].as_mut() {
                         pin.drive(true);
                     }
@@ -285,17 +309,30 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                 }
                 let why = match result {
                     Outcome::Ack => 0,
-                    Outcome::NoAck => 1,
-                    Outcome::ArbitrationLost => 2,
-                    Outcome::EchoMismatch => 3,
-                    Outcome::BadEnd => 4,
-                    Outcome::Late => 5,
+                    Outcome::NoAck => raw::attempted::NO_ACK,
+                    Outcome::ArbitrationLost => raw::attempted::ARBITRATION_LOST,
+                    Outcome::EchoMismatch => raw::attempted::ECHO_MISMATCH,
+                    Outcome::BadEnd => raw::attempted::BAD_END,
+                    Outcome::Late => raw::attempted::MISSED_TIMING,
                 };
-                let body = [2, p as u8, if why == 0 { 0 } else { 2 }, why];
+                let body = [
+                    raw::TX_RESULT,
+                    p as u8,
+                    if result == Outcome::Ack {
+                        raw::status::ACKNOWLEDGED
+                    } else {
+                        raw::status::ATTEMPTED
+                    },
+                    why,
+                ];
                 out.enqueue(
                     Kind::Result(p as u8),
                     tpck::TN4,
-                    if why == 0 { &body[..3] } else { &body },
+                    if result == Outcome::Ack {
+                        &body[..3]
+                    } else {
+                        &body
+                    },
                 );
             }
         }
@@ -312,7 +349,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
         // Several TPCK frames can arrive back-to-back at the negotiated baud.
         // Empty the 16-byte UART FIFO, but return to the line timers after
         // dispatching one command even if more bytes are already available.
-        'receive: for _ in 0..16 {
+        'receive: for _ in 0..uart0::FIFO_BYTES {
             if reboot || !out.can_receive() {
                 break 'receive;
             }
@@ -327,48 +364,63 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                     if let Some(packet) = decoder.push(b) {
                         baud.locked = true;
                         if packet.kind == tpck::TN4 {
-                            if let [1, port, body @ ..] = packet.data {
+                            if let [raw::SEND, port, body @ ..] = packet.data {
                                 let p = usize::from(*port);
-                                if p >= 5 {
-                                    out.enqueue(Kind::Control, tpck::TN4, &[3, *port, 2]);
+                                if p >= PORT_COUNT {
+                                    out.enqueue(
+                                        Kind::Control,
+                                        tpck::TN4,
+                                        &[raw::PORT_ERROR, *port, raw::port_error::INVALID_PORT],
+                                    );
                                 } else if occupied[p] {
-                                    out.enqueue(Kind::Overlap(*port), tpck::TN4, &[3, *port, 1]);
+                                    out.enqueue(
+                                        Kind::Overlap(*port),
+                                        tpck::TN4,
+                                        &[
+                                            raw::PORT_ERROR,
+                                            *port,
+                                            raw::port_error::SEND_IN_PROGRESS,
+                                        ],
+                                    );
                                 } else {
                                     occupied[p] = true;
-                                    let mut reason = 0;
+                                    let mut reason = None;
                                     if !raw {
-                                        reason = 3;
+                                        reason = Some(raw::rejected::WRONG_MODE);
                                     } else if let Some(req) = Request::new(*port, body) {
                                         if response[p].busy() {
-                                            reason = 4;
+                                            reason = Some(raw::rejected::LINK_RESPONSE_ACTIVE);
                                         } else {
                                             response_pin[p] = None;
                                             sending[p] = Attempt::new(
                                                 &req,
-                                                INPUTS[p].0,
-                                                read(TIMERS[INPUTS[p].1] + TC),
+                                                INPUTS[p].pin,
+                                                read(TIMERS[INPUTS[p].timer] + TC),
                                                 Mode::Raw,
                                             );
                                             if sending[p].is_none() {
-                                                reason = 2;
+                                                reason = Some(raw::rejected::PIN_UNAVAILABLE);
                                             }
                                         }
                                     } else {
-                                        reason = 1;
+                                        reason = Some(raw::rejected::INVALID_BODY);
                                     }
-                                    if reason != 0 {
+                                    if let Some(reason) = reason {
                                         out.enqueue(
                                             Kind::Result(*port),
                                             tpck::TN4,
-                                            &[2, *port, 1, reason],
+                                            &[raw::TX_RESULT, *port, raw::status::REJECTED, reason],
                                         );
                                     }
                                 }
                             }
                         } else if let Some(call) = Call::parse(packet) {
                             if !raw
-                                && matches!(call.method, 0x544bf002 | 0x544bf005)
-                                && call.service == 0
+                                && matches!(
+                                    call.method,
+                                    method::SET_BRIDGE_MODE | method::ENTER_FIRMWARE_UPDATE
+                                )
+                                && call.service == service::UPDATE
                             {
                                 for (p, attempt) in sending.iter_mut().enumerate() {
                                     if !response[p].busy()
@@ -385,32 +437,38 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                             }
                             let busy = !moves.is_empty()
                                 || inventory.walking()
-                                || (0..5).any(|p| {
+                                || (0..PORT_COUNT).any(|p| {
                                     inventory.has_command(p) || inventory.has_broadcast(p)
                                 })
                                 || occupied.contains(&true)
                                 || sending.iter().any(Option::is_some)
                                 || response.iter().any(LinkResponse::busy);
                             let reply = match (call.method, call.service, call.body) {
-                                (0x544bf002, 0, [m @ 0..=1]) if !busy => {
-                                    if raw != (*m == 1) {
+                                (
+                                    method::SET_BRIDGE_MODE,
+                                    service::UPDATE,
+                                    [m @ NORMAL_MODE..=RAW_MODE],
+                                ) if !busy => {
+                                    if raw != (*m == RAW_MODE) {
                                         inventory.reset();
                                         last_service = None;
                                         panel.borrow_mut().reset_sequence();
                                     }
-                                    raw = *m == 1;
+                                    raw = *m == RAW_MODE;
                                     if !raw {
                                         ack_mask = 0;
                                         response_pin = core::array::from_fn(|_| None);
                                     }
                                     call.ok(&[*m])
                                 }
-                                (0x544bf002, 0, [_]) if busy => call.error(1),
-                                (0x544bf003, 1, [p @ 0..=4]) => {
-                                    let mut b = [0; 9];
+                                (method::SET_BRIDGE_MODE, service::UPDATE, [_]) if busy => {
+                                    call.error(BridgeError::Busy)
+                                }
+                                (method::PORT_DROPS, service::REQUEST, [p @ 0..=LAST_PORT]) => {
+                                    let mut b = [0; 1 + 2 * size_of::<u32>()];
                                     b[0] = *p;
                                     for (chunk, n) in b[1..]
-                                        .as_chunks_mut::<4>()
+                                        .as_chunks_mut::<{ size_of::<u32>() }>()
                                         .0
                                         .iter_mut()
                                         .zip(out.drops[*p as usize])
@@ -419,10 +477,11 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                                     }
                                     call.ok(&b)
                                 }
-                                (0x544bf007, 1, []) => {
-                                    let mut b = [0; 28];
+                                (method::PANEL, service::REQUEST, []) => {
+                                    let mut b =
+                                        [0; super::super::panel::REPORT_WORDS * size_of::<u32>()];
                                     for (chunk, v) in b
-                                        .as_chunks_mut::<4>()
+                                        .as_chunks_mut::<{ size_of::<u32>() }>()
                                         .0
                                         .iter_mut()
                                         .zip(panel.borrow().report())
@@ -431,11 +490,15 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                                     }
                                     call.ok(&b)
                                 }
-                                (0x544bf008, 0, []) => {
+                                (method::LED_TEST, service::UPDATE, []) => {
                                     panel.borrow_mut().start_test();
                                     call.ok(&[])
                                 }
-                                (0x544bf009, 0, [mask @ 0..=31]) if raw && !busy => {
+                                (
+                                    method::LINK_ACK_MASK,
+                                    service::UPDATE,
+                                    [mask @ 0..=ALL_PORTS_MASK],
+                                ) if raw && !busy => {
                                     for (p, pin) in response_pin.iter_mut().enumerate() {
                                         if mask & (1 << p) == 0 {
                                             *pin = None;
@@ -444,14 +507,16 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                                     ack_mask = *mask;
                                     call.ok(&[*mask])
                                 }
-                                (0x544bf009, 0, [_]) if busy => call.error(1),
-                                (0x544bf00a, 1, []) => {
-                                    let mut b = [0; 48];
+                                (method::LINK_ACK_MASK, service::UPDATE, [_]) if busy => {
+                                    call.error(BridgeError::Busy)
+                                }
+                                (method::CAPTURE_COUNTERS, service::REQUEST, []) => {
+                                    let mut b =
+                                        [0; (TIMERS.len() + 2 * PORT_COUNT) * size_of::<u32>()];
                                     let counts = bus.rx.each_ref().map(|r| r.stats.edges);
-                                    let stamps =
-                                        INPUTS.map(|(_, t, ch)| read(TIMERS[t] + CR0 + 4 * ch));
+                                    let stamps = INPUTS.map(CaptureInput::timestamp);
                                     for (chunk, n) in b
-                                        .as_chunks_mut::<4>()
+                                        .as_chunks_mut::<{ size_of::<u32>() }>()
                                         .0
                                         .iter_mut()
                                         .zip(now.into_iter().chain(counts).chain(stamps))
@@ -460,14 +525,18 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                                     }
                                     call.ok(&b)
                                 }
-                                (0x544bf002 | 0x544bf003 | 0x544bf007..=0x544bf00a, _, _) => {
-                                    call.error(2)
-                                }
+                                (
+                                    method::SET_BRIDGE_MODE
+                                    | method::PORT_DROPS
+                                    | method::PANEL..=method::CAPTURE_COUNTERS,
+                                    _,
+                                    _,
+                                ) => call.error(BridgeError::InvalidRequest),
                                 _ => {
                                     if let Some(reply) = call.management(raw, busy) {
                                         reply
                                     } else if raw {
-                                        call.error(3)
+                                        call.error(BridgeError::WrongMode)
                                     } else {
                                         match inventory.handle(&call, seconds) {
                                             Answer::Reply(reply) => reply,

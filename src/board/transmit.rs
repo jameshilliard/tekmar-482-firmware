@@ -1,12 +1,13 @@
-use super::{PINSEL0, read, write};
+use super::{PINSEL0, lpc2146::gpio, read, write};
+use tekmar_482_firmware::tn4::PORT_COUNT;
 use tekmar_482_firmware::tn4::tx::{Action, Mode, Outcome, Request, Sender};
 
-const FIO: usize = 0x3fff_c000;
-const MASK: usize = FIO + 0x10;
-const PIN: usize = FIO + 0x14;
-const SET: usize = FIO + 0x18;
-const CLR: usize = FIO + 0x1c;
-const TX_PINS: [usize; 5] = [28, 13, 22, 8, 29];
+const FIO: usize = gpio::FIO0;
+const MASK: usize = FIO + gpio::MASK;
+const PIN: usize = FIO + gpio::PIN;
+const SET: usize = FIO + gpio::SET;
+const CLR: usize = FIO + gpio::CLR;
+const TX_PINS: [usize; PORT_COUNT] = [28, 13, 22, 8, 29];
 
 pub(super) struct Attempt {
     sender: Sender,
@@ -25,7 +26,12 @@ impl LineDriver {
         let pin = TX_PINS[usize::from(port)];
         let tx = 1 << pin;
         let rx = 1 << rx_pin;
-        if read(FIO) & tx != 0 || (read(PINSEL0 + 4 * (pin / 16)) >> (2 * (pin % 16))) & 3 != 0 {
+        if read(FIO) & tx != 0
+            || (read(PINSEL0 + size_of::<u32>() * (pin / gpio::PINS_PER_MUX_REGISTER))
+                >> (gpio::MUX_BITS * (pin % gpio::PINS_PER_MUX_REGISTER)))
+                & gpio::MUX_MASK
+                != 0
+        {
             return None; // not an unclaimed GPIO input
         }
         let mask = read(MASK);

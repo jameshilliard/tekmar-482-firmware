@@ -1,5 +1,11 @@
 //! Bounded binary UART records. Only an unstarted record may be displaced.
-use super::{LSR, TEMT, THRE, UART0, read, write};
+use super::{lpc2146::uart0, read, write};
+use tekmar_482_firmware::tn4::PORT_COUNT;
+const REPORT_WATERMARK: usize = 2;
+const RX_WATERMARK: usize = 6;
+const COMMAND_WATERMARK: usize = 8;
+const RECORD_SLOTS: usize = COMMAND_WATERMARK + PORT_COUNT;
+const ENCODED_RECORD_BYTES: usize = 168; // includes TPCK escaping
 use heapless::Vec;
 use tekmar_482_firmware::tpck;
 
@@ -14,17 +20,17 @@ pub(super) enum Kind {
 }
 
 struct Record {
-    bytes: Vec<u8, 168>,
+    bytes: Vec<u8, ENCODED_RECORD_BYTES>,
     kind: Kind,
 }
 
 pub(super) struct Output {
-    records: [Record; 13],
-    order: [u8; 13],
+    records: [Record; RECORD_SLOTS],
+    order: [u8; RECORD_SLOTS],
     used: u16,
     len: usize,
     offset: usize,
-    pub(super) drops: [[u32; 2]; 5],
+    pub(super) drops: [[u32; 2]; PORT_COUNT],
 }
 
 impl Output {
@@ -37,20 +43,20 @@ impl Output {
                         bytes: Vec::new(),
                         kind: Kind::Rx(0),
                     }
-                }; 13],
-                order: [0; 13],
+                }; RECORD_SLOTS],
+                order: [0; RECORD_SLOTS],
                 used: 0,
                 len: 0,
                 offset: 0,
-                drops: [[0; 2]; 5],
+                drops: [[0; 2]; PORT_COUNT],
             });
         QUEUE.take()
     }
     pub(super) fn can_report(&self) -> bool {
-        self.len < 2
+        self.len < REPORT_WATERMARK
     }
     pub(super) fn can_receive(&self) -> bool {
-        self.len < 8
+        self.len < COMMAND_WATERMARK
     }
     fn lost(&mut self, kind: Kind) {
         let (p, i) = match kind {
@@ -72,7 +78,7 @@ impl Output {
     }
     pub(super) fn enqueue(&mut self, kind: Kind, ty: u8, data: &[u8]) {
         let first = usize::from(self.offset != 0);
-        if matches!(kind, Kind::Rx(_) | Kind::Invalid(_)) && self.len >= 6 {
+        if matches!(kind, Kind::Rx(_) | Kind::Invalid(_)) && self.len >= RX_WATERMARK {
             if matches!(kind, Kind::Rx(_))
                 && let Some(i) = self.order[first..self.len]
                     .iter()
@@ -111,19 +117,19 @@ impl Output {
         }
         let r = &self.records[usize::from(self.order[0])];
         if self.offset < r.bytes.len() {
-            if read(LSR) & THRE == 0 {
+            if read(uart0::LSR) & uart0::THRE == 0 {
                 return None;
             }
-            let end = (self.offset + 16).min(r.bytes.len());
+            let end = (self.offset + uart0::FIFO_BYTES).min(r.bytes.len());
             for &byte in &r.bytes[self.offset..end] {
-                write(UART0, u32::from(byte));
+                write(uart0::DATA, u32::from(byte));
             }
             self.offset = end;
         }
         if self.offset != r.bytes.len() {
             return None;
         }
-        if matches!(r.kind, Kind::Result(_) | Kind::Reboot) && read(LSR) & TEMT == 0 {
+        if matches!(r.kind, Kind::Result(_) | Kind::Reboot) && read(uart0::LSR) & uart0::TEMT == 0 {
             return None;
         }
         self.offset = 0;

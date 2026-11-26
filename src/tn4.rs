@@ -1,11 +1,51 @@
 //! Listen-only tN4 link decoder. Logic high is dominant; idle is low.
 
+use crate::tpck::raw::invalid;
+pub mod block;
+pub mod message;
 mod response;
 pub mod tx;
 pub use response::LinkResponse;
 
 const BIT_US: u32 = 2500;
-const MAX_BYTES: usize = 4 + 63;
+const SAMPLE_OFFSET_US: u32 = BIT_US / 2;
+const MAX_LATENESS_US: i32 = (BIT_US / 4) as i32;
+const CRC_BITS: u8 = 15;
+const CRC_POLYNOMIAL: u16 = 0x4599;
+const CRC_TOP: u16 = 1 << (CRC_BITS - 1);
+const CRC_MASK: u16 = (1 << CRC_BITS) - 1;
+const STUFF_RUN: u8 = 5;
+const HISTORY_MASK: u8 = (1 << (STUFF_RUN + 1)) - 1;
+const RECESSIVE_STUFF_BIT: u8 = HISTORY_MASK - 1;
+const DOMINANT_STUFF_BIT: u8 = 1;
+const EOF_BITS: u8 = 7;
+const LAST_IDLE_SAMPLE: u8 = EOF_BITS - 1;
+const ACK_DELIMITER_AND_EOF: u8 = 1 + EOF_BITS;
+const GAP_BITS: u8 = 3;
+const STUCK_DOMINANT: u8 = 14;
+const STUCK_DELIMITER: i8 = STUCK_DOMINANT as i8;
+const LAST_QUIET_DELIMITER: i8 = -(8 - 1);
+
+fn crc_bit(crc: u16, bit: bool) -> u16 {
+    let feedback = (crc & CRC_TOP != 0) ^ bit;
+    ((crc << 1) & CRC_MASK) ^ if feedback { CRC_POLYNOMIAL } else { 0 }
+}
+pub const PORT_COUNT: usize = 5;
+pub const LAST_PORT: u8 = PORT_COUNT as u8 - 1;
+pub const ALL_PORTS_MASK: u8 = (1 << PORT_COUNT) - 1;
+pub const HEADER_BYTES: usize = size_of::<u32>();
+pub const PAYLOAD_MASK: u8 = 0x3f;
+pub const MAX_BYTES: usize = HEADER_BYTES + PAYLOAD_MASK as usize;
+pub const MESSAGE_SHIFT: u32 = 20;
+pub const MESSAGE_MASK: u32 = 0x3ff;
+pub const SUBNET_SHIFT: u32 = 12;
+pub const NODE_SHIFT: u32 = 6;
+pub const NODE_MASK: u8 = 0x1f;
+pub const PRIORITY_CLASS_ONE: u32 = 1 << 30;
+
+pub(crate) fn gateway_header(message: u32, len: usize) -> [u8; HEADER_BYTES] {
+    (PRIORITY_CLASS_ONE | (message << MESSAGE_SHIFT) | len as u32).to_be_bytes()
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Trailer {
@@ -101,7 +141,7 @@ impl Default for Receiver {
             start: 0,
             level: false,
             edge_us: 0,
-            sample_us: BIT_US / 2,
+            sample_us: SAMPLE_OFFSET_US,
         }
     }
 }
@@ -169,7 +209,10 @@ impl Receiver {
     }
 
     pub fn stuck_dominant(&self) -> bool {
-        matches!(self.state, State::Dominant(14) | State::ErrorDelimiter(14))
+        matches!(
+            self.state,
+            State::Dominant(STUCK_DOMINANT) | State::ErrorDelimiter(STUCK_DELIMITER)
+        )
     }
 
     /// Sample at bit centers, re-centering on each captured transition.
@@ -179,7 +222,7 @@ impl Receiver {
         self.advance(time, emit);
         self.level = high;
         self.edge_us = time;
-        self.sample_us = time.wrapping_add(BIT_US / 2);
+        self.sample_us = time.wrapping_add(SAMPLE_OFFSET_US);
     }
 
     pub fn advance(&mut self, time: u32, mut emit: impl FnMut(Frame<'_>)) {
@@ -206,17 +249,17 @@ impl Receiver {
     fn bit(&mut self, high: bool) -> Option<Trailer> {
         let b = u8::from(high);
         // advance() has already moved the sample clock to the following bit center.
-        let next_bit = self.sample_us.wrapping_sub(BIT_US / 2);
+        let next_bit = self.sample_us.wrapping_sub(SAMPLE_OFFSET_US);
         if matches!(self.state, State::Data | State::Check(_)) {
-            self.history = ((self.history << 1) | b) & 63;
+            self.history = ((self.history << 1) | b) & HISTORY_MASK;
             match self.history {
-                0 | 63 => {
-                    self.failure = Some((1, next_bit));
+                0 | HISTORY_MASK => {
+                    self.failure = Some((invalid::STUFFING, next_bit));
                     self.stats.stuffing = self.stats.stuffing.saturating_add(1);
                     self.state = State::Seek(0);
                     return None;
                 }
-                1 | 62 => return None, // complementary stuff bit after five equal bits
+                DOMINANT_STUFF_BIT | RECESSIVE_STUFF_BIT => return None, // complementary stuff bit after five equal bits
                 _ => {}
             }
             let offset = self.captured % 8;
@@ -229,9 +272,9 @@ impl Receiver {
         }
         self.state = match self.state {
             State::Seek(_) if high => State::Dominant(1),
-            State::Dominant(n) if high => State::Dominant((n + 1).min(14)),
+            State::Dominant(n) if high => State::Dominant((n + 1).min(STUCK_DOMINANT)),
             State::Dominant(_) => State::Seek(1),
-            State::Seek(6) => State::Idle,
+            State::Seek(LAST_IDLE_SAMPLE) => State::Idle,
             State::Seek(n) => State::Seek(n + 1),
             State::ErrorFlag(end)
                 if (self.sample_us.wrapping_sub(BIT_US).wrapping_sub(end) as i32) < 0 =>
@@ -246,13 +289,15 @@ impl Receiver {
                 self.verify_drive = false;
                 State::ErrorDelimiter(if high { 1 } else { -1 })
             }
-            State::ErrorDelimiter(n) if high => State::ErrorDelimiter((n.max(0) + 1).min(14)),
-            State::ErrorDelimiter(-7) => State::Gap(3),
+            State::ErrorDelimiter(n) if high => {
+                State::ErrorDelimiter((n.max(0) + 1).min(STUCK_DELIMITER))
+            }
+            State::ErrorDelimiter(LAST_QUIET_DELIMITER) => State::Gap(GAP_BITS),
             State::ErrorDelimiter(n) => State::ErrorDelimiter(n.min(0) - 1),
             State::Gap(1) | State::Idle if !high => State::Idle,
             State::Gap(n) if !high => State::Gap(n - 1),
             State::Gap(_) | State::Idle => {
-                self.early_start = matches!(self.state, State::Gap(3));
+                self.early_start = matches!(self.state, State::Gap(GAP_BITS));
                 if self.early_start {
                     self.gap_fault = Some(next_bit);
                 }
@@ -262,21 +307,21 @@ impl Receiver {
                 self.start = self.edge_us;
                 self.bits = 0;
                 self.history = 1; // SOF participates in stuffing and CRC
-                self.crc = 0x4599;
+                self.crc = CRC_POLYNOMIAL;
                 self.received = 0;
                 State::Data
             }
             State::Data => {
-                let feedback = ((self.crc >> 14) != 0) ^ high;
-                self.crc = (self.crc << 1) & 0x7fff;
-                if feedback {
-                    self.crc ^= 0x4599;
-                }
+                self.crc = crc_bit(self.crc, high);
                 let byte = &mut self.bytes[self.bits / 8];
                 *byte = (*byte << 1) | b;
                 self.bits += 1;
-                if self.bits >= 32 && self.bits == (4 + usize::from(self.bytes[3] & 63)) * 8 {
-                    State::Check(15)
+                if self.bits >= HEADER_BYTES * 8
+                    && self.bits
+                        == (HEADER_BYTES + usize::from(self.bytes[HEADER_BYTES - 1] & PAYLOAD_MASK))
+                            * 8
+                {
+                    State::Check(CRC_BITS)
                 } else {
                     State::Data
                 }
@@ -291,12 +336,12 @@ impl Receiver {
                     self.stats.crc_mismatch = self.stats.crc_mismatch.saturating_add(1);
                     self.stats.last_received_crc = self.received;
                     self.stats.last_expected_crc = self.crc;
-                    self.failure = Some((2, next_bit));
+                    self.failure = Some((invalid::CRC, next_bit));
                     State::Seek(0)
                 }
             }
             State::Delimiter if high => {
-                self.failure = Some((3, next_bit));
+                self.failure = Some((invalid::CRC_DELIMITER, next_bit));
                 self.state = State::Seek(0);
                 return Some(Trailer::BadDelimiter);
             }
@@ -308,15 +353,15 @@ impl Receiver {
                     return None;
                 }
                 self.ack = high;
-                State::End(8)
+                State::End(ACK_DELIMITER_AND_EOF)
             }
             State::End(_) if high => {
-                self.failure = Some((4, next_bit));
+                self.failure = Some((invalid::BAD_END, next_bit));
                 self.state = State::Seek(0);
                 return Some(Trailer::BadEnd { ack: self.ack });
             }
             State::End(1) => {
-                self.state = State::Gap(3);
+                self.state = State::Gap(GAP_BITS);
                 return Some(if self.ack {
                     Trailer::Ack
                 } else {

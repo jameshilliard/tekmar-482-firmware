@@ -1,37 +1,57 @@
 //! Normal-mode gateway identification and optional update management.
 //! Device methods belong to the tN4 dispatcher, not to this layer.
 use crate::tpck::{Packet, TRPC};
+pub mod method;
+use method::*;
 
-const UPDATE: u8 = 0;
-const REQUEST: u8 = 1;
-const RESPONSE_UPDATE: u8 = 3;
-const RESPONSE_REQUEST: u8 = 4;
-pub const BRIDGE_CAPABILITIES: u32 = 0x544b_f001;
-pub const FIRMWARE_BUILD: u32 = 0x544b_f004;
-pub const ENTER_FIRMWARE_UPDATE: u32 = 0x544b_f005;
-const BRIDGE_ERROR: u32 = 0x544b_f006;
+pub mod service {
+    pub const UPDATE: u8 = 0;
+    pub const REQUEST: u8 = 1;
+    pub const REPORT: u8 = 2;
+    pub const RESPONSE_UPDATE: u8 = 3;
+    pub const RESPONSE_REQUEST: u8 = 4;
+}
+use service::*;
+
+#[repr(u8)]
+pub enum BridgeError {
+    Busy = 1,
+    InvalidRequest = 2,
+    WrongMode = 3,
+}
+
+const THA_VERSION: u16 = 3;
+const UNNUMBERED_FIRMWARE: u16 = 0;
+const BRIDGE_VERSION: u8 = 1;
+const FEATURE_BIDIRECTIONAL_RAW: u8 = 1;
+const FEATURE_ROM_UPDATE: u8 = 1 << 1;
+const HEADER_BYTES: usize = 1 + size_of::<u32>();
+const REVISION_MAGIC: &[u8; 8] = b"TK48REV\0";
+const REVISION_BYTES: usize = REVISION_MAGIC.len() + 40; // hexadecimal Git object name
+const MAX_REPLY_BYTES: usize = 64;
 
 const BUILD_LEN: usize = env!("TEKMAR_BUILD_REVISION").len();
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
 pub enum GatewayVersion {
-    Firmware = 0x187,
-    Protocol = 0x18f,
+    Firmware = FIRMWARE_REVISION,
+    Protocol = PROTOCOL_VERSION,
 }
 
 impl GatewayVersion {
     pub(crate) fn from_method(method: u32) -> Option<Self> {
         match method {
-            0x187 => Some(Self::Firmware),
-            0x18f => Some(Self::Protocol),
+            FIRMWARE_REVISION => Some(Self::Firmware),
+            PROTOCOL_VERSION => Some(Self::Protocol),
             _ => None,
         }
     }
 
     pub(crate) fn word(self) -> [u8; 2] {
         match self {
-            Self::Firmware => 0u16, // unnumbered custom firmware; FirmwareBuild identifies the image
-            Self::Protocol => 3u16,
+            Self::Firmware => UNNUMBERED_FIRMWARE,
+            Self::Protocol => THA_VERSION,
         }
         .to_le_bytes()
     }
@@ -40,10 +60,10 @@ impl GatewayVersion {
 // FirmwareBuild serves the installer's fixed-offset image stamp itself.
 #[used]
 #[unsafe(link_section = ".revision")]
-static REVISION: [u8; 48] = {
-    let mut field = [0; 48];
-    let (header, text) = field.split_at_mut(8);
-    header.copy_from_slice(b"TK48REV\0");
+static REVISION: [u8; REVISION_BYTES] = {
+    let mut field = [0; REVISION_BYTES];
+    let (header, text) = field.split_at_mut(REVISION_MAGIC.len());
+    header.copy_from_slice(REVISION_MAGIC);
     text.split_at_mut(BUILD_LEN)
         .0
         .copy_from_slice(env!("TEKMAR_BUILD_REVISION").as_bytes());
@@ -58,14 +78,14 @@ pub enum AfterDrain {
 
 /// The caller must send the entire response and drain the UART before EnterRom.
 pub struct Reply {
-    bytes: [u8; 64],
+    bytes: [u8; MAX_REPLY_BYTES],
     len: usize,
     pub after_drain: AfterDrain,
 }
 
 impl Reply {
     pub(crate) fn report(method: u32, body: &[u8]) -> Self {
-        Self::new(2, method, body)
+        Self::new(REPORT, method, body)
     }
 
     pub fn payload(&self) -> &[u8] {
@@ -74,13 +94,13 @@ impl Reply {
 
     fn new(service: u8, method: u32, body: &[u8]) -> Self {
         let mut reply = Self {
-            bytes: [0; 64],
-            len: body.len() + 5,
+            bytes: [0; MAX_REPLY_BYTES],
+            len: body.len() + HEADER_BYTES,
             after_drain: AfterDrain::Continue,
         };
         reply.bytes[0] = service;
-        reply.bytes[1..5].copy_from_slice(&method.to_le_bytes());
-        reply.bytes[5..reply.len].copy_from_slice(body);
+        reply.bytes[1..HEADER_BYTES].copy_from_slice(&method.to_le_bytes());
+        reply.bytes[HEADER_BYTES..reply.len].copy_from_slice(body);
         reply
     }
 }
@@ -118,38 +138,46 @@ impl<'a> Call<'a> {
     }
 
     pub fn unsupported(&self) -> Reply {
-        self.response(0, &[])
+        self.response(NULL, &[])
     }
 
     pub fn ok(&self, body: &[u8]) -> Reply {
         self.response(self.method, body)
     }
 
-    pub fn error(&self, reason: u8) -> Reply {
+    pub fn error(&self, reason: BridgeError) -> Reply {
         let mut body = [0; 5];
         body[..4].copy_from_slice(&self.method.to_le_bytes());
-        body[4] = reason;
+        body[4] = reason as u8;
         self.response(BRIDGE_ERROR, &body)
     }
 
     pub fn management(&self, raw: bool, busy: bool) -> Option<Reply> {
         let reply = match (self.service, self.method) {
-            (REQUEST, BRIDGE_CAPABILITIES) if self.body.is_empty() => {
-                self.response(self.method, &[1, u8::from(raw), 5, 3])
-            }
+            (REQUEST, BRIDGE_CAPABILITIES) if self.body.is_empty() => self.response(
+                self.method,
+                &[
+                    BRIDGE_VERSION,
+                    u8::from(raw),
+                    crate::tn4::PORT_COUNT as u8,
+                    FEATURE_BIDIRECTIONAL_RAW | FEATURE_ROM_UPDATE,
+                ],
+            ),
             (REQUEST, FIRMWARE_BUILD) if self.body.is_empty() => {
-                self.response(self.method, &REVISION[8..8 + BUILD_LEN])
+                self.response(self.method, &REVISION[REVISION_MAGIC.len()..][..BUILD_LEN])
             }
             (UPDATE, ENTER_FIRMWARE_UPDATE) if self.body.is_empty() => {
                 if busy {
-                    self.error(1)
+                    self.error(BridgeError::Busy)
                 } else {
                     let mut reply = self.response(self.method, &[]);
                     reply.after_drain = AfterDrain::EnterRom;
                     reply
                 }
             }
-            (_, BRIDGE_CAPABILITIES | FIRMWARE_BUILD | ENTER_FIRMWARE_UPDATE) => self.error(2),
+            (_, BRIDGE_CAPABILITIES | FIRMWARE_BUILD | ENTER_FIRMWARE_UPDATE) => {
+                self.error(BridgeError::InvalidRequest)
+            }
             _ => return None,
         };
         Some(reply)

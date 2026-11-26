@@ -1,26 +1,46 @@
 //! One bus attempt. Only Normal mode schedules a link error response.
-use super::BIT_US;
+use super::{
+    BIT_US, CRC_BITS, CRC_POLYNOMIAL, EOF_BITS, HEADER_BYTES, MAX_BYTES, MAX_LATENESS_US,
+    PAYLOAD_MASK, PORT_COUNT, SAMPLE_OFFSET_US, STUFF_RUN, crc_bit, gateway_header,
+};
+
+const TX_IDLE_BITS: u32 = 16;
+const CRC_DELIMITER_SLOT: u8 = 0;
+const ACK_SLOT: u8 = 1;
+const LAST_EOF_SLOT: u8 = ACK_SLOT + 1 + EOF_BITS;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Request {
     pub port: u8,
-    data: [u8; 67],
+    data: [u8; MAX_BYTES],
     len: usize,
 }
 
 impl Request {
     pub fn new(port: u8, body: &[u8]) -> Option<Self> {
-        let payload_len = usize::from(*body.get(3)? & 63);
-        if port >= 5 || body.len() != 4 + payload_len {
+        let payload_len = usize::from(*body.get(HEADER_BYTES - 1)? & PAYLOAD_MASK);
+        if usize::from(port) >= PORT_COUNT || body.len() != HEADER_BYTES + payload_len {
             return None;
         }
         let mut request = Self {
             port,
-            data: [0; 67],
+            data: [0; MAX_BYTES],
             len: body.len(),
         };
         request.data[..body.len()].copy_from_slice(body);
         Some(request)
+    }
+
+    /// Gateway application traffic is class 1 and originates at subnet/node zero.
+    pub(crate) fn gateway(port: u8, message: u32, payload: &[u8]) -> Option<Self> {
+        let len = HEADER_BYTES + payload.len();
+        if usize::from(port) >= PORT_COUNT || len > MAX_BYTES {
+            return None;
+        }
+        let mut data = [0; MAX_BYTES];
+        data[..HEADER_BYTES].copy_from_slice(&gateway_header(message, payload.len()));
+        data[HEADER_BYTES..len].copy_from_slice(payload);
+        Some(Self { port, data, len })
     }
 }
 
@@ -39,7 +59,7 @@ impl Protected {
         Self {
             request: request.clone(),
             index: 0,
-            crc: 0x4599,
+            crc: CRC_POLYNOMIAL,
             run: 1,
             last: true,
         }
@@ -47,21 +67,20 @@ impl Protected {
     fn next(&mut self) -> Option<bool> {
         let i = self.index;
         let data_bits = self.request.len * 8;
-        if i == data_bits + 15 {
+        if i == data_bits + usize::from(CRC_BITS) {
             return None; // No stuffing between the final CRC bit and delimiter.
         }
-        if self.run == 5 {
+        if self.run == STUFF_RUN {
             self.last = !self.last;
             self.run = 1;
             return Some(self.last);
         }
         let bit = if i < data_bits {
             let bit = self.request.data[i / 8] & (0x80 >> (i % 8)) != 0;
-            let feedback = (self.crc & 0x4000 != 0) ^ bit;
-            self.crc = ((self.crc << 1) & 0x7fff) ^ if feedback { 0x4599 } else { 0 };
+            self.crc = crc_bit(self.crc, bit);
             bit
         } else {
-            self.crc & (1 << (14 - (i - data_bits))) != 0
+            self.crc & (1 << (usize::from(CRC_BITS - 1) - (i - data_bits))) != 0
         };
         self.index += 1;
         self.run = if bit == self.last { self.run + 1 } else { 1 };
@@ -180,10 +199,10 @@ impl Sender {
                     self.quiet_since = now;
                 }
                 // Longer than stuffing-limited data runs, delimiter, EOF and intermission.
-                if now.wrapping_sub(self.quiet_since) < 16 * BIT_US {
+                if now.wrapping_sub(self.quiet_since) < TX_IDLE_BITS * BIT_US {
                     return Action::None;
                 }
-                self.due = now.wrapping_add(BIT_US / 2);
+                self.due = now.wrapping_add(SAMPLE_OFFSET_US);
                 self.phase = Phase::Sample;
                 return Action::Drive(true);
             }
@@ -193,16 +212,16 @@ impl Sender {
         if late < 0 {
             return Action::None;
         }
-        if late >= (BIT_US / 4) as i32 {
+        if late >= MAX_LATENESS_US {
             return self.finish(Outcome::Late);
         }
-        self.due = self.due.wrapping_add(BIT_US / 2);
+        self.due = self.due.wrapping_add(SAMPLE_OFFSET_US);
         if matches!(self.phase, Phase::Sample) {
             match self.symbol {
-                Symbol::Trailer(1) if !high && self.mode == Mode::Normal => {
+                Symbol::Trailer(ACK_SLOT) if !high && self.mode == Mode::Normal => {
                     return self.wire_fault(Outcome::NoAck);
                 }
-                Symbol::Trailer(1) => self.ack = high,
+                Symbol::Trailer(ACK_SLOT) => self.ack = high,
                 Symbol::Trailer(_) if high => return self.wire_fault(Outcome::BadEnd),
                 Symbol::Protected(level) if level != high => {
                     return if high {
@@ -220,8 +239,8 @@ impl Sender {
             Symbol::Protected(_) => self
                 .bits
                 .next()
-                .map_or(Symbol::Trailer(0), Symbol::Protected),
-            Symbol::Trailer(9) => {
+                .map_or(Symbol::Trailer(CRC_DELIMITER_SLOT), Symbol::Protected),
+            Symbol::Trailer(LAST_EOF_SLOT) => {
                 return self.finish(if self.ack {
                     Outcome::Ack
                 } else {

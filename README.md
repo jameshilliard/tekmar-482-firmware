@@ -34,6 +34,14 @@ and 187500 baud in the emulator. It tests all five capture/TX paths, UART
 backpressure, panel deadlines, stack headroom and the handoff to ROM.
 Neither compilation nor emulation writes a physical device.
 
+The firmware keeps [tRPC method IDs](src/trpc/method.rs),
+[native message IDs](src/tn4/message.rs), [block IDs](src/tn4/block.rs)
+and [Raw bridge record codes](src/tpck/raw.rs) in separate namespaces.
+[Peripheral fields](src/board/lpc2146.rs) follow the
+[NXP LPC214x user manual](https://www.nxp.com/docs/en/user-guide/UM10139.pdf).
+The synthetic wire vectors in the tests use literal bytes independently
+of these definitions.
+
 Use flash for routine hardware tests as well. Build the Python client's
 sdist with this firmware revision pinned, then use its
 [`tekmar-482 update` procedure](https://github.com/jameshilliard/tekmar-482#installation-and-updates).

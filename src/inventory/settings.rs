@@ -1,6 +1,14 @@
 //! A host operation owns one port until its device reply has been queued.
 //! All writes start from a fresh block, never from the temperature target.
-use super::{Answer, block_byte};
+use super::codes::{mode, setback, setpoint};
+const MAX_PERCENT: u16 = 100;
+const UNAVAILABLE_BYTE: u16 = super::codes::UNAVAILABLE as u16;
+const COMMAND_TIMEOUT_SECONDS: u32 = 10;
+const WORD_PAIR_MASK: u8 = 0b11;
+const ALL_TARGET_WORD_BYTES: u8 = 0x3f;
+const TARGET_WORD_LO_BYTES: u8 = 0x15;
+const OPTIONAL_MAX_WORD_BYTES: u8 = 0xc0;
+use super::{Answer, BridgeError, block, block_byte, block_request, message, method, service};
 use crate::{
     tn4::tx::{Outcome, Request},
     trpc::{Call, Reply},
@@ -21,51 +29,51 @@ pub(super) enum Setting {
 impl Setting {
     pub(super) fn from_method(m: u32) -> Option<Self> {
         Some(match m {
-            0x127 => Self::Mode,
-            0x13e => Self::DeviceTarget,
-            0x13f => Self::Heat,
-            0x147 => Self::Cool,
-            0x14f => Self::Slab,
-            0x157 => Self::Fan,
-            0x152 => Self::HumidityMin,
-            0x151 => Self::HumidityMax,
+            method::MODE_SETTING => Self::Mode,
+            method::SETPOINT_DEVICE => Self::DeviceTarget,
+            method::HEAT_SETPOINT => Self::Heat,
+            method::COOL_SETPOINT => Self::Cool,
+            method::SLAB_SETPOINT => Self::Slab,
+            method::FAN_PERCENT => Self::Fan,
+            method::HUMIDITY_MIN => Self::HumidityMin,
+            method::HUMIDITY_MAX => Self::HumidityMax,
             _ => return None,
         })
     }
     fn method(self) -> u32 {
         match self {
-            Self::Mode => 0x127,
-            Self::DeviceTarget => 0x13e,
-            Self::Heat => 0x13f,
-            Self::Cool => 0x147,
-            Self::Slab => 0x14f,
-            Self::Fan => 0x157,
-            Self::HumidityMin => 0x152,
-            Self::HumidityMax => 0x151,
+            Self::Mode => method::MODE_SETTING,
+            Self::DeviceTarget => method::SETPOINT_DEVICE,
+            Self::Heat => method::HEAT_SETPOINT,
+            Self::Cool => method::COOL_SETPOINT,
+            Self::Slab => method::SLAB_SETPOINT,
+            Self::Fan => method::FAN_PERCENT,
+            Self::HumidityMin => method::HUMIDITY_MIN,
+            Self::HumidityMax => method::HUMIDITY_MAX,
         }
     }
     fn block(self, app_mode: Option<u8>) -> Option<u8> {
         Some(match self {
             Self::DeviceTarget => match app_mode? {
-                0 | 3 => 0x28,
-                1 => 0x2a,
-                2 => 0x2c,
-                4 => 0x2e,
-                5 => 0x30,
+                setpoint::ON_OFF | setpoint::PWM => block::SETPOINT_TARGETS,
+                setpoint::HOT_TUB => block::HOT_TUB_TARGETS,
+                setpoint::DHW => block::DHW_TARGETS,
+                setpoint::FLOOR => block::FLOOR_TARGETS,
+                setpoint::POOL => block::POOL_TARGETS,
                 _ => return None,
             },
-            Self::Mode => 3,
-            Self::Heat => 5,
-            Self::Cool => 6,
-            Self::Slab => 7,
-            Self::Fan => 9,
-            Self::HumidityMin => 0xa4,
-            Self::HumidityMax => 0xa5,
+            Self::Mode => block::HEATING_SETUP,
+            Self::Heat => block::HEAT_SETPOINTS,
+            Self::Cool => block::COOL_SETPOINTS,
+            Self::Slab => block::SLAB_SETPOINTS,
+            Self::Fan => block::FAN_PERCENT,
+            Self::HumidityMin => block::HUMIDIFY_TARGETS,
+            Self::HumidityMax => block::DEHUMIDIFY_TARGETS,
         })
     }
     fn width(self) -> usize {
         match self {
-            Self::Mode => 3,
+            Self::Mode => 3, // mode, heating CPH, air group
             Self::DeviceTarget => 8,
             Self::Slab => 6,
             _ => 5,
@@ -79,21 +87,16 @@ impl Setting {
     }
     fn setup(self) -> Option<u8> {
         match self {
-            Self::Slab => Some(13),
-            Self::DeviceTarget => Some(0x26),
-            Self::HumidityMin | Self::HumidityMax => Some(0xa3),
+            Self::Slab => Some(block::SENSOR_SETUP),
+            Self::DeviceTarget => Some(block::SETPOINT_SETUP),
+            Self::HumidityMin | Self::HumidityMax => Some(block::HUMIDITY_SETUP),
             _ => None,
         }
     }
 }
 
 pub(super) fn slots(setback: u8) -> Option<(usize, u8)> {
-    Some(match setback {
-        0 | 2 | 4 => (0, 0b00101),
-        1 | 3 | 5 => (1, 0b01010),
-        6 => (4, 0b10000),
-        _ => return None,
-    })
+    Some(setback::Band::from_selector(setback)?.thermostat_slots())
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -162,34 +165,42 @@ impl Operation {
     ) -> Option<Self> {
         let (&addr, tail) = call.body.split_first_chunk::<2>()?;
         let (selector, write) = match (setting, call.service, tail) {
-            (Setting::Mode, 1, [] | [_] | [_, 0]) => (0, None),
-            (Setting::Mode, 0, [v] | [v, 0]) => (0, Some(u16::from(*v))),
-            (Setting::HumidityMin | Setting::HumidityMax, 1, [] | [_]) => (0, None),
-            (Setting::HumidityMin | Setting::HumidityMax, 0, [v]) => (0, Some(u16::from(*v))),
-            (Setting::DeviceTarget, 1, [s] | [s, _, _]) => (*s, None),
-            (Setting::DeviceTarget, 0, [s, a, b]) => (*s, Some(u16::from_le_bytes([*a, *b]))),
+            (Setting::Mode, service::REQUEST, [] | [_] | [_, 0]) => (0, None),
+            (Setting::Mode, service::UPDATE, [v] | [v, 0]) => (0, Some(u16::from(*v))),
+            (Setting::HumidityMin | Setting::HumidityMax, service::REQUEST, [] | [_]) => (0, None),
+            (Setting::HumidityMin | Setting::HumidityMax, service::UPDATE, [v]) => {
+                (0, Some(u16::from(*v)))
+            }
+            (Setting::DeviceTarget, service::REQUEST, [s] | [s, _, _]) => (*s, None),
+            (Setting::DeviceTarget, service::UPDATE, [s, a, b]) => {
+                (*s, Some(u16::from_le_bytes([*a, *b])))
+            }
             (Setting::DeviceTarget, _, _) => return None,
-            (_, 1, [s] | [s, _]) if setting.indexed() => (*s, None),
-            (_, 0, [s, v]) if setting.indexed() => (*s, Some(u16::from(*v))),
+            (_, service::REQUEST, [s] | [s, _]) if setting.indexed() => (*s, None),
+            (_, service::UPDATE, [s, v]) if setting.indexed() => (*s, Some(u16::from(*v))),
             _ => return None,
         };
-        let selector = if selector >= 7 {
-            setback.min(7)
+        let selector = if selector >= setback::UNKNOWN {
+            setback.min(setback::UNKNOWN)
         } else {
             selector
         };
         let selection = if !setting.indexed() {
             Some((0, 1))
         } else if setting == Setting::DeviceTarget {
-            let index = match selector {
-                0 | 2 | 4 => Some(0),
-                1 | 3 | 5 => Some(2),
-                6 => Some(4),
-                _ => None,
-            };
-            index.map(|i| (i, if setbacks { 3 << i } else { 0x3f }))
+            setback::Band::from_selector(selector).map(|band| {
+                let i = band.target_word_offset();
+                (
+                    i,
+                    if setbacks {
+                        WORD_PAIR_MASK << i
+                    } else {
+                        ALL_TARGET_WORD_BYTES
+                    },
+                )
+            })
         } else {
-            slots(selector).map(|(i, mask)| (i, if setbacks { mask } else { 31 }))
+            slots(selector).map(|(i, mask)| (i, if setbacks { mask } else { setback::ALL_SLOTS }))
         };
         let (index, mask) = selection.unwrap_or_default();
         let valid = selection.is_some()
@@ -197,13 +208,15 @@ impl Operation {
                 != Some(if setting == Setting::DeviceTarget {
                     u16::MAX
                 } else {
-                    255
+                    UNAVAILABLE_BYTE
                 })
             && !(matches!(
                 setting,
                 Setting::Fan | Setting::HumidityMin | Setting::HumidityMax
-            ) && write.is_some_and(|v| v > 100))
-            && (setting != Setting::Mode || !matches!(write,Some(v) if !matches!(v,0..=4|6)));
+            ) && write.is_some_and(|v| v > MAX_PERCENT))
+            && (setting != Setting::Mode
+                || write
+                    .is_none_or(|v| v <= u16::from(mode::VENT) || v == u16::from(mode::EMERGENCY)));
         Some(Self {
             address: u16::from_le_bytes(addr),
             subnet,
@@ -234,7 +247,10 @@ impl Operation {
     }
     pub(super) fn expire(&mut self, now: u32) {
         // Bound bus occupancy even when the line never becomes idle.
-        if self.active() && !self.terminal() && now.wrapping_sub(self.since) >= 10 {
+        if self.active()
+            && !self.terminal()
+            && now.wrapping_sub(self.since) >= COMMAND_TIMEOUT_SECONDS
+        {
             self.fail();
         }
     }
@@ -247,26 +263,19 @@ impl Operation {
                 } else {
                     Step::Verifying
                 };
-                let mut b = [0x6d, 0x70, 0, 7, block, 0, self.subnet, 0, 0, 0, 0];
-                b[7..].copy_from_slice(&(1u32 << (self.node - 1)).to_le_bytes());
-                Request::new(port, &b)
+                Request::new(
+                    port,
+                    &block_request(block, self.subnet, usize::from(self.node - 1)),
+                )
             }
             Step::Write => {
                 self.step = Step::Writing;
                 let n = self.length;
-                let mut b = [0; 16];
-                b[..8].copy_from_slice(&[
-                    0x6d,
-                    0xf0,
-                    0,
-                    4 + n as u8,
-                    self.subnet,
-                    self.node,
-                    block,
-                    0,
-                ]);
-                b[8..8 + n].copy_from_slice(&self.bytes[..n]);
-                Request::new(port, &b[..8 + n])
+                const UPDATE_PREFIX: usize = 2 + size_of::<u16>(); // destination and block ID
+                let mut payload = [0; UPDATE_PREFIX + 8];
+                payload[..UPDATE_PREFIX].copy_from_slice(&[self.subnet, self.node, block, 0]);
+                payload[UPDATE_PREFIX..UPDATE_PREFIX + n].copy_from_slice(&self.bytes[..n]);
+                Request::gateway(port, message::BLOCK_UPDATE, &payload[..UPDATE_PREFIX + n])
             }
             _ => None,
         }
@@ -350,7 +359,10 @@ impl Operation {
             return;
         }
         // The 483 layout allows floor controllers to omit the maximum word.
-        let width = if self.block == 0x2e && values.len() == 6 && support & 0xc0 == 0 {
+        let width = if self.block == block::FLOOR_TARGETS
+            && values.len() == 6
+            && support & OPTIONAL_MAX_WORD_BYTES == 0
+        {
             6
         } else {
             self.setting.width()
@@ -359,7 +371,7 @@ impl Operation {
         // incomplete or extended layout rather than fabricating its siblings.
         if values.len() != width
             || u16::from(*support) >> width != 0
-            || actual == if word { u16::MAX } else { 255 }
+            || actual == if word { u16::MAX } else { UNAVAILABLE_BYTE }
         {
             self.fail();
             return;
@@ -368,7 +380,7 @@ impl Operation {
         self.length = width;
         let bytes = write.to_le_bytes();
         let mask = self.mask & support;
-        if word && (mask ^ (mask >> 1)) & 0x15 != 0 {
+        if word && (mask ^ (mask >> 1)) & TARGET_WORD_LO_BYTES != 0 {
             self.fail(); // never write only half of a target
             return;
         }
@@ -392,7 +404,11 @@ impl Operation {
         };
         let [lo, hi] = self.address.to_le_bytes();
         let call = Call {
-            service: u8::from(self.write.is_none()),
+            service: if self.write.is_some() {
+                service::UPDATE
+            } else {
+                service::REQUEST
+            },
             method: self.setting.method(),
             body: &[],
         };
@@ -417,7 +433,7 @@ pub(super) fn accept(slot: &mut Operation, op: Operation, call: &Call<'_>) -> An
         return Answer::Reply(reply);
     }
     if slot.active() {
-        return Answer::Reply(call.error(1));
+        return Answer::Reply(call.error(BridgeError::Busy));
     }
     *slot = op;
     Answer::Silent

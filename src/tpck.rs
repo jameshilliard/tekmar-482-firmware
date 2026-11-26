@@ -1,5 +1,7 @@
 //! UART framing shared by vendor tRPC and the binary raw bridge.
+pub mod raw;
 
+const MAX_PAYLOAD: usize = u8::MAX as usize;
 pub const SOF: u8 = 0xca;
 const EOF: u8 = 0x35;
 const ESC: u8 = 0x2f;
@@ -54,7 +56,7 @@ pub struct Decoder {
     used: u8,
     kind: u8,
     sum: u8,
-    bytes: [u8; 255],
+    bytes: [u8; MAX_PAYLOAD],
 }
 
 impl Default for Decoder {
@@ -66,7 +68,7 @@ impl Default for Decoder {
             used: 0,
             kind: 0,
             sum: 0,
-            bytes: [0; 255],
+            bytes: [0; MAX_PAYLOAD],
         }
     }
 }

@@ -1,10 +1,24 @@
 //! Device readings common to the tHA Request, Response:Update and Report paths.
+use super::codes::{TEMP_FAULT_WORDS, mode, setback, setpoint};
 use super::{
     air::{AirStatus, Side},
     block_byte,
     settings::{Setting, slots},
 };
-use crate::trpc::{Call, Reply};
+use crate::tn4::{block, message};
+use crate::trpc::{Call, Reply, method};
+const HEAT_REPORT: usize = Side::Heat as usize;
+const COOL_REPORT: usize = Side::Cool as usize;
+const SLAB_REPORT: usize = 2;
+const FAN_REPORT: usize = 3;
+use super::codes::{UNAVAILABLE, demand};
+const SENSOR_SLOTS: usize = 5;
+const SENSOR_ROLE_OFF: u8 = 0;
+const SENSOR_ROLE_FLOOR: u8 = 2;
+const SENSOR_MASK: u8 = (1 << SENSOR_SLOTS) - 1;
+const SCHEDULE_MASTER: u8 = 1 << 2;
+const EVENT_COUNT_SHIFT: u8 = 6;
+const RESERVED_EVENT_COUNT: u8 = 3;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Field {
@@ -47,21 +61,21 @@ impl Field {
     }
     fn method(self) -> u32 {
         match self {
-            Self::Attributes => 0x11f,
-            Self::Temperature => 0x137,
-            Self::Floor => 0x138,
-            Self::Demand => 0x12f,
-            Self::Humidity => 0x150,
-            Self::Setback => 0x177,
-            Self::Mode => 0x127,
-            Self::Heat => 0x13f,
-            Self::Cool => 0x147,
-            Self::SlabTarget => 0x14f,
-            Self::Fan => 0x157,
-            Self::HumidityMin => 0x152,
-            Self::HumidityMax => 0x151,
-            Self::Events => 0x17f,
-            Self::DeviceTarget => 0x13e,
+            Self::Attributes => method::DEVICE_ATTRIBUTES,
+            Self::Temperature => method::CURRENT_TEMPERATURE,
+            Self::Floor => method::CURRENT_FLOOR_TEMPERATURE,
+            Self::Demand => method::ACTIVE_DEMAND,
+            Self::Humidity => method::RELATIVE_HUMIDITY,
+            Self::Setback => method::SETBACK_STATE,
+            Self::Mode => method::MODE_SETTING,
+            Self::Heat => method::HEAT_SETPOINT,
+            Self::Cool => method::COOL_SETPOINT,
+            Self::SlabTarget => method::SLAB_SETPOINT,
+            Self::Fan => method::FAN_PERCENT,
+            Self::HumidityMin => method::HUMIDITY_MIN,
+            Self::HumidityMax => method::HUMIDITY_MAX,
+            Self::Events => method::SETBACK_EVENTS,
+            Self::DeviceTarget => method::SETPOINT_DEVICE,
         }
     }
     pub(super) fn mask(self) -> u16 {
@@ -97,7 +111,7 @@ pub(super) struct Telemetry {
     events: u8,
     setback: u8,
     mode: u8,
-    air_slots: [[u8; 5]; 2],
+    air_slots: [[u8; setback::SLOT_COUNT]; 2],
     targets: [[u8; 2]; 4],
     rh_targets: [u8; 2],
     device_target: [u8; 3], // selector and little-endian degH from the same status
@@ -115,13 +129,9 @@ enum Floor {
     Only,
 }
 
-fn temperature(data: &[u8], i: usize) -> u16 {
-    normalized_temperature([data[i], data[i + 1]])
-}
-
 fn normalized_temperature(word: [u8; 2]) -> u16 {
     match u16::from_le_bytes(word) {
-        0x4000 | 0x8000 | 0xc000 => u16::MAX,
+        v if TEMP_FAULT_WORDS.contains(&v) => u16::MAX,
         other => other,
     }
 }
@@ -155,7 +165,7 @@ impl Telemetry {
         events: 0,
         setback: 0,
         mode: 0,
-        air_slots: [[0; 5]; 2],
+        air_slots: [[0; setback::SLOT_COUNT]; 2],
         targets: [[0; 2]; 4],
         rh_targets: [0; 2],
         device_target: [0; 3],
@@ -166,38 +176,38 @@ impl Telemetry {
     pub(super) const UNKNOWN: Self = Self {
         air: u16::MAX,
         slab: u16::MAX,
-        demand: 255,
-        humidity: 255,
-        events: 255,
-        setback: 255,
-        mode: 255,
-        air_slots: [[255; 5]; 2],
-        targets: [[255; 2]; 4],
-        rh_targets: [255; 2],
-        device_target: [255; 3],
+        demand: UNAVAILABLE,
+        humidity: UNAVAILABLE,
+        events: UNAVAILABLE,
+        setback: UNAVAILABLE,
+        mode: UNAVAILABLE,
+        air_slots: [[u8::MAX; setback::SLOT_COUNT]; 2],
+        targets: [[UNAVAILABLE; 2]; 4],
+        rh_targets: [UNAVAILABLE; 2],
+        device_target: [UNAVAILABLE; 3],
         ..Self::EMPTY
     };
     pub(super) fn sensor_setup(&mut self, mask: u8, values: &[u8]) -> Option<u16> {
-        if mask & 0x1f == 0 {
+        if mask & SENSOR_MASK == 0 {
             return None;
         }
         let mut floors = 0;
         let mut off = 0;
-        for i in 0..5 {
+        for i in 0..SENSOR_SLOTS {
             let value = if mask & (1 << i) == 0 {
                 0
             } else {
                 block_byte(mask, values, i)?
             };
             match value {
-                0 => off += 1,
-                2 => floors += 1,
+                SENSOR_ROLE_OFF => off += 1,
+                SENSOR_ROLE_FLOOR => floors += 1,
                 _ => {}
             }
         }
         let next = if floors == 0 {
             Floor::Absent
-        } else if floors == 1 && off == 4 {
+        } else if floors == 1 && off == SENSOR_SLOTS - 1 {
             Floor::Only
         } else {
             Floor::Mixed
@@ -243,30 +253,33 @@ impl Telemetry {
             return 0;
         };
         match *block {
-            3 if self.configured(Setting::Mode) => {
+            block::HEATING_SETUP if self.configured(Setting::Mode) => {
                 let Some(mode) = block_byte(*mask, values, 0) else {
                     return 0;
                 };
                 self.mode = mode;
                 Field::Mode.mask()
             }
-            5 | 6 | 7 | 9 => {
-                if *block == 9
-                    && *mask & 31 != 0
+            block::HEAT_SETPOINTS
+            | block::COOL_SETPOINTS
+            | block::SLAB_SETPOINTS
+            | block::FAN_PERCENT => {
+                if *block == block::FAN_PERCENT
+                    && *mask & setback::ALL_SLOTS != 0
                     && block_byte(*mask, values, mask.trailing_zeros() as usize).is_some()
                 {
                     self.attributes |= Self::FAN;
                 }
                 let (idx, field, setting) = match *block {
-                    5 => (0, Field::Heat, Setting::Heat),
-                    6 => (1, Field::Cool, Setting::Cool),
-                    7 => (2, Field::SlabTarget, Setting::Slab),
-                    _ => (3, Field::Fan, Setting::Fan),
+                    block::HEAT_SETPOINTS => (HEAT_REPORT, Field::Heat, Setting::Heat),
+                    block::COOL_SETPOINTS => (COOL_REPORT, Field::Cool, Setting::Cool),
+                    block::SLAB_SETPOINTS => (SLAB_REPORT, Field::SlabTarget, Setting::Slab),
+                    _ => (FAN_REPORT, Field::Fan, Setting::Fan),
                 };
                 if !self.configured(setting) {
                     return 0;
                 }
-                if matches!(*block, 5 | 6) {
+                if matches!(*block, block::HEAT_SETPOINTS | block::COOL_SETPOINTS) {
                     for (i, slot) in self.air_slots[idx].iter_mut().enumerate() {
                         if let Some(value) = block_byte(*mask, values, i) {
                             *slot = value;
@@ -282,7 +295,7 @@ impl Telemetry {
                 self.targets[idx] = [self.setback, value];
                 field.mask()
             }
-            0xa3 if self.has_rh() => {
+            block::HUMIDITY_SETUP if self.has_rh() => {
                 self.attributes &= !(Self::RH_MIN | Self::RH_MAX);
                 for (i, (f, bit)) in [
                     (Field::HumidityMin, Self::RH_MIN),
@@ -291,7 +304,7 @@ impl Telemetry {
                 .into_iter()
                 .enumerate()
                 {
-                    if block_byte(*mask, values, i).is_some_and(|v| v != 0 && v != 255) {
+                    if block_byte(*mask, values, i).is_some_and(|v| v != 0 && v != UNAVAILABLE) {
                         self.attributes |= bit;
                     } else {
                         self.dirty &= !f.mask();
@@ -299,8 +312,8 @@ impl Telemetry {
                 }
                 0
             }
-            0xa4 | 0xa5 => {
-                let i = usize::from(*block - 0xa4);
+            block::HUMIDIFY_TARGETS | block::DEHUMIDIFY_TARGETS => {
+                let i = usize::from(*block - block::HUMIDIFY_TARGETS);
                 if self.attributes & [Self::RH_MIN, Self::RH_MAX][i] == 0 {
                     return 0;
                 }
@@ -343,17 +356,20 @@ impl Telemetry {
             }
         }
         for (side, field, attribute, excluded_mode) in [
-            (Side::Heat, Field::Heat, Self::HEAT, 3),
-            (Side::Cool, Field::Cool, Self::COOL, 1),
+            (Side::Heat, Field::Heat, Self::HEAT, mode::COOL),
+            (Side::Cool, Field::Cool, Self::COOL, mode::HEAT),
         ] {
-            if self.mode == 0 || self.mode == excluded_mode || self.attributes & attribute == 0 {
+            if self.mode == mode::OFF
+                || self.mode == excluded_mode
+                || self.attributes & attribute == 0
+            {
                 self.dirty &= !field.mask();
                 continue;
             }
             let i = side as usize;
             self.targets[i] = [
                 self.setback,
-                active.map_or(255, |(slot, _)| self.air_slots[i][slot]),
+                active.map_or(UNAVAILABLE, |(slot, _)| self.air_slots[i][slot]),
             ];
             fields |= field.mask();
         }
@@ -363,70 +379,77 @@ impl Telemetry {
     /// Called only after the enclosing dispatcher checks the native payload length.
     pub(super) fn observe(&mut self, message: u32, data: &[u8]) -> u16 {
         use Field::{Demand, Humidity, Setback, Temperature};
-        let (air, demand, setback) = match message {
-            0x22f if data[1] & 0x30 == 0x10 => (
-                4,
-                if data[1] & 4 == 0 {
-                    0
-                } else if data[1] & 8 == 0 {
-                    1
+        match (message, data) {
+            (
+                message::SETPOINT_STATUS,
+                &[state, operating, target_lo, target_hi, air_lo, air_hi, ..],
+            ) if operating & setpoint::STATUS_MODE_MASK == setpoint::STATUS_RUNNING => {
+                self.air = normalized_temperature([air_lo, air_hi]);
+                self.demand = if operating & setpoint::STATUS_DEMAND == 0 {
+                    demand::NONE
+                } else if operating & setpoint::STATUS_COOL != 0 {
+                    demand::COOL
                 } else {
-                    3
-                },
-                (data[0] >> 1) & 7,
-            ),
-            0x323 => {
-                self.attributes |= Self::RH_SOURCE;
-                self.humidity = data[2];
-                return Humidity.mask();
+                    demand::HEAT
+                };
+                self.setback = (state >> 1) & setback::MASK;
+                let mut fields =
+                    Temperature.mask() | Demand.mask() | Setback.mask() | Field::Floor.mask();
+                if self.setback < setback::UNKNOWN {
+                    let [lo, hi] = normalized_temperature([target_lo, target_hi]).to_le_bytes();
+                    self.device_target = [self.setback, lo, hi];
+                    fields |= Field::DeviceTarget.mask();
+                } else {
+                    self.dirty &= !Field::DeviceTarget.mask();
+                }
+                fields
             }
-            0x2f7 => {
-                let code = data[0] >> 6;
-                self.events = if data[0] & 4 != 0 && code < 3 {
+            (message::RH_REPORT, &[_, _, control_rh, ..]) => {
+                self.attributes |= Self::RH_SOURCE;
+                self.humidity = control_rh;
+                Humidity.mask()
+            }
+            (message::SCHEDULE_STATUS, &[flags, ..]) => {
+                let code = flags >> EVENT_COUNT_SHIFT;
+                self.events = if flags & SCHEDULE_MASTER != 0 && code < RESERVED_EVENT_COUNT {
                     code
                 } else {
-                    255
+                    UNAVAILABLE
                 };
-                return Field::Events.mask() | if self.setback < 7 { Setback.mask() } else { 0 };
+                Field::Events.mask()
+                    | if self.setback < setback::UNKNOWN {
+                        Setback.mask()
+                    } else {
+                        0
+                    }
             }
-            0x25f => {
+            (message::FAN_DUCT_STATUS, _) => {
                 self.attributes |= Self::FAN;
-                return 0;
+                0
             }
-            0x26f => {
-                self.slab = temperature(data, 2);
-                let target = if self.configured(Setting::Slab) && self.setback < 7 && data[0] < 2 {
-                    self.targets[2] = [self.setback, data[1]];
+            (message::SLAB_STATUS, &[status, raw_target, lo, hi, ..]) => {
+                const FIRST_NONPRIMARY_STATUS: u8 = 2;
+                self.slab = normalized_temperature([lo, hi]);
+                let target = if self.configured(Setting::Slab)
+                    && self.setback < setback::UNKNOWN
+                    && status < FIRST_NONPRIMARY_STATUS
+                {
+                    self.targets[SLAB_REPORT] = [self.setback, raw_target];
                     Field::SlabTarget.mask()
                 } else {
                     0
                 };
-                return target
+                target
                     | match self.floor {
                         Floor::Only => {
                             Field::Attributes.mask() | Temperature.mask() | Field::Floor.mask()
                         }
                         Floor::Mixed => Field::Attributes.mask() | Field::Floor.mask(),
                         _ => 0,
-                    };
+                    }
             }
-            _ => return 0,
-        };
-        self.air = temperature(data, air);
-        self.demand = demand;
-        self.setback = setback;
-        let mut changed = Temperature.mask() | Demand.mask() | Setback.mask();
-        if message == 0x22f {
-            changed |= Field::Floor.mask();
-            if setback < 7 {
-                let [lo, hi] = temperature(data, 2).to_le_bytes();
-                self.device_target = [setback, lo, hi];
-                changed |= Field::DeviceTarget.mask();
-            } else {
-                self.dirty &= !Field::DeviceTarget.mask();
-            }
+            _ => 0,
         }
-        changed
     }
 
     fn value(&self, field: Field) -> u16 {
@@ -444,10 +467,10 @@ impl Telemetry {
             Field::DeviceTarget => {
                 u16::from_le_bytes([self.device_target[1], self.device_target[2]])
             }
-            Field::Heat => u16::from_le_bytes(self.targets[0]),
-            Field::Cool => u16::from_le_bytes(self.targets[1]),
-            Field::SlabTarget => u16::from_le_bytes(self.targets[2]),
-            Field::Fan => u16::from_le_bytes(self.targets[3]),
+            Field::Heat => u16::from_le_bytes(self.targets[HEAT_REPORT]),
+            Field::Cool => u16::from_le_bytes(self.targets[COOL_REPORT]),
+            Field::SlabTarget => u16::from_le_bytes(self.targets[SLAB_REPORT]),
+            Field::Fan => u16::from_le_bytes(self.targets[FAN_REPORT]),
             Field::HumidityMin => self.rh_targets[0].into(),
             Field::HumidityMax => self.rh_targets[1].into(),
         }

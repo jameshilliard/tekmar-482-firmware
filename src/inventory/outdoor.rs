@@ -3,9 +3,13 @@ use super::{
     Answer,
     broadcast::{Broadcasts, Value},
 };
-use crate::trpc::{Call, Reply};
+use crate::trpc::{Call, Reply, method, service};
 
-pub(super) const METHOD: u32 = 0x117;
+pub(super) const METHOD: u32 = method::OUTDOOR_TEMP;
+const HOST_SAMPLE_SECONDS: u32 = 240;
+const NETWORK_ONLY_EXPIRY_SECONDS: u32 = 660;
+const NETWORK_WITH_FALLBACK_SECONDS: u32 = 630;
+const HOST_REBROADCAST_SECONDS: u32 = 600;
 const SUPPLY_LIMIT: u16 = 0x0bea; // exclusive J1196J limit for a host update
 pub(super) struct Outdoor {
     network: u16,
@@ -57,7 +61,7 @@ impl Outdoor {
         let [a, b, ..] = data else { return };
         let before = self.value();
         self.network = match u16::from_le_bytes([*a, *b]) {
-            0x4000 | 0x8000 | 0xc000 | u16::MAX => 0,
+            v if v == u16::MAX || super::codes::TEMP_FAULT_WORDS.contains(&v) => 0,
             word => word,
         };
         self.heard = now;
@@ -66,14 +70,23 @@ impl Outdoor {
     }
     pub(super) fn tick(&mut self, now: u32, reporting: bool, queue: &mut Broadcasts) {
         let before = self.value();
-        if now.wrapping_sub(self.updated) >= 240 {
+        if now.wrapping_sub(self.updated) >= HOST_SAMPLE_SECONDS {
             self.supplied = 0;
         }
-        if now.wrapping_sub(self.heard) >= if self.supplied == 0 { 660 } else { 630 } {
+        if now.wrapping_sub(self.heard)
+            >= if self.supplied == 0 {
+                NETWORK_ONLY_EXPIRY_SECONDS
+            } else {
+                NETWORK_WITH_FALLBACK_SECONDS
+            }
+        {
             self.network = 0;
         }
         self.changed(before, now, reporting, queue);
-        if self.network == 0 && self.supplied != 0 && now.wrapping_sub(self.broadcast) >= 600 {
+        if self.network == 0
+            && self.supplied != 0
+            && now.wrapping_sub(self.broadcast) >= HOST_REBROADCAST_SECONDS
+        {
             self.publish(now, queue);
         }
     }
@@ -85,8 +98,8 @@ impl Outdoor {
         queue: &mut Broadcasts,
     ) -> Answer {
         match (call.service, call.body) {
-            (1, [] | [_, _]) => {}
-            (0, [a, b]) => {
+            (service::REQUEST, [] | [_, _]) => {}
+            (service::UPDATE, [a, b]) => {
                 let word = u16::from_le_bytes([*a, *b]);
                 if word < SUPPLY_LIMIT {
                     let before = self.value();

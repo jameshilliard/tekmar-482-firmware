@@ -3,9 +3,10 @@ use super::{
     Answer,
     broadcast::{Broadcasts, Value},
 };
-use crate::trpc::{Call, Reply};
+use crate::trpc::{Call, Reply, method, service};
 
-pub(super) const METHOD: u32 = 0x13d;
+pub(super) const METHOD: u32 = method::SETPOINT_GROUP_ENABLE;
+const ACTUAL_ENABLE: u8 = 1 << 4;
 const COUNT: usize = 12;
 const ACTIVE_SECONDS: u32 = 60;
 pub(super) struct Groups {
@@ -28,7 +29,7 @@ impl Groups {
         let [id, flags, ..] = data else { return };
         let Some(i) = Self::index(*id) else { return };
         let bit = 1 << i;
-        if flags & 0x10 != 0 {
+        if flags & ACTUAL_ENABLE != 0 {
             self.active |= bit;
             self.seen[i] = now;
         } else {
@@ -49,13 +50,14 @@ impl Groups {
     }
     pub(super) fn handle(&mut self, call: &Call<'_>, now: u32, queue: &mut Broadcasts) -> Answer {
         match (call.service, call.body) {
-            (1, [id] | [id, _]) => {
-                let value = Self::index(*id).map_or(255, |i| self.value(i, now));
+            (service::REQUEST, [id] | [id, _]) => {
+                let value =
+                    Self::index(*id).map_or(super::codes::UNAVAILABLE, |i| self.value(i, now));
                 Answer::Reply(call.ok(&[*id, value]))
             }
-            (0, [id, value]) => {
+            (service::UPDATE, [id, value]) => {
                 if Self::index(*id).is_none() || *value > 1 {
-                    return Answer::Reply(call.ok(&[*id, 255]));
+                    return Answer::Reply(call.ok(&[*id, super::codes::UNAVAILABLE]));
                 }
                 queue.push(Value::Group(*id, *value), now);
                 // Do not publish a buffered pre-command observation as a new report.

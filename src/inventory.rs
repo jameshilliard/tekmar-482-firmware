@@ -1,7 +1,9 @@
 //! Normal-mode inventory. Bus addresses, not product numbers, identify entries.
-use crate::trpc::{Call, GatewayVersion, Reply};
+use crate::tn4::{self, block, message};
+use crate::trpc::{BridgeError, Call, GatewayVersion, Reply, method, service};
 mod air;
 mod broadcast;
+mod codes;
 mod groups;
 mod line;
 mod outdoor;
@@ -14,12 +16,24 @@ use settings::{Operation, Setting};
 use telemetry::{Field, Telemetry};
 
 const NODES: usize = 24;
-const PORTS: usize = 5;
+const PORTS: usize = tn4::PORT_COUNT;
 const SLOTS: usize = PORTS * NODES;
-const INVENTORY: u32 = 0x167;
-const PRODUCT: u32 = 0x197;
-const VERSION: u32 = 0x19f;
-const TAKING_ADDRESS: u32 = 0x15f;
+use method::{
+    DEVICE_INVENTORY as INVENTORY, DEVICE_TYPE as PRODUCT, DEVICE_VERSION as VERSION,
+    TAKING_ADDRESS,
+};
+const ADDRESS_PORT_SCALE: u16 = 1000;
+const ADDRESS_BUS_SCALE: u16 = 100;
+const WATER_SUBNET_BUS_MASK: u8 = 7;
+const DEVICE_TTL_SECONDS: u32 = 150;
+const PROBE_RETRY_SECONDS: u8 = 60;
+const SETPOINT_SETUP_SECONDS: u16 = 300;
+const SENSOR_SETUP_SECONDS: u16 = 3600;
+const STEPPED_FAN_PRODUCTS: core::ops::RangeInclusive<u32> = 99201..=99203;
+const MAX_FAN_STEP: u8 = 10;
+const IDENTITY_Z_RADIX: u32 = 100;
+const BLOCK_REQUEST_PAYLOAD_BYTES: usize = 2 + 1 + size_of::<u32>();
+const BLOCK_REQUEST_FRAME_BYTES: usize = tn4::HEADER_BYTES + BLOCK_REQUEST_PAYLOAD_BYTES;
 const UNKNOWN: u32 = u32::MAX;
 
 #[derive(Clone, Copy, Default)]
@@ -52,7 +66,7 @@ impl Device {
         live: Telemetry::EMPTY,
     };
     fn present(&self, now: u32) -> bool {
-        self.address != 0 && now.wrapping_sub(self.last_seen) <= 150
+        self.address != 0 && now.wrapping_sub(self.last_seen) <= DEVICE_TTL_SECONDS
     }
 }
 
@@ -116,10 +130,23 @@ impl Inventory {
 }
 
 fn node_index(node: u8) -> Option<usize> {
-    (node & 31)
+    (node & tn4::NODE_MASK)
         .checked_sub(1)
         .map(usize::from)
         .filter(|&n| n < NODES)
+}
+
+fn block_request(block: u8, subnet: u8, node_index: usize) -> [u8; BLOCK_REQUEST_FRAME_BYTES] {
+    let mut frame = [0; BLOCK_REQUEST_FRAME_BYTES];
+    frame[..tn4::HEADER_BYTES].copy_from_slice(&tn4::gateway_header(
+        message::BLOCK_REQUEST,
+        BLOCK_REQUEST_PAYLOAD_BYTES,
+    ));
+    let payload = &mut frame[tn4::HEADER_BYTES..];
+    payload[0] = block;
+    payload[2] = subnet;
+    payload[3..].copy_from_slice(&(1u32 << node_index).to_le_bytes());
+    frame
 }
 
 fn block_byte(mask: u8, data: &[u8], index: usize) -> Option<u8> {
@@ -157,7 +184,7 @@ impl AddressMove {
 }
 
 pub enum Observation {
-    Probe([u8; 11]),
+    Probe([u8; BLOCK_REQUEST_FRAME_BYTES]),
     Moved(AddressMove),
 }
 
@@ -172,36 +199,36 @@ impl Inventory {
     ) -> Option<Observation> {
         let (&[a, b, c, d], data) = frame.split_first_chunk::<4>()?;
         let header = u32::from_be_bytes([a, b, c, d]);
-        if data.len() != usize::from(d & 63) {
+        if data.len() != usize::from(d & tn4::PAYLOAD_MASK) {
             return None;
         }
-        let message = (header >> 20) & 0x3ff;
-        let subnet = (header >> 12) as u8;
+        let message = (header >> tn4::MESSAGE_SHIFT) & tn4::MESSAGE_MASK;
+        let subnet = (header >> tn4::SUBNET_SHIFT) as u8;
         let bus = self.ports.get_mut(port)?;
         bus.link.peer(message);
-        if message == 0x32f {
+        if message == message::OUTDOOR_TEMPERATURE_REPORT {
             self.outdoor
                 .observe(data, now, self.reporting, &mut self.broadcasts);
             return None;
         }
-        if message == 0x327 && data.is_empty() {
+        if message == message::OUTDOOR_TEMPERATURE_REQUEST && data.is_empty() {
             self.broadcasts.push(
                 broadcast::Value::RequestedOutdoor(self.outdoor.value()),
                 now,
             );
             return None;
         }
-        if message == 0x20f {
+        if message == message::SETPOINT_ENABLE_REPORT {
             self.groups.observe(data, now, self.reporting);
             return None;
         }
-        if message == 0x3d7 {
+        if message == message::NETWORK_ERROR {
             let [lo, hi, ..] = data else { return None };
             self.network_error = u16::from_le_bytes([*lo, *hi]);
             self.error_pending = self.reporting;
             return None;
         }
-        if message == 0x3ff {
+        if message == message::MASTER_PRESENT {
             if bus.subnet.replace(subnet).is_some_and(|old| old != subnet) {
                 if bus.job.active() {
                     bus.job.fail();
@@ -211,9 +238,11 @@ impl Inventory {
             }
             return None;
         }
-        let node = node_index((header >> 6) as u8)?;
-        let address = port as u16 * 1000 + u16::from(subnet & 7) * 100 + (NODES - node) as u16;
-        if message == 0x3e7 {
+        let node = node_index((header >> tn4::NODE_SHIFT) as u8)?;
+        let address = port as u16 * ADDRESS_PORT_SCALE
+            + u16::from(subnet & WATER_SUBNET_BUS_MASK) * ADDRESS_BUS_SCALE
+            + (NODES - node) as u16;
+        if message == message::TAKING_ADDRESS {
             let [old_subnet, old_node, ..] = data else {
                 return None;
             };
@@ -242,14 +271,18 @@ impl Inventory {
             return Some(Observation::Moved(moved));
         }
         let required = match message {
-            0x22f => 11,
-            0x25f => 5,
-            0x26f => 4,
-            0x2e7 => 3,
-            0x2f7 if bus.devices[node].present(now) => 3,
-            0x323 => 6 + usize::from(*data.first()?),
-            0x36f => 8,
-            0x377 => 13,
+            message::SETPOINT_STATUS => message::payload_bytes::SETPOINT_STATUS,
+            message::FAN_DUCT_STATUS => message::payload_bytes::FAN_DUCT_STATUS,
+            message::SLAB_STATUS => message::payload_bytes::SLAB_STATUS,
+            message::BLOCK_REPORT => message::payload_bytes::BLOCK_REPORT_PREFIX,
+            message::SCHEDULE_STATUS if bus.devices[node].present(now) => {
+                message::payload_bytes::SCHEDULE_STATUS
+            }
+            message::RH_REPORT => {
+                message::payload_bytes::RH_REPORT_PREFIX + usize::from(*data.first()?)
+            }
+            message::AIR_GROUP_MEMBER_STATUS => message::payload_bytes::AIR_GROUP_MEMBER_STATUS,
+            message::AIR_GROUP_MASTER_STATUS => message::payload_bytes::AIR_GROUP_MASTER_STATUS,
             _ => return None,
         };
         if data.len() < required {
@@ -291,37 +324,56 @@ impl Inventory {
         row.subnet = subnet;
         row.last_seen = now;
         let previous_attributes = row.live.attributes;
-        let setpoint_running = message == 0x22f && data[1] & 0x30 == 0x10;
+        let setpoint_running = message == message::SETPOINT_STATUS
+            && data[1] & codes::setpoint::STATUS_MODE_MASK == codes::setpoint::STATUS_RUNNING;
         if setpoint_running
-            || message == 0x2e7
-                && matches!(data, [0x26 | 0x28 | 0x2a | 0x2c | 0x2e | 0x30, 0, _, _, ..])
+            || message == message::BLOCK_REPORT
+                && matches!(
+                    data,
+                    [
+                        block::SETPOINT_SETUP
+                            | block::SETPOINT_TARGETS
+                            | block::HOT_TUB_TARGETS
+                            | block::DHW_TARGETS
+                            | block::FLOOR_TARGETS
+                            | block::POOL_TARGETS,
+                        0,
+                        _,
+                        _,
+                        ..
+                    ]
+                )
         {
             row.live.mark_setpoint_device();
         }
-        if message == 0x2e7
-            && let [0x26, 0, mask, values @ ..] = data
-            && matches!(block_byte(*mask, values, 0), Some(0..=5))
+        if message == message::BLOCK_REPORT
+            && let [block::SETPOINT_SETUP, 0, mask, values @ ..] = data
+            && matches!(
+                block_byte(*mask, values, 0),
+                Some(codes::setpoint::ON_OFF..=codes::setpoint::POOL)
+            )
         {
-            row.setpoint_setup_delay = 300;
+            row.setpoint_setup_delay = SETPOINT_SETUP_SECONDS;
         }
-        if message == 0x2e7
-            && let [0, 0, mask, values @ ..] = data
+        if message == message::BLOCK_REPORT
+            && let [block::DEVICE_INFO, 0, mask, values @ ..] = data
         {
             let get = |i| block_byte(*mask, values, i);
             if let (Some(x), Some(y), Some(z)) = (get(0), get(1), get(2)) {
                 row.product = u32::from_le_bytes([x, y, z, 0]);
             }
             if let (Some(lo), Some(hi), Some(z)) = (get(3), get(4), get(5)) {
-                row.version = u32::from(u16::from_le_bytes([lo, hi])) * 100 + u32::from(z);
+                row.version =
+                    u32::from(u16::from_le_bytes([lo, hi])) * IDENTITY_Z_RADIX + u32::from(z);
             }
         }
-        let mut changed = if message == 0x2e7
-            && let [13, 0, mask, values @ ..] = data
+        let mut changed = if message == message::BLOCK_REPORT
+            && let [block::SENSOR_SETUP, 0, mask, values @ ..] = data
             && let Some(changed) = row.live.sensor_setup(*mask, values)
         {
-            row.sensor_delay = 3600;
+            row.sensor_delay = SENSOR_SETUP_SECONDS;
             changed
-        } else if message == 0x2e7 {
+        } else if message == message::BLOCK_REPORT {
             row.live.setting_report(data)
         } else if let Some(air) = self.air_groups.observe(message, data) {
             row.live.air_status(air, self.setbacks)
@@ -335,7 +387,7 @@ impl Inventory {
             ) && !row.live.configured(bus.job.setting)
             {
                 bus.job.fail();
-            } else if message == 0x2e7 {
+            } else if message == message::BLOCK_REPORT {
                 bus.job.sample(address, subnet, data, &row.live);
             }
         }
@@ -354,39 +406,42 @@ impl Inventory {
         }
         let block = if (row.product == UNKNOWN || row.version == UNKNOWN) && row.identity_delay == 0
         {
-            row.identity_delay = 60;
-            0
+            row.identity_delay = PROBE_RETRY_SECONDS;
+            block::DEVICE_INFO
         } else if row.setpoint_setup_delay == 0
             && (setpoint_running
-                || message == 0x2e7 && data.starts_with(&[0, 0]) && row.live.is_setpoint_device())
+                || message == message::BLOCK_REPORT
+                    && data.starts_with(&[block::DEVICE_INFO, 0])
+                    && row.live.is_setpoint_device())
         {
-            row.setpoint_setup_delay = 60;
-            0x26
-        } else if message == 0x26f && row.sensor_delay == 0 {
-            row.sensor_delay = 60;
-            13
-        } else if message == 0x25f && row.fan_delay == 0 {
-            row.fan_delay = 60;
-            9
-        } else if message == 0x323 && row.rh_delay == 0 {
-            row.rh_delay = 60;
-            0xa3
-        } else if message == 0x2e7
-            && matches!(data, [0xa3, 0, ..])
+            row.setpoint_setup_delay = u16::from(PROBE_RETRY_SECONDS);
+            block::SETPOINT_SETUP
+        } else if message == message::SLAB_STATUS && row.sensor_delay == 0 {
+            row.sensor_delay = u16::from(PROBE_RETRY_SECONDS);
+            block::SENSOR_SETUP
+        } else if message == message::FAN_DUCT_STATUS && row.fan_delay == 0 {
+            row.fan_delay = PROBE_RETRY_SECONDS;
+            block::FAN_PERCENT
+        } else if message == message::RH_REPORT && row.rh_delay == 0 {
+            row.rh_delay = PROBE_RETRY_SECONDS;
+            block::HUMIDITY_SETUP
+        } else if message == message::BLOCK_REPORT
+            && matches!(data, [block::HUMIDITY_SETUP, 0, ..])
             && row.live.configured(Setting::HumidityMin)
         {
-            0xa4
-        } else if message == 0x2e7
-            && matches!(data, [0xa3 | 0xa4, 0, ..])
+            block::HUMIDIFY_TARGETS
+        } else if message == message::BLOCK_REPORT
+            && matches!(
+                data,
+                [block::HUMIDITY_SETUP | block::HUMIDIFY_TARGETS, 0, ..]
+            )
             && row.live.configured(Setting::HumidityMax)
         {
-            0xa5
+            block::DEHUMIDIFY_TARGETS
         } else {
             return None;
         };
-        let mut body = [0x6d, 0x70, 0, 7, block, 0, subnet, 0, 0, 0, 0];
-        body[7..].copy_from_slice(&(1u32 << node).to_le_bytes());
-        Some(Observation::Probe(body))
+        Some(Observation::Probe(block_request(block, subnet, node)))
     }
 
     pub fn reset(&mut self) {
@@ -485,7 +540,10 @@ impl Inventory {
     }
     pub fn next_report(&mut self, now: u32) -> Option<Reply> {
         if core::mem::take(&mut self.error_pending) {
-            return Some(Reply::report(0x107, &self.network_error.to_le_bytes()));
+            return Some(Reply::report(
+                method::NETWORK_ERROR,
+                &self.network_error.to_le_bytes(),
+            ));
         }
         if let Some(report) = self.outdoor.report() {
             return Some(report);
@@ -536,7 +594,7 @@ impl Inventory {
         };
         Some(
             Call {
-                service: 1,
+                service: service::REQUEST,
                 method: INVENTORY,
                 body: &[],
             }
@@ -546,14 +604,14 @@ impl Inventory {
 
     pub fn handle(&mut self, call: &Call<'_>, now: u32) -> Answer {
         if let Some(version) = GatewayVersion::from_method(call.method) {
-            return if call.service == 1 {
+            return if call.service == service::REQUEST {
                 Answer::Reply(call.ok(&version.word()))
             } else {
                 Answer::Silent
             };
         }
-        if call.method == 0x1a7 {
-            if call.service != 0 {
+        if call.method == method::DATE_TIME {
+            if call.service != service::UPDATE {
                 return Answer::Silent;
             }
             // J1196J checks native TX mailbox depth, not an active driver or pending serial reply.
@@ -564,7 +622,7 @@ impl Inventory {
                 self.broadcasts.push(value, now);
                 return Answer::Reply(call.ok(call.body));
             }
-            return Answer::Reply(call.ok(&[0xff; 7]));
+            return Answer::Reply(call.ok(&[codes::UNAVAILABLE; broadcast::THA_CLOCK_BYTES]));
         }
         if call.method == groups::METHOD {
             return self.groups.handle(call, now, &mut self.broadcasts);
@@ -579,7 +637,10 @@ impl Inventory {
                 return Answer::Silent;
             };
             let address = u16::from_le_bytes(a);
-            let Some(bus) = self.ports.get_mut(usize::from(address / 1000)) else {
+            let Some(bus) = self
+                .ports
+                .get_mut(usize::from(address / ADDRESS_PORT_SCALE))
+            else {
                 return Answer::Silent;
             };
             let Some((i, row)) = bus
@@ -608,37 +669,44 @@ impl Inventory {
                 || matches!(setting, Setting::HumidityMin | Setting::HumidityMax)
                     && !row.live.has_rh()
                 || setting == Setting::Fan
-                    && matches!(row.product, 99201..=99203)
-                    && call.service == 0
-                    && call.body.last().is_some_and(|v| *v > 10)
+                    && STEPPED_FAN_PRODUCTS.contains(&row.product)
+                    && call.service == service::UPDATE
+                    && call.body.last().is_some_and(|v| *v > MAX_FAN_STEP)
             {
                 op.fail();
             }
             return settings::accept(&mut bus.job, op, call);
         }
         match call.method {
-            0x10f | 0x16f => {
+            method::REPORTING_STATE | method::SETBACK_ENABLE => {
                 match (call.service, call.body) {
-                    (0, [v]) if call.method == 0x10f => self.set_reporting(*v != 0),
-                    (0, [v]) => {
+                    (service::UPDATE, [v]) if call.method == method::REPORTING_STATE => {
+                        self.set_reporting(*v != 0)
+                    }
+                    (service::UPDATE, [v]) => {
                         self.setbacks = *v != 0;
                         if !self.setbacks {
                             self.discard_fields(Field::Setback.mask());
                         }
                     }
-                    (1, [] | [_]) => {}
+                    (service::REQUEST, [] | [_]) => {}
                     _ => return Answer::Silent,
                 }
-                return Answer::Reply(call.ok(&[u8::from(if call.method == 0x10f {
-                    self.reporting
-                } else {
-                    self.setbacks
-                })]));
+                return Answer::Reply(call.ok(&[u8::from(
+                    if call.method == method::REPORTING_STATE {
+                        self.reporting
+                    } else {
+                        self.setbacks
+                    },
+                )]));
             }
-            0x107 if matches!(call.body, [_, _]) || call.service == 1 && call.body.is_empty() => {
+            method::NETWORK_ERROR
+                if matches!(call.body, [_, _])
+                    || call.service == service::REQUEST && call.body.is_empty() =>
+            {
                 return Answer::Reply(call.ok(&self.network_error.to_le_bytes()));
             }
-            0x107 => return Answer::Silent,
+            method::NETWORK_ERROR => return Answer::Silent,
             _ => {}
         }
         let field = Field::from_method(call.method);
@@ -646,14 +714,14 @@ impl Inventory {
             return Answer::Unhandled;
         }
         if (matches!(call.method, PRODUCT | VERSION) || field == Some(Field::Humidity))
-            && call.service != 1
+            && call.service != service::REQUEST
         {
             return Answer::Silent;
         }
         let Some((&address, tail)) = call.body.split_first_chunk::<2>() else {
             return Answer::Silent;
         };
-        if call.service == 0 && field.is_some() && tail.is_empty()
+        if call.service == service::UPDATE && field.is_some() && tail.is_empty()
             || !tail.is_empty()
                 && (call.method == INVENTORY || tail.len() != field.map_or(4, Field::width))
         {
@@ -661,9 +729,9 @@ impl Inventory {
         }
         let address = u16::from_le_bytes(address);
         if call.method == INVENTORY && self.remaining != 0 {
-            return Answer::Reply(call.error(1));
+            return Answer::Reply(call.error(BridgeError::Busy));
         }
-        if call.method == INVENTORY && call.service == 0 {
+        if call.method == INVENTORY && call.service == service::UPDATE {
             for p in &mut self.ports {
                 if p.job.active() && (address == 0 || address == p.job.address) {
                     p.job.fail();
@@ -672,7 +740,7 @@ impl Inventory {
         }
         let rows = self.ports.iter_mut().flat_map(|p| &mut p.devices);
         if call.method == INVENTORY && address == 0 {
-            if call.service == 0 {
+            if call.service == service::UPDATE {
                 for row in rows {
                     row.address = 0;
                 }
@@ -691,7 +759,7 @@ impl Inventory {
             .find(|r| r.address == address && r.present(now));
         if call.method == INVENTORY {
             let result = row.map_or(u16::MAX, |r| {
-                if call.service == 0 {
+                if call.service == service::UPDATE {
                     r.address = 0;
                 }
                 address

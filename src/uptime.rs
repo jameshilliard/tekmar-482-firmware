@@ -1,5 +1,8 @@
 //! Gateway wire timestamps from the free-running 1 MHz panel timer. The
 //! gateway samples it every pass, well inside its 71-minute wrap period.
+const MICROS_PER_SECOND: u32 = 1_000_000;
+const MILLIS_PER_SECOND: u32 = 1000;
+const MICROS_PER_MILLI: u32 = MICROS_PER_SECOND / MILLIS_PER_SECOND;
 #[derive(Default)]
 pub struct Uptime {
     epoch_us: u32,
@@ -9,17 +12,17 @@ pub struct Uptime {
 impl Uptime {
     pub fn sample(&mut self, us: u32) {
         let elapsed = us.wrapping_sub(self.epoch_us);
-        if elapsed >= 1_000_000 {
-            let seconds = elapsed / 1_000_000;
-            self.epoch_us = self.epoch_us.wrapping_add(seconds * 1_000_000);
+        if elapsed >= MICROS_PER_SECOND {
+            let seconds = elapsed / MICROS_PER_SECOND;
+            self.epoch_us = self.epoch_us.wrapping_add(seconds * MICROS_PER_SECOND);
             self.seconds = self.seconds.wrapping_add(seconds);
         }
     }
 
     pub fn millis(&self, us: u32) -> u32 {
         self.seconds
-            .wrapping_mul(1000)
-            .wrapping_add(us.wrapping_sub(self.epoch_us) / 1000)
+            .wrapping_mul(MILLIS_PER_SECOND)
+            .wrapping_add(us.wrapping_sub(self.epoch_us) / MICROS_PER_MILLI)
     }
 }
 

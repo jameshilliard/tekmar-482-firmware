@@ -1,5 +1,9 @@
 //! Normal-mode broadcasts share one ordered queue, with one copy per line.
-use crate::tn4::tx::Request;
+use crate::tn4::{message, tx::Request};
+
+pub(super) const THA_CLOCK_BYTES: usize = 7;
+const CLOCK_YEAR_BASE: u16 = 2000;
+const HOUR_SHIFT: u8 = 3;
 
 #[derive(Clone, Copy)]
 pub(super) enum Value {
@@ -23,10 +27,10 @@ impl Value {
         else {
             return None;
         };
-        let year = u8::try_from(u16::from_le_bytes([lo, hi]).checked_sub(2000)?).ok()?;
+        let year = u8::try_from(u16::from_le_bytes([lo, hi]).checked_sub(CLOCK_YEAR_BASE)?).ok()?;
         Some(Self::Clock([
             minute,
-            weekday | hour << 3,
+            weekday | hour << HOUR_SHIFT,
             month - 1,
             day - 1,
             year,
@@ -54,13 +58,17 @@ pub struct Broadcast {
 impl Broadcast {
     pub fn frame(self, port: u8) -> Option<Request> {
         match self.value {
-            Value::Group(id, value) => Request::new(port, &[0x61, 0xf0, 0, 2, id, value]),
-            Value::Clock([minute, time, month, day, year]) => {
-                Request::new(port, &[0x71, 0xf0, 0, 5, minute, time, month, day, year])
+            Value::Group(id, value) => {
+                Request::gateway(port, message::SETPOINT_ENABLE_UPDATE, &[id, value])
             }
+            Value::Clock([minute, time, month, day, year]) => Request::gateway(
+                port,
+                message::REAL_TIME_CLOCK_REPORT,
+                &[minute, time, month, day, year],
+            ),
             Value::Outdoor(word) | Value::RequestedOutdoor(word) => {
                 let [lo, hi] = word.to_le_bytes();
-                Request::new(port, &[0x72, 0xf0, 0, 4, lo, hi, lo, hi])
+                Request::gateway(port, message::OUTDOOR_TEMPERATURE_REPORT, &[lo, hi, lo, hi])
             }
         }
     }

@@ -1,16 +1,19 @@
 //! Per-line Normal-mode discovery, fault accounting and transmit backoff.
-use crate::tn4::tx::{Outcome, Request};
+use crate::tn4::{
+    message,
+    tx::{Outcome, Request},
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
 pub enum LineProbe {
-    MasterQuery = 0x3f7,
-    NetworkInit = 0x3df,
+    MasterQuery = message::MASTER_QUERY,
+    NetworkInit = message::NETWORK_INIT_REQUEST,
 }
 
 impl LineProbe {
     pub fn frame(self, port: u8) -> Option<Request> {
-        let header = (1 << 30) | ((self as u32) << 20);
-        Request::new(port, &header.to_be_bytes())
+        Request::gateway(port, self as u32, &[])
     }
 }
 
@@ -36,7 +39,14 @@ pub struct NormalLine {
 
 // Stock 0x57e4 decrements 0x643 times in idle sample phase only.
 // The timer match is 0x27 ticks at 16 us each (0x7f24).
-const BACKOFF_US: u32 = 0x643 * 0x27 * 16;
+const IDLE_MATCHES: u32 = 1_603;
+const IDLE_MATCH_TICKS: u32 = 39;
+const TICK_US: u32 = 16;
+const BACKOFF_US: u32 = IDLE_MATCHES * IDLE_MATCH_TICKS * TICK_US;
+const INIT_FOLLOWUP_SECONDS: u32 = 30;
+const FRAME_ERROR_THRESHOLD: u8 = 10;
+const NO_ACK_WEIGHT: u8 = 1 << 4;
+const NO_ACK_THRESHOLD: u8 = 2 * NO_ACK_WEIGHT;
 
 impl NormalLine {
     pub(super) const COLD: Self = Self {
@@ -62,7 +72,7 @@ impl NormalLine {
             self.query = true;
             self.init = Init::AfterLinkUp(now);
         } else if matches!(self.init, Init::Cold)
-            || matches!(self.init, Init::AfterLinkUp(since) if now.wrapping_sub(since) >= 30)
+            || matches!(self.init, Init::AfterLinkUp(since) if now.wrapping_sub(since) >= INIT_FOLLOWUP_SECONDS)
         {
             self.init = Init::Pending;
         }
@@ -116,7 +126,7 @@ impl NormalLine {
     pub fn frame_error(&mut self) {
         // J1196J uses the high nibble of this same count for missed ACKs.
         self.errors += 1;
-        if self.errors >= 10 {
+        if self.errors >= FRAME_ERROR_THRESHOLD {
             self.down();
             self.start_backoff();
         }
@@ -129,8 +139,8 @@ impl NormalLine {
                 self.errors = 0;
             }
             Outcome::NoAck => {
-                self.errors += 0x10;
-                if self.errors >= 0x20 {
+                self.errors += NO_ACK_WEIGHT;
+                if self.errors >= NO_ACK_THRESHOLD {
                     self.down();
                 }
             }

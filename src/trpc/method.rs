@@ -1,0 +1,41 @@
+//! tHA 482 CS 02 method IDs (UART tRPC), not native tN4 message IDs.
+pub const NULL: u32 = 0x000;
+pub const NETWORK_ERROR: u32 = 0x107;
+pub const REPORTING_STATE: u32 = 0x10f;
+pub const OUTDOOR_TEMP: u32 = 0x117;
+pub const DEVICE_ATTRIBUTES: u32 = 0x11f;
+pub const MODE_SETTING: u32 = 0x127;
+pub const ACTIVE_DEMAND: u32 = 0x12f;
+pub const CURRENT_TEMPERATURE: u32 = 0x137;
+pub const CURRENT_FLOOR_TEMPERATURE: u32 = 0x138;
+pub const SETPOINT_GROUP_ENABLE: u32 = 0x13d;
+pub const SETPOINT_DEVICE: u32 = 0x13e;
+pub const HEAT_SETPOINT: u32 = 0x13f;
+pub const COOL_SETPOINT: u32 = 0x147;
+pub const SLAB_SETPOINT: u32 = 0x14f;
+pub const RELATIVE_HUMIDITY: u32 = 0x150;
+pub const HUMIDITY_MAX: u32 = 0x151;
+pub const HUMIDITY_MIN: u32 = 0x152;
+pub const FAN_PERCENT: u32 = 0x157;
+pub const TAKING_ADDRESS: u32 = 0x15f;
+pub const DEVICE_INVENTORY: u32 = 0x167;
+pub const SETBACK_ENABLE: u32 = 0x16f;
+pub const SETBACK_STATE: u32 = 0x177;
+pub const SETBACK_EVENTS: u32 = 0x17f;
+pub const FIRMWARE_REVISION: u32 = 0x187;
+pub const PROTOCOL_VERSION: u32 = 0x18f;
+pub const DEVICE_TYPE: u32 = 0x197;
+pub const DEVICE_VERSION: u32 = 0x19f;
+pub const DATE_TIME: u32 = 0x1a7;
+
+// Custom 482 bridge extension, not present in vendor firmware.
+pub const BRIDGE_CAPABILITIES: u32 = 0x544b_f001;
+pub const SET_BRIDGE_MODE: u32 = 0x544b_f002;
+pub const PORT_DROPS: u32 = 0x544b_f003;
+pub const FIRMWARE_BUILD: u32 = 0x544b_f004;
+pub const ENTER_FIRMWARE_UPDATE: u32 = 0x544b_f005;
+pub const BRIDGE_ERROR: u32 = 0x544b_f006;
+pub const PANEL: u32 = 0x544b_f007;
+pub const LED_TEST: u32 = 0x544b_f008;
+pub const LINK_ACK_MASK: u32 = 0x544b_f009;
+pub const CAPTURE_COUNTERS: u32 = 0x544b_f00a;

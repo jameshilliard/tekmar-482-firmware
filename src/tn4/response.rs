@@ -1,5 +1,5 @@
 //! Scheduled link responses share the TX pin with a sender that is waiting for idle.
-use super::{BIT_US, Receiver, State};
+use super::{BIT_US, MAX_LATENESS_US, Receiver, State};
 
 const FLAG_US: u32 = 6 * BIT_US;
 
@@ -48,7 +48,7 @@ impl LinkResponse {
         if self.flag.take().is_none() {
             self.handled_ack = Some(at);
         }
-        if elapsed >= (BIT_US / 4) as i32 {
+        if elapsed >= MAX_LATENESS_US {
             return None;
         }
         self.release = Some(at.wrapping_add(width));
