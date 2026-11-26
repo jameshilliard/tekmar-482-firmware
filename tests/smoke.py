@@ -24,8 +24,9 @@ BODY = bytes.fromhex("12300001a5")
 SCENE = bytes.fromhex("2ff00003 07e001")  # 483 scene 8, eight hours.
 RAW_SENDS = (SCENE, bytes.fromhex("21f00002 0401"), bytes.fromhex("31f00005 1ebf100607"),
              bytes.fromhex("01000003 000102"), bytes.fromhex("20000001 01"))
-WEEK_QUERY = bytes.fromhex("6d70000b 100000 00008000 00000000")
-WEEK_REPORT = bytes.fromhex("6e70060a 10007f 90020304050607")
+RAW_READS = ((bytes.fromhex("6d70000b 100000 00008000 00000000"), bytes.fromhex("6e70060a 10007f 90020304050607")),
+             (bytes.fromhex("17f00003 11 01 1b"), bytes.fromhex("57e250c5 19 01 1b1204")),
+             (bytes.fromhex("17f00004 12 02 1922"), bytes.fromhex("57e250c8 1a 02 220006 190300")))
 TELEMETRY = ((1, bytes.fromhex("7cf25fca bc07 00c0 0000 19ff f9 ca")),
              (3, bytes.fromhex("7ce25fcb bc07 00c0 0000 19ff f9 ca35")),
              (2, bytes.fromhex("76f250c8 a4 62 2a 0000 07 0080")),
@@ -238,7 +239,8 @@ def run(path, ram, fast=False):
     valid = set()
     invalid = set()
     results = set()
-    weekly = set()
+    reads = deque(RAW_READS)
+    read_events = set()
     telemetry = []
     overlap = False
     phase = "capture"
@@ -257,6 +259,24 @@ def run(path, ram, fast=False):
         after = None
         for p, body in TELEMETRY:
             after = inject(body, p, after=after)
+
+    def start_read():
+        nonlocal phase
+        phase = "raw-read"
+        exchanges[0].append(reads[0])
+        send(0, reads[0][0])
+        at_line_rate()
+
+    def read_event(event):
+        assert event not in read_events
+        read_events.add(event)
+        if read_events == {"result", "report"}:
+            read_events.clear()
+            reads.popleft()
+            if reads:
+                start_read()
+            else:
+                telemetry_capture()
 
     def reply(kind, data):
         nonlocal phase, overlap, inventory_at
@@ -472,13 +492,11 @@ def run(path, ram, fast=False):
                     extension(2, bytes(1), True)
                     at_line_rate()
                 return
-            if phase == "weekly-read":
-                assert data[6:] in (RAW_SENDS[p], WEEK_QUERY, WEEK_REPORT)
-                if data[6:] == WEEK_REPORT:
+            if phase == "raw-read":
+                assert data[6:] in (RAW_SENDS[p], *reads[0])
+                if data[6:] == reads[0][1]:
                     assert p == 0
-                    weekly.add("report")
-                    if "result" in weekly:
-                        telemetry_capture()
+                    read_event("report")
                 return
             assert data[6:] == (BODY if phase == "capture" else RAW_SENDS[p])
             if phase == "capture":
@@ -497,20 +515,15 @@ def run(path, ram, fast=False):
             overlap = True
         elif service == 2:
             assert data[2:] == bytes([2, 1]), data
-            if phase == "weekly-read":
-                assert p == 0 and "result" not in weekly
-                weekly.add("result")
-                if "report" in weekly:
-                    telemetry_capture()
+            if phase == "raw-read":
+                assert p == 0
+                read_event("result")
                 return
             assert p not in results and (p != 0 or overlap)
             results.add(p)
             if len(results) == 5:
                 assert not any(exchanges)
-                phase = "weekly-read"
-                exchanges[0].append((WEEK_QUERY, WEEK_REPORT))
-                send(0, WEEK_QUERY)
-                at_line_rate()
+                start_read()
         else:
             raise AssertionError(data)
 
@@ -592,7 +605,7 @@ def run(path, ram, fast=False):
     assert (6, bytes.fromhex("0306f04b5402f04b5401")) in actual
     for p in range(5):
         assert (6, bytes.fromhex("0403f04b54") + bytes([p]) + bytes(8)) in actual
-    assert weekly == {"result", "report"} and actual[-1] == (6, bytes.fromhex("0305f04b54"))
+    assert not reads and not read_events and actual[-1] == (6, bytes.fromhex("0305f04b54"))
     assert tuple(telemetry) == TELEMETRY
     painted = bytes(cpu.mem_read(floor, top - floor))
     free = len(painted) - len(painted.lstrip(b"\xa5"))

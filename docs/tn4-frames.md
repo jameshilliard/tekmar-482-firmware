@@ -338,6 +338,15 @@ ordered, including duplicate keys; the last occurrence updates the value.
 An unknown role/number or a short final triple must not update device
 state. Trailing bytes after the declared count are extensions, not keys.
 
+For remote start/stop the [654 manual, Melt and Storm Groups](https://www.watts.com/dfsmedia/0533dbba17714b1ab581ab07a4cbb521/81803-source/638820695340000000/654-d-03.pdf)
+specifies **group enable**, not a write to status key 1b. In control
+applications read C2 for the melt group and C3 for the storm group, then
+send `21F [group, enable]` on the selected line. It is a group broadcast;
+another device with the same assignment can respond. Do not send this to
+sensor-only applications or use a zone number as the group. After the
+link result, `17F` for key 1b at the original zone reads its operating
+state. A `20F` group report, echo, or link ACK is not a zone-state report.
+
 Each value occupies two bytes even when it carries a small enum or a flag.
 The decoder does not convert a raw word to a percentage or temperature
 unless its encoding is known.
