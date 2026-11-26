@@ -122,7 +122,7 @@ class ThermostatTarget(IntEnum):
     def temperature(self) -> bool:
         return self in (self.HEAT, self.COOL, self.FLOOR)
 
-    def value(self, raw: int | None, model: str) -> float | int | None:
+    def physical_value(self, raw: int | None, model: str) -> float | int | None:
         if raw is None:
             return None
         if self.temperature:
@@ -154,7 +154,7 @@ class TargetTable:
 
     def value(self, slot: TargetSlot) -> float | int | None:
         """Degrees Celsius or physical percent; zero fan is Auto, not a fan output."""
-        return self.target.value(self.raw(slot), self.model)
+        return self.target.physical_value(self.raw(slot), self.model)
 
 
 @dataclass(frozen=True, slots=True)

@@ -42,6 +42,7 @@ class PayloadTests(unittest.TestCase):
 
     def test_target_tables_respect_mask_units_and_floor_maximum(self):
         for target in T:
+            self.assertEqual(target.value, int(target))
             fields = decode(0x2e7, f"{target:02x}00 15 02 03 ff")
             t = TargetTable.from_report("544", target, fields)
             self.assertEqual(t.slots, (2, None, 3, None, 255))
