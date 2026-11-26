@@ -12,7 +12,7 @@ from payloads.climate import AirGroupTargets, AirStatus, AirTarget, ThermostatCo
 from payloads.codec import Reader
 from payloads.faults import NetworkFault, SensorCircuit
 from payloads.io import IoEndpoint, IoReport, IoType, io_terminal
-from payloads.line import ClockReport, GroupReport, SetpointAssignment, ZoneSyncAdjustment, ZoneTargetMode, group_command
+from payloads.line import ClockReport, GatewayAccess, GroupReport, LineReportKind, NetworkLock, OutdoorTemperature, SetpointAssignment, WarmWeatherShutdown, ZoneSyncAdjustment, ZoneSyncReport, ZoneTargetMode, group_command, line_report
 from payloads.plant import BoilerChillerOutput, HeatPumpOutput, MixingPresent, MixingReport, MixingUpdate, PlantKind, PlantOutput, StageBits, StageCounts
 from payloads.products import block_selectors, identify_product
 from payloads.queries import NativeStatusQuery, ReplyPart, SnowmeltRole, StatusRequest
@@ -31,6 +31,38 @@ def decode(mid, hex_bytes):
 
 
 class PayloadTests(unittest.TestCase):
+    def test_line_reports_and_trace_fields_use_the_same_receive_layout(self):
+        cases = (
+            (0x010, "070299ca", ZoneSyncReport(7, 2, 0x99), 3),
+            (0x200, "f235", GatewayAccess(0xf2), 1),
+            (0x20f, "1130e4", GroupReport(17, 0x30), 2),
+            (0x2ef, "82ca", NetworkLock(0x82), 1),
+            (0x2ff, "99b400ca", SceneReport(0x99, 180, b"\xca"), 3),
+            (0x30f, "9135", WarmWeatherShutdown(0x91), 1),
+            (0x31f, "2d63ffffff04e4", ClockReport(bytes.fromhex("2d63ffffff04e4")), 5),
+            (0x32f, "32053305ca", OutdoorTemperature(0x532, 0x533), 2),
+        )
+        self.assertEqual({mid for mid, *_ in cases}, set(LineReportKind))
+        for mid, wire, expected, required in cases:
+            with self.subTest(mid=mid):
+                data = bytes.fromhex(wire)
+                self.assertEqual(line_report(mid, data), expected)
+                fields = decode_payload(mid, data)
+                self.assertEqual(fields["extension_hex"], data[-1:].hex())
+                self.assertLessEqual(expected.fields().items(), fields.items())
+                for n in range(required):
+                    self.assertIsNone(line_report(mid, data[:n]))
+        for mid, data in ((0x200, b"\xf3"), (0x21f, b"\x04\x01"), (0x32f, b"\x32\x05\xca"),
+                          (0x011, b""), (0x307, b""), (0x317, b""), (0x327, b"")):
+            self.assertIsNone(line_report(mid, data))
+        self.assertTrue(GatewayAccess(0xf2).access_open)
+        self.assertTrue(NetworkLock(0x82).address_lock)
+        self.assertFalse(NetworkLock(0x82).access_lock)
+        self.assertEqual(WarmWeatherShutdown(0x91).active_slots, (TargetSlot.WAKE, TargetSlot.AWAY))
+        self.assertIsNone(ZoneSyncReport(7, 2, 0x99).target)
+        self.assertEqual(OutdoorTemperature(0x532, 0x533).fahrenheit, 48.0)
+        self.assertIsNone(OutdoorTemperature(0xc000, None).fahrenheit)
+
     def test_setpoint_words_require_application_context(self):
         payload = bytes.fromhex("d7 cb 5800 4800 00c0 6c 35 ca e4")
         fields = decode_payload(0x22f, payload)

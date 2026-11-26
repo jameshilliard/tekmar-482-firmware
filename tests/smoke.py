@@ -51,6 +51,15 @@ TELEMETRY = ((1, bytes.fromhex("7cf25fca bc07 00c0 0000 19ff f9 ca")),
              (0, bytes.fromhex("57e250cc 19 03 220006 220106 1b1704 ca")),
              (0, bytes.fromhex("57e250c8 1a 02 22ff05 190300")),
              (2, bytes.fromhex("5f2250c7 43a5e7 08 ca35 e4")),
+             (1, bytes.fromhex("410250c4 07 02 99 ca")),
+             (1, bytes.fromhex("600250c1 03")),
+             (1, bytes.fromhex("600250c2 f2 35")),
+             (4, bytes.fromhex("60f250c3 04 10 e4")),
+             (2, bytes.fromhex("6ef250c1 82")),
+             (3, bytes.fromhex("6ff250c4 05 b400 ca")),
+             (3, bytes.fromhex("70f250c2 91 35")),
+             (0, bytes.fromhex("71f250c7 2d 63 ff ff ff 04 e4")),
+             (4, bytes.fromhex("72f250c5 3205 3305 ca")),
              (4, bytes.fromhex("62f250cc bd d4 3500 ca00 00c0 e4 35 ca e4")))
 
 def protected_bits(body):

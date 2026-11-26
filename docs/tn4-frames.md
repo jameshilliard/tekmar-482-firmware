@@ -486,6 +486,28 @@ subnets, not water temperatures. The clock belongs to the reporting peer,
 not the 482. Neither a positive link result nor silence establishes the
 presence, value or absence of the requested service.
 
+### Retaining line announcements
+
+The 483 message registry and receive models distinguish eight useful line
+announcements: zone synchronization (010), gateway access (200), setpoint
+group status (20F), network lock (2EF), scene (2FF), warm-weather shutdown
+(30F), clock (31F) and outdoor temperature (32F). Store each by physical
+port and native source, including node zero. Also key 20F by its payload
+group: two groups from one sender, or two senders reporting the same
+group, are independent observations.
+
+200 with the request bit set is not a status, even if its access-open bit
+is also set. A 21F setpoint-group command is not a 20F report. A 010,
+2FF or 31F broadcast can be the host's own announcement; it does not
+prove a thermostat applied it. Do not derive a current device scene from
+a timer or extrapolate a reporting peer's local clock. A capture gap or
+address reassignment makes the old observation unknown, not zero or off.
+
+The canonical decoder covers all 62 message IDs in the 483 SW 07 and
+SW 11 registries and recognizes all 166 registered block IDs. This is
+coverage of identifiers and their known layouts, not a claim that every
+field has known semantics or can be written.
+
 I/O discovery 1F6/1F5 and channel reads 1F4/1F3 use the full payload
 subnet and node bytes, distinct from the six-bit native header node.
 Discovery also carries a channel count; count distinct channel IDs per
