@@ -7,9 +7,8 @@ example, native `0x31f` is a remote clock report, not a request to read the
 482's clock.
 
 The catalog below covers the 62 message IDs registered in the 483 SW 11
-`message_types.rb` and `message_types_in.rb` registries. The first table
-describes the 19 IDs interpreted by the [host decoder](../tools/payloads.py).
-The second describes the other 43 registered IDs. A registration is evidence
+`message_types.rb` and `message_types_in.rb` registries. The [host
+decoder](../tools/payloads.py) recognizes all 62. A registration is evidence
 of a message layout, not evidence that a particular model sends it. The
 bridge captures other IDs and preserves their payloads. This is not a vendor
 specification or an assertion that no other tN4 IDs exist.
@@ -84,7 +83,7 @@ Lengths describe known fields, not a reason to discard extensions.
 | `0x1f2` | IOChangeReport | Subnet, node, channel, type (one byte each), then value u16. Channel type determines interpretation. |
 | `0x22f` | SetpointStatus | Byte 0: enabled [0], setback [3:1], optimum start [5:4], priority [7:6]. Byte 1: actuator [1:0], demand [2], heat/cool [3], operating mode [5:4], thermostat priority [7:6]. Offsets 2/4/6: target, temp1, temp2 (H). Byte 8: auxiliary relay [1:0], requested enable [3:2], actual enable [5:4]. Bytes 9/10: status excuse codes. A twelfth byte seen on the bus is an extension. |
 | `0x23f` | DHWStatus | Byte 0 as in SetpointStatus. Byte 1: actuator [1:0], demand [2], heat/cool [4:3], operating mode [7:5]. Bytes 2/3: target and tank (E). |
-| `0x24f` | PlantOutputStatus | Byte 0: device count [3:0], device ID [7:4]. Byte 1: subtype. For subtype 6 (modulating boiler), byte 2: state [3:0], pump [7:6]; bytes 3..7: current/min/max modulation, raw inlet and outlet. Byte 8: output [4:0], return protection [7:5]. Other subtypes are not decoded as boilers. |
+| `0x24f` | PlantOutputStatus | Byte 0: device count [3:0], device ID [7:4]. Byte 1: subtype. Remaining bytes use the subtype layouts below. |
 | `0x2d7` | BlockRequest | Block ID u16, destination subnet, target nodes u32 bitmap. The 483 layout optionally appends arguments u32. An empty bitmap selects no node. |
 | `0x2df` | BlockUpdate | Destination subnet, node byte (node [4:0], flags [7:5]), block ID u16, then block data. Blocks 5 (heat) and 6 (cool) carry all five E values in order: Wake, Unoccupied, Occupied, Sleep, Away. No support mask here. |
 | `0x2e7` | BlockReport | Block ID u16, one-byte support mask, then **one byte per set bit** in ascending bit order. For blocks 5/6 bits 0..4 have the names above. Absent bits consume no bytes and do not mean zero. |
@@ -99,6 +98,24 @@ Lengths describe known fields, not a reason to discard extensions.
 | `0x3d7` | NetworkError | Error code, then instance [5:0] and priority [7:6]. A native bus error is not a serial transport exception. |
 | `0x3df` | NetworkInitRequest | No payload defined. |
 | `0x3f7` | MasterQuery | No payload defined. |
+
+### Plant output subtypes
+
+The subtype determines field widths, even for equipment with similar names.
+Stage and pump masks below are packed low bits first. Temperature values
+are raw; field width alone does not establish a temperature scale.
+
+| Subtype | Fields after subtype |
+| --- | --- |
+| 0, 1 | Heat enable or cool enable, one byte. |
+| 2, 3 | Modulating heat or cool: signal type u8, output level u16. |
+| 4, 5 | Staged boiler or chiller: state [3:0] and pump [7:6]; four available stages [3:0] and four operating stages [7:4]; input and outlet u8. Only the boiler appends output [4:0] and return protection [7:5]. |
+| 6 | Modulating boiler: same state and pump byte; current, minimum and maximum modulation; input and outlet u8; output and protection as for 4. |
+| 7 | Modulating chiller: identified, but neither 483 layout defines the body. Returned unchanged as `extension_hex`. |
+| 8..11 | Staged heat pumps (air-to-air, water-to-air, water-to-water, air-to-water): state [3:0], O/B [4], cooling [5]; stages on, stages available. Types 10/11 add a pump status byte [1:0]. Types 9..11 end with input and outlet u16. |
+| 12..15 | Modulating versions of 8..11: same state byte; current, minimum and maximum modulation. Types 14/15 add pump status [1:0] and two temperature words. The 483 indexed and declarative layouts disagree by one byte on those words. A four-byte tail matches the packed layout; longer tails are returned as `temperature_tail_hex` without choosing offsets. |
+| 16 | Staged electric: state, stages on, stages available, sensor u16. |
+| 17, 18 | On/off injection pump or variable-speed pump: state, sensor u16. |
 
 ### Snowmelt status keys
 
@@ -123,9 +140,8 @@ unless its encoding is known.
 
 ## Other IDs in the 483 registry
 
-These layouts identify traffic for analysis. The host currently returns raw
-payloads for these IDs; it does not claim device support or successful
-application delivery. Fields are listed in transmitted order.
+These are additional decoded layouts, not a claim that every model
+supports them. Fields are listed in transmitted order.
 
 | ID | Name | Fields or interpretation in the reference |
 | --- | --- | --- |
@@ -150,12 +166,12 @@ application delivery. Fields are listed in transmitted order.
 | `0x30f` | WWSDStatus | Warm-weather shutdown flags [0..4]: Wake, Unoccupied, Occupied, Sleep, Away. |
 | `0x317` | RealTimeClockRequest | No payload defined. |
 | `0x322` | RHQuery | Subnet and four-byte node selector. |
-| `0x323` | RHReport | Count, flags, control value, u16 dewpoint, internal/external sensor data and conditional humidity/dehumidity targets. Do not assume fixed offsets after variable sensor data. |
+| `0x323` | RHReport | Count N, flags, control value (J1196J caches byte 2 as relative humidity), dewpoint u16, internal sensor u8. Preserve the next N bytes as a group: the 483 indexed reader overlaps its final sensor and first target. Both 483 layouts place optional humidity/dehumidity targets at offsets 6+N and 7+N. An incomplete declared sensor region is truncated, not zero-filled. |
 | `0x327` | OutdoorTemperatureRequest | No payload defined. |
 | `0x347` | MixingModulePresent | Actuator type [3:0], adjustable speed [6], controllable system pump [7]; motor speed byte. |
 | `0x34f` | MixingModuleReport | Mode/logic/demand/latch/limit/fault flags; pump output; actuator percentage and direction flags. Byte 3 packs the high two bits of target, supply and return in [1:0], [3:2], [5:4] plus return/supply sensor fault bits. Bytes 4..6 carry the respective low bytes. |
 | `0x357` | MixingModuleUpdate | Output-mode/control flags and target high bits; target low byte; target pump output. An optional motor speed is declared, but the reference does not resolve its latch predicate. |
-| `0x35f` | StageHeatDemandRequest | Target subnet, output level [6:0] and stage [7], target node bitmap. |
+| `0x35f` | StageHeatDemandRequest | Target subnet, output level [6:0] and stage [7], target node bitmap (three bytes little-endian, unlike a BlockRequest). |
 | `0x363` | GeneralDemand | Water subnet; cooling [6] and demand [7]. |
 | `0x36a` | AirGroupMasterConfig | Group [4:0], no-response [6], group master [7]. Second byte: previous group [4:0] and previous master [7]. |
 | `0x377` | AirGroupMasterStatus | Group and inhibit flags, cycle length/start, heat and cool status/targets/readings, output states, remote reading. Not interchangeable with a member report. |
