@@ -454,6 +454,7 @@ def run(path, ram, fast=False):
                         send(n)
                     send(0)
                     extension(2, b"\x00", True)
+                    at_line_rate()
         elif service == 3:
             assert data == bytes([3, 0, 1])
             overlap = True

@@ -22,58 +22,52 @@ impl Request {
         request.data[..body.len()].copy_from_slice(body);
         Some(request)
     }
-    fn body(&self) -> &[u8] {
-        &self.data[..self.len]
-    }
 }
 
-struct Bits {
-    // At most 552 unstuffed bits plus one added per four bits.
-    bytes: [u8; 87],
-    len: usize,
+/// Cursor after SOF. A Send can be admitted without first computing all
+/// the protected bits while back-to-back host frames fill the UART FIFO.
+struct Protected {
+    data: [u8; 67],
+    data_bits: usize,
+    index: usize,
+    crc: u16,
+    run: u8,
+    last: bool,
 }
 
-impl Bits {
-    fn push(&mut self, bit: bool) {
-        if bit {
-            self.bytes[self.len / 8] |= 1 << (self.len % 8);
+impl Protected {
+    fn new(request: &Request) -> Self {
+        Self {
+            data: request.data,
+            data_bits: request.len * 8,
+            index: 0,
+            crc: 0x4599,
+            run: 1,
+            last: true,
         }
-        self.len += 1;
     }
-    fn encode(body: &[u8]) -> Self {
-        let mut bits = Self {
-            bytes: [0; 87],
-            len: 0,
-        };
-        let mut run = 1;
-        let mut last = true;
-        bits.push(true);
-        let mut put = |bit| {
-            if run == 5 {
-                last = !last;
-                bits.push(last);
-                run = 1;
-            }
-            run = if last == bit { run + 1 } else { 1 };
-            last = bit;
-            bits.push(bit);
-        };
-        let mut crc = 0x4599u16;
-        for &byte in body {
-            for shift in (0..8).rev() {
-                let bit = byte & (1 << shift) != 0;
-                let feedback = (crc & 0x4000 != 0) ^ bit;
-                crc = ((crc << 1) & 0x7fff) ^ if feedback { 0x4599 } else { 0 };
-                put(bit);
-            }
+    fn next(&mut self) -> Option<bool> {
+        let i = self.index;
+        if i == self.data_bits + 15 {
+            return None; // No stuffing between the final CRC bit and delimiter.
         }
-        for shift in (0..15).rev() {
-            put(crc & (1 << shift) != 0);
+        if self.run == 5 {
+            self.last = !self.last;
+            self.run = 1;
+            return Some(self.last);
         }
-        bits
-    }
-    fn level(&self, index: usize) -> bool {
-        index < self.len && self.bytes[index / 8] & (1 << (index % 8)) != 0
+        let bit = if i < self.data_bits {
+            let bit = self.data[i / 8] & (0x80 >> (i % 8)) != 0;
+            let feedback = (self.crc & 0x4000 != 0) ^ bit;
+            self.crc = ((self.crc << 1) & 0x7fff) ^ if feedback { 0x4599 } else { 0 };
+            bit
+        } else {
+            self.crc & (1 << (14 - (i - self.data_bits))) != 0
+        };
+        self.index += 1;
+        self.run = if bit == self.last { self.run + 1 } else { 1 };
+        self.last = bit;
+        Some(bit)
     }
 }
 
@@ -101,23 +95,29 @@ enum Phase {
     Done,
 }
 
+#[derive(Clone, Copy)]
+enum Symbol {
+    Protected(bool),
+    Trailer(u8),
+}
+
 pub struct Sender {
-    bits: Bits,
+    bits: Protected,
     phase: Phase,
     quiet_since: u32,
     due: u32,
-    index: usize,
+    symbol: Symbol,
     ack: bool,
 }
 
 impl Sender {
     pub fn new(request: &Request, now: u32) -> Self {
         Self {
-            bits: Bits::encode(request.body()),
+            bits: Protected::new(request),
             phase: Phase::Idle,
             quiet_since: now,
             due: now,
-            index: 0,
+            symbol: Symbol::Protected(true), // SOF
             ack: false,
         }
     }
@@ -153,31 +153,37 @@ impl Sender {
         }
         self.due = self.due.wrapping_add(BIT_US / 2);
         if matches!(self.phase, Phase::Sample) {
-            if self.index == self.bits.len + 1 {
-                self.ack = high;
-            } else if self.bits.level(self.index) != high {
-                let outcome = if self.index >= self.bits.len {
-                    Outcome::BadEnd
-                } else if high {
-                    Outcome::ArbitrationLost
-                } else {
-                    Outcome::EchoMismatch
-                };
-                return self.finish(outcome);
+            match self.symbol {
+                Symbol::Trailer(1) => self.ack = high,
+                Symbol::Trailer(_) if high => return self.finish(Outcome::BadEnd),
+                Symbol::Protected(level) if level != high => {
+                    return self.finish(if high {
+                        Outcome::ArbitrationLost
+                    } else {
+                        Outcome::EchoMismatch
+                    });
+                }
+                _ => {}
             }
             self.phase = Phase::Boundary;
             return Action::None;
         }
-        self.index += 1;
-        if self.index == self.bits.len + 10 {
-            return self.finish(if self.ack {
-                Outcome::Ack
-            } else {
-                Outcome::NoAck
-            });
-        }
+        self.symbol = match self.symbol {
+            Symbol::Protected(_) => self
+                .bits
+                .next()
+                .map_or(Symbol::Trailer(0), Symbol::Protected),
+            Symbol::Trailer(9) => {
+                return self.finish(if self.ack {
+                    Outcome::Ack
+                } else {
+                    Outcome::NoAck
+                });
+            }
+            Symbol::Trailer(n) => Symbol::Trailer(n + 1),
+        };
         self.phase = Phase::Sample;
-        Action::Drive(self.bits.level(self.index))
+        Action::Drive(matches!(self.symbol, Symbol::Protected(true)))
     }
 }
 
@@ -201,6 +207,39 @@ mod tests {
         assert!(Request::new(5, &[0; 4]).is_none());
         assert!(Request::new(0, &[0; 3]).is_none());
         assert!(Request::new(0, &[0x12, 0x30, 0, 2, 0xa5]).is_none());
+    }
+
+    #[test]
+    fn streaming_bits_recover_every_body_and_zero_crc_remainder() {
+        for len in 0..=63 {
+            for fill in [0x00, 0xff, 0x55, 0xf8, 0x1f] {
+                let mut body = [fill; 67];
+                body[3] = (fill & 0xc0) | len as u8;
+                let body = &body[..4 + len];
+                let request = Request::new(4, body).unwrap();
+                let mut bits = Protected::new(&request);
+                let (mut run, mut last, mut remainder) = (1, true, 0x4599u16);
+                for i in 0..(body.len() * 8 + 15) {
+                    if run == 5 {
+                        assert_eq!(bits.next(), Some(!last));
+                        last = !last;
+                        run = 1;
+                    }
+                    let bit = bits.next().unwrap();
+                    if i / 8 < body.len() {
+                        assert_eq!(u8::from(bit), body[i / 8] >> (7 - i % 8) & 1);
+                    }
+                    remainder = (remainder << 1) ^ (u16::from(bit) << 15);
+                    if remainder & 0x8000 != 0 {
+                        remainder ^= 0xc599;
+                    }
+                    run = if last == bit { run + 1 } else { 1 };
+                    last = bit;
+                }
+                assert_eq!(remainder, 0);
+                assert_eq!(bits.next(), None);
+            }
+        }
     }
 
     #[test]
