@@ -956,7 +956,7 @@ def run(path, ram, fast=False):
                      line_sends, expected_rx_acks - received_rx_acks, list(wire_log))
     assert actual[:4] == [
         (6, bytes.fromhex(x))
-        for x in ("048f0100000300", "0400000000", "0401f04b540200050f")
+        for x in ("048f0100000300", "0400000000", "0401f04b540200051f")
     ] + [
         (
             6,

@@ -549,8 +549,19 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                                 (method::SET_BRIDGE_MODE, service::UPDATE, [_]) if busy => {
                                     call.error(BridgeError::Busy)
                                 }
-                                (method::NORMAL_TRACE, _, _) if raw => {
+                                (method::NORMAL_TRACE | method::NORMAL_IDENTITY, _, _) if raw => {
                                     call.error(BridgeError::WrongMode)
+                                }
+                                (
+                                    method::NORMAL_IDENTITY,
+                                    service::REQUEST,
+                                    [p @ 0..=LAST_PORT, subnet, node @ 1..=31],
+                                ) => {
+                                    if inventory.line(usize::from(*p)).identify(*subnet, *node) {
+                                        call.ok(call.body)
+                                    } else {
+                                        call.error(BridgeError::Busy)
+                                    }
                                 }
                                 (
                                     method::NORMAL_TRACE,
@@ -622,7 +633,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                                 (
                                     method::SET_BRIDGE_MODE
                                     | method::PORT_DROPS
-                                    | method::PANEL..=method::ERROR_REPORTING,
+                                    | method::PANEL..=method::NORMAL_IDENTITY,
                                     _,
                                     _,
                                 ) => call.error(BridgeError::InvalidRequest),

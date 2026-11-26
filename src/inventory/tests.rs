@@ -84,6 +84,23 @@ fn address(reply: Reply) -> u16 {
 }
 
 #[test]
+fn normal_identity_is_a_single_read_only_query_on_the_selected_line() {
+    let mut inv = Inventory::new();
+    assert!(!inv.line(1).identify(0x42, 0));
+    assert!(!inv.line(1).identify(0x42, 32));
+    assert!(inv.line(1).identify(0x42, 31));
+    assert!(!inv.line(1).identify(0x42, 2));
+    assert_eq!(inv.line(2).pending(), None);
+    let query = inv.line(1).pending().unwrap();
+    assert_eq!(
+        query.frame(1),
+        Request::new(1, &[0x6d, 0x70, 0, 7, 0, 0, 0x42, 0, 0, 0, 0x40])
+    );
+    inv.line(1).finished(query);
+    assert_eq!(inv.line(1).pending(), None);
+}
+
+#[test]
 fn line_discovery_is_per_port_one_shot_and_not_device_presence() {
     use crate::tn4::tx::Outcome;
     use LineProbe::{MasterQuery, NetworkInit};

@@ -5,15 +5,26 @@ use crate::tn4::{
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(u32)]
 pub enum LineProbe {
-    MasterQuery = message::MASTER_QUERY,
-    NetworkInit = message::NETWORK_INIT_REQUEST,
+    MasterQuery,
+    NetworkInit,
+    Identity { subnet: u8, node: u8 },
 }
 
 impl LineProbe {
     pub fn frame(self, port: u8) -> Option<Request> {
-        Request::gateway(port, self as u32, &[])
+        match self {
+            Self::MasterQuery => Request::gateway(port, message::MASTER_QUERY, &[]),
+            Self::NetworkInit => Request::gateway(port, message::NETWORK_INIT_REQUEST, &[]),
+            Self::Identity {
+                subnet,
+                node: node @ 1..=31,
+            } => Request::new(
+                port,
+                &super::block_request(super::block::DEVICE_INFO, subnet, usize::from(node - 1)),
+            ),
+            Self::Identity { .. } => None,
+        }
     }
 }
 
@@ -31,6 +42,8 @@ pub struct NormalLine {
     up: bool,
     sampled_up: bool,
     query: bool,
+    identity_node: u8,
+    identity_subnet: u8,
     errors: u8,
     init: Init,
     backoff_us: u32,
@@ -53,6 +66,8 @@ impl NormalLine {
         up: false,
         sampled_up: false,
         query: false,
+        identity_node: 0,
+        identity_subnet: 0,
         errors: 0,
         init: Init::Cold,
         backoff_us: 0,
@@ -62,7 +77,7 @@ impl NormalLine {
     pub(super) fn peer(&mut self, message: u32) {
         self.up = true;
         self.errors = 0;
-        if message == LineProbe::NetworkInit as u32 {
+        if message == message::NETWORK_INIT_REQUEST {
             self.init = Init::Done;
         }
     }
@@ -85,18 +100,36 @@ impl NormalLine {
         } else if matches!(self.init, Init::Pending) {
             Some(LineProbe::NetworkInit)
         } else {
-            None
+            (self.identity_node != 0).then_some(LineProbe::Identity {
+                subnet: self.identity_subnet,
+                node: self.identity_node,
+            })
         }
+    }
+
+    pub fn identify(&mut self, subnet: u8, node: u8) -> bool {
+        if self.identity_node != 0 || !(1..=31).contains(&node) {
+            return false;
+        }
+        self.identity_subnet = subnet;
+        self.identity_node = node;
+        true
     }
 
     /// Arbitration can return this probe to the queue; retire it only on a terminal result.
     pub fn finished(&mut self, probe: LineProbe) {
+        if matches!(probe, LineProbe::Identity { subnet, node } if subnet == self.identity_subnet && node == self.identity_node)
+        {
+            self.identity_node = 0;
+            return;
+        }
         if self.pending() != Some(probe) {
             return; // A peer or a newer link-up already changed the pending action.
         }
         match probe {
             LineProbe::MasterQuery => self.query = false,
             LineProbe::NetworkInit => self.init = Init::Done,
+            LineProbe::Identity { .. } => {}
         }
     }
 

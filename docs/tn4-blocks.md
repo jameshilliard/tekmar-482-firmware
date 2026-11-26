@@ -178,6 +178,16 @@ reading this block does not return the active scene.
 
 ## Reading a 402
 
+In Normal mode, capability bit 4 advertises `NormalIdentity` (tRPC
+`0x544BF00D`). Request with three bytes: physical port (0..4), full
+subnet, and block destination node (1..31). The ResponseRequest echoes
+these bytes when queued. Busy rejects a second pending read on that port.
+This schedules only a BlockRequest for block 00, never a write, mode
+switch or inventory reset. Watch Normal trace on that port for the
+BlockReport from the actual responding source. Acceptance and link ACK
+are not model identification. Sources with no addressable node or no
+usable reply cannot be assigned a model by this request.
+
 Use block 00 to confirm the native source. A plant master need not have
 a thermostat-style tHA inventory address. On a 402, read-only queries
 confirmed distinct `44` replies for primary pump selector 0 and DHW pump
