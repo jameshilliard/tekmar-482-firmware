@@ -2,7 +2,8 @@
 
 The LPC2146 has a UART0 host link and five tN4 receive paths. The table
 uses the logical port numbers in the stock J1196J sampling routines, not
-thermostat addresses. Only explicit TX and receive-ACK commands can drive a bus.
+thermostat addresses. In Raw mode only explicit TX and receive-ACK commands
+can drive a bus; Normal mode also issues its own native requests.
 
 | Port | RX pin | Capture input | TX pin | Stock sample routine |
 | ---: | --- | --- | --- | --- |
@@ -89,12 +90,14 @@ activity indicators. GPIO readback does not test those lamps optically.
 
 `board.py panel PORT` reads the power-on and debounced Reporting DIP
 (P0.7), Test button (P0.14), change counters and LED levels. Both inputs
-are active low. A button press or `board.py led-test PORT` walks bus 0..4
-then Test, 500 ms each. The host checks all six pin readbacks and that the
-walk ends. The RAM trial accepts `--panel-test`. Outside the walk, a bus
+are active low. A button press starts the [onboard Test sequence](normal-mode.md#gateway-diagnostics).
+The separate `board.py led-test PORT` walks bus 0..4 then Test, 500 ms
+each, without simulating a press or sending version reports. The host
+checks all six pin readbacks and that the walk ends. The RAM trial
+accepts `--panel-test`. Outside the walk, a bus
 LED denotes a CRC-matching frame seen in the last minute, including an
 intact body with a bad trailer. The same decoder runs while waiting for
-UART commands, without sending unsolicited records. Use
+UART commands. Use
 `ram_trial.py --panel-after 30` to check LED activity before opening any
 stream. A lit LED is not proof of delivery.
 The DIP state is diagnostic, not permission to drive a bus. Test at
@@ -108,7 +111,7 @@ uv run --script tools/board.py panel "$PORT" --check-input test --seconds 90
 
 Wait for the prompt before touching the control. This test reads panel state without starting a software lamp test. It requires the debounced button
 to be observed pressed and released, exactly one new press, and the
-complete six-pin sweep. The person at the panel checks the actual lights.
+Test LED pin to be active. The person at the panel checks the actual light.
 The corresponding `--check-input dip` test needs both switch positions
 to be observed and exactly two transitions back to the original setting.
 Use only controls accessible with the enclosure closed; skip a physical
@@ -124,10 +127,9 @@ pass. This check leaves the installed application running.
 | Five bus LEDs and Test LED | `--panel-after 25 --panel-test` reads idle activity, then follows the six individual output pin levels. | Watch Bus 0 through 4, then Test. Pin readback alone cannot detect a failed lamp or a swapped label. |
 | Test button and Reporting DIP | On the running panel build, use `board.py panel PORT --check-input test` or `--check-input dip`. | An operator must act on the physical control. Counters alone do not pass either test. |
 
-In a witnessed SRAM trial, Power stayed lit and both RS-232 activity lamps
-flickered during upload. One physical Test press and release produced one
-new press count and the visible sequence Bus 0, 1, 2, 3, 4, then Test.
-All six corresponding pin levels were verified over UART.
+An earlier bring-up image used a button press to start the lamp sweep.
+That trial verified the six visible lights and their pin levels, not the
+Normal-mode Test sequence in the current image.
 
 The [482 installation manual, pp. 8-10](https://www.watts.com/dfsmedia/0533dbba17714b1ab581ab07a4cbb521/42923-source/638820695670000000/482-d-09.pdf)
 identifies DTR as programming-only, and the DIP as the stock reporting

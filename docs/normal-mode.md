@@ -9,12 +9,12 @@ native message in Raw mode does not implement its tRPC services in Normal mode.
 | Method IDs (hex) | Normal-mode behavior in this firmware |
 | --- | --- |
 | 000 NullMethod | Reply to an unknown method on the matching response service. |
-| 18F ProtocolVersion | Request returns 3; this is the wire format, not a coverage flag. |
+| 187 FirmwareRevision, 18F ProtocolVersion | Request returns a little-endian u16; Update is silent. The physical Test button reports both. |
 | 167 DeviceInventory | Full walk, exact lookup, clear one, clear all. No unsolicited inventory report. |
 | 197 DeviceType, 19F DeviceVersion | Read addressed identity from block 0. Ignore writes. |
 | 15F TakingAddress | Report the old and new addresses even with reporting disabled. Request and Update are ignored. |
 | 107 NetworkError | Request and Update return the current network error word. Reports follow native 3D7, including clearance. |
-| 10F ReportingState | Request and Update. Power-on default comes from the Reporting DIP. Test-button reporting notifications are not yet implemented. |
+| 10F ReportingState | Request and Update read back the active reporting flag. A Test-mode Report carries the physical DIP position instead. |
 | 117 OutdoorTemp | Read the selected network temperature, supply a four-minute local sample, and report changes. Respond to native outdoor requests on all five ports. |
 | 11F DeviceAttributes | Read the observed u16 mask, echo it on Update, and report changes. See below for the evidence behind each bit. |
 | 127 ModeSetting | Addressed Request and Update use heating setup (block 3). Report on observed mode. This is not ActiveDemand. |
@@ -27,8 +27,29 @@ native message in Raw mode does not implement its tRPC services in Normal mode.
 | 151 HumidityMax, 152 HumidityMin | Addressed Request, Update and Report. Require an RH source and the corresponding block A3 enable flag. Not setback-indexed in tHA. |
 | 17F SetbackEvents | Request, read-only Update echo and Report. Returns the schedule master's configuration code (0/1/2 for zero/two/four events); FF if unknown, reserved or not a master. |
 | 16F SetbackEnable, 177 SetbackState | Read or set the gateway enable flag; read the active setback and receive setback reports when enabled. The flag also determines which heat, cool, floor and fan slots an Update changes. |
-| 187 FirmwareRevision | Not implemented. FirmwareBuild is a separate custom extension, not a vendor revision. |
 | 1A7 DateTime | Update broadcasts local wall time on all five lines. No Request response or Report. |
+
+## Gateway diagnostics
+
+FirmwareRevision returns 0 for this unnumbered custom firmware. This is a
+project convention, not a tekmar revision or a reliable way to identify a
+custom image. Use BridgeCapabilities and FirmwareBuild for identification
+and updates. ProtocolVersion returns 3, the tHA wire format.
+
+Pressing the physical Test button reports FirmwareRevision immediately,
+then ProtocolVersion ten seconds later. Both stages last ten seconds with
+the Test LED on. Press during either stage to hold it (Test blinks every
+500 ms); press again to advance. A held stage times out to idle after five
+minutes. After stage two there is a three-second lockout with the LED off.
+These are serial diagnostics; they do not put any tN4 device into test mode.
+
+During either **unheld** stage the gateway samples the physical Reporting
+DIP once per second and sends a ReportingState Report if it differs from
+the last reported position (initially off). Like J1196J at `0x78dc`, this
+does not read or change the software flag. All three Test reports work
+with ordinary reporting off; a ReportingState Request still reads the
+software flag. Raw mode sends none of these reports, and a mode transition
+clears the test sequence and any pending notices.
 
 ## Clock updates
 

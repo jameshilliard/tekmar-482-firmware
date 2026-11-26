@@ -312,6 +312,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                                 (0x544bf002, 0, [m @ 0..=1]) if !busy => {
                                     if raw != (*m == 1) {
                                         inventory.reset();
+                                        panel.borrow_mut().reset_sequence();
                                     }
                                     raw = *m == 1;
                                     if !raw {
@@ -405,6 +406,13 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                 }
                 Ok(None) => {}
             }
+        }
+        if !raw
+            && !reboot
+            && out.can_receive()
+            && let Some(notice) = panel.borrow_mut().take_notice()
+        {
+            out.enqueue(Kind::Control, tpck::TRPC, notice.report().payload());
         }
         if !raw
             && !reboot

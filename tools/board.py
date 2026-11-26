@@ -55,10 +55,10 @@ async def panel_state(port):
 async def check_panel_input(port, initial, which, seconds):
     print("Use only controls accessible with the enclosure closed.", flush=True)
     if which == "test":
-        if initial.inputs & 2 or initial.test or initial.presses == 0xffffffff:
-            raise RuntimeError("start with Test released, lamp sweep finished and press counter available")
+        if initial.inputs & 2 or initial.pins & 32 or initial.test or initial.presses == 0xffffffff:
+            raise RuntimeError("start with Test released, Test LED off and press counter available")
         print("Waiting for a Test press: hold for one second, then release. "
-              "Watch Bus 0 through 4, then Test.", flush=True)
+              "Watch the Test LED.", flush=True)
     elif which == "dip":
         if initial.changes >= 0xfffffffe:
             raise RuntimeError("DIP counter cannot record two more changes")
@@ -69,7 +69,7 @@ async def check_panel_input(port, initial, which, seconds):
     loop = asyncio.get_running_loop()
     deadline = loop.time() + seconds
     asserted = False
-    sweep = []
+    lit = False
     while loop.time() < deadline:
         state = await panel_state(port)
         if state.boot != initial.boot:
@@ -78,15 +78,16 @@ async def check_panel_input(port, initial, which, seconds):
             presses = state.presses - initial.presses
             if presses not in (0, 1):
                 raise RuntimeError(f"expected one Test press; counter changed by {presses}")
+            if state.test:
+                raise RuntimeError("software lamp sweep active during Test input check")
             if presses:
                 asserted |= bool(state.inputs & 2)
-                if state.test and (not sweep or sweep[-1] != state.pins):
-                    sweep.append(state.pins)
-                if not state.test and not state.inputs & 2:
-                    if asserted and sweep == [1, 2, 4, 8, 16, 32]:
-                        print("Test input: press, release, one counted press and six LED pin states verified.")
+                lit |= bool(state.pins & 32)
+                if not state.inputs & 2:
+                    if asserted and lit:
+                        print("Test input: press, release, one counted press and Test LED verified.")
                         return
-                    raise RuntimeError(f"incomplete Test evidence: saw pressed={asserted}, LED masks={sweep}")
+                    raise RuntimeError(f"incomplete Test evidence: saw pressed={asserted}, Test LED={lit}")
         else:
             changes = state.changes - initial.changes
             flipped = bool((state.inputs ^ initial.inputs) & 1)

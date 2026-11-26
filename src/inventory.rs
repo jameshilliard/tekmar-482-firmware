@@ -1,5 +1,5 @@
 //! Normal-mode inventory. Bus addresses, not product numbers, identify entries.
-use crate::trpc::{Call, Reply};
+use crate::trpc::{Call, GatewayVersion, Reply};
 mod broadcast;
 mod groups;
 mod outdoor;
@@ -512,6 +512,13 @@ impl Inventory {
     }
 
     pub fn handle(&mut self, call: &Call<'_>, now: u32) -> Answer {
+        if let Some(version) = GatewayVersion::from_method(call.method) {
+            return if call.service == 1 {
+                Answer::Reply(call.ok(&version.word()))
+            } else {
+                Answer::Silent
+            };
+        }
         if call.method == 0x1a7 {
             if call.service != 0 {
                 return Answer::Silent;

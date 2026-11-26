@@ -70,16 +70,16 @@ class HelperTest(unittest.TestCase):
         out, err = proc.communicate(timeout=2)
         return proc.returncode, out + err
 
-    def test_observed_button_must_trigger_complete_sweep(self):
+    def test_observed_button_requires_press_release_and_indicator(self):
         base = PanelState(1, 1, 4, 2, 7, 7, 0)
-        sweep = [base._replace(inputs=3 if n < 3 else 1, presses=5, leds=1<<n, pins=1<<n, test=1)
-                 for n in range(6)]
-        end = base._replace(presses=5)
-        status, output = self.panel_check("test", [base, *sweep, end])
+        pressed = base._replace(inputs=3, presses=5, leds=39, pins=39)
+        end = pressed._replace(inputs=1)
+        status, output = self.panel_check("test", [base, pressed, end])
         self.assertEqual(status, 0, output)
-        self.assertIn(b"one counted press and six LED pin states verified", output)
-        for middle in (sweep[1:], [s._replace(inputs=1) for s in sweep]):
-            status, output = self.panel_check("test", [base, *middle, end])
+        self.assertIn(b"one counted press and Test LED verified", output)
+        for states in ([base, end], [base, pressed._replace(leds=7, pins=7),
+                                     end._replace(leds=7, pins=7)]):
+            status, output = self.panel_check("test", states)
             self.assertNotEqual(status, 0, output)
             self.assertIn(b"incomplete Test evidence", output)
 

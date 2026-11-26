@@ -6,13 +6,36 @@ const UPDATE: u8 = 0;
 const REQUEST: u8 = 1;
 const RESPONSE_UPDATE: u8 = 3;
 const RESPONSE_REQUEST: u8 = 4;
-const PROTOCOL_VERSION: u32 = 0x18f;
 pub const BRIDGE_CAPABILITIES: u32 = 0x544b_f001;
 pub const FIRMWARE_BUILD: u32 = 0x544b_f004;
 pub const ENTER_FIRMWARE_UPDATE: u32 = 0x544b_f005;
 const BRIDGE_ERROR: u32 = 0x544b_f006;
 
 const BUILD_LEN: usize = env!("TEKMAR_BUILD_REVISION").len();
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GatewayVersion {
+    Firmware = 0x187,
+    Protocol = 0x18f,
+}
+
+impl GatewayVersion {
+    pub(crate) fn from_method(method: u32) -> Option<Self> {
+        match method {
+            0x187 => Some(Self::Firmware),
+            0x18f => Some(Self::Protocol),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn word(self) -> [u8; 2] {
+        match self {
+            Self::Firmware => 0u16, // unnumbered custom firmware; FirmwareBuild identifies the image
+            Self::Protocol => 3u16,
+        }
+        .to_le_bytes()
+    }
+}
 
 // FirmwareBuild serves the installer's fixed-offset image stamp itself.
 #[used]
@@ -111,12 +134,6 @@ impl<'a> Call<'a> {
 
     pub fn management(&self, raw: bool, busy: bool) -> Option<Reply> {
         let reply = match (self.service, self.method) {
-            // The vendor host sample packs two placeholder bytes even for a read.
-            (REQUEST, PROTOCOL_VERSION)
-                if !raw && (self.body.is_empty() || self.body.len() == 2) =>
-            {
-                self.response(self.method, &3_u16.to_le_bytes())
-            }
             (REQUEST, BRIDGE_CAPABILITIES) if self.body.is_empty() => {
                 self.response(self.method, &[1, u8::from(raw), 5, 3])
             }

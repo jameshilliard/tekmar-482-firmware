@@ -68,10 +68,12 @@ def run(path, ram, fast=False):
     incoming = deque()
     actual = []
     timers = [{}, {}]
-    gpio = {0: 0, 0x10: 0, 0x14: 2, 0x20: 0, 0x30: 0, 0x34: 0}
+    button = 1 << 14
+    gpio = {0: 0, 0x10: 0, 0x14: 2 | button, 0x20: 0, 0x30: 0, 0x34: 0}
     pins = 0
     clock = 0
     edges = deque()
+    panel_edges = deque()
     inventory_at = None
     exchanges = [deque() for _ in PORTS]
     setting_exchange = exchanges[0]
@@ -158,6 +160,9 @@ def run(path, ram, fast=False):
                 while edges and edges[0][0] <= clock:
                     at, p, high = edges.popleft()
                     level(p, high, at)
+                while panel_edges and panel_edges[0][0] <= clock:
+                    _, down = panel_edges.popleft()
+                    gpio[0x14] = gpio[0x14] & ~button if down else gpio[0x14] | button
                 if inventory_at is not None and clock >= inventory_at:
                     inventory_at = None
                     call(0x167, b"\0\0")
@@ -235,6 +240,32 @@ def run(path, ram, fast=False):
                 assert actual[-2] == (6, bytes.fromhex("0497010000010082830100"))
                 assert data[5:] == struct.pack("<HI", 1, 29104)
                 call(0x10f, b"\x01", True)
+            elif method == 0x187 and data[0] == 4:
+                assert phase == "panel-request" and data[5:] == bytes(2)
+                # Neither version Update produced a NullMethod or Response:Update.
+                assert actual[-2][1] == bytes.fromhex("0497010000030082830100")
+                phase = "panel-button"
+                gpio[0x14] &= ~button
+            elif method == 0x187 and data[0] == 2:
+                assert phase == "panel-button" and data[5:] == bytes(2)
+                gpio[0x14] |= button
+                phase = "panel-dip"
+            elif method == 0x10f and data[0] == 2:
+                assert phase == "panel-dip" and data[5:] == b"\x01"
+                assert not gpio[0x34] & (1 << 16)  # active-low Test lamp
+                phase = "panel-effective"
+                call(0x10f, b"\0")
+            elif method == 0x10f and phase == "panel-effective":
+                assert data[0] == 4 and data[5:] == b"\0"  # host disabled push before the test
+                phase = "panel-protocol"
+                # Press to hold stage 1; release and press to advance to stage 2.
+                panel_edges.extend((clock + dt, down) for dt, down in
+                                   [(100_000, True), (200_000, False),
+                                    (300_000, True), (400_000, False)])
+            elif method == 0x18f and data[0] == 2:
+                assert phase == "panel-protocol" and data[5:] == b"\x03\0"
+                phase = "capture"
+                extension(2, b"\x01", True)
             elif method == 0x10f and data[5:] == b"\x01":
                 if phase == "device-target":
                     inject(bytes.fromhex("62f0060b 0610 3406 1006 0000000000"))
@@ -363,16 +394,25 @@ def run(path, ram, fast=False):
                 assert data[5:] == bytes.fromhex("030082830100")
                 assert not any(kind == 6 and pkt[1:5] == bytes(4)
                                for kind, pkt in actual[-3:])
-                phase = "capture"
-                extension(2, b"\x01", True)
+                phase = "panel-request"
+                call(0x187, bytes(2), True)
+                call(0x18f, bytes(2), True)
+                call(0x187, b"\xff\xff")
             elif method == 0x544BF002 and data[5:] == bytes([1]):
                 assert [pkt for k, pkt in actual if k == 6 and pkt[1:5] == bytes.fromhex("a7010000")] == [
                     bytes.fromhex("03a7010000") + b"\xff" * 7,
                     bytes.fromhex("03a7010000dc07061a020a1b"),
                 ]
                 assert len(clock_ports) == 5
+                call(0x187, bytes(2))
+                panel_edges.extend([(clock + 200_000, True), (clock + 300_000, False)])
                 plant_inputs()
             elif method == 0x544BF002 and data[5:] == bytes([0]):
+                extension(7)
+            elif method == 0x544BF007:
+                _, inputs, presses, _, _, _, sweep = struct.unpack("<7I", data[5:])
+                assert presses == 4 and inputs == 1 and not sweep
+                assert (6, bytes.fromhex("0406f04b54 87010000 03")) in actual
                 for p in range(5):
                     extension(3, bytes([p]))
                 extension(5, update=True)
@@ -473,7 +513,7 @@ def run(path, ram, fast=False):
 
     cpu.mmio_map(0xE000C000, 0x1000, read, None, write, None)
     cpu.hook_add(UC_HOOK_CODE, rom, begin=0x7FFFFFF0, end=0x7FFFFFF0)
-    cpu.emu_start(base, 0xFFFFFFFF, count=100_000_000)
+    cpu.emu_start(base, 0xFFFFFFFF, count=150_000_000)
     assert entered, (clock, phase, [len(x) for x in exchanges], results, actual[-10:])
     assert actual[:4] == [
         (6, bytes.fromhex(x))

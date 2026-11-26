@@ -37,12 +37,14 @@ Request (01) and Update (00) receive ResponseRequest (04) and ResponseUpdate
 (03), respectively. An unknown method receives method zero on the matching
 response service. Do not respond to a report or response.
 
-The following are **custom** method allocations, not vendor method IDs.
-Unless indicated, the request body is empty. All integers are little endian.
+The two numeric version methods are standard tHA and available in Normal
+mode only. The 544BFxxx methods are **custom** allocations. Unless indicated,
+the request body is empty. All integers are little endian.
 
 | Method | Service | Response body |
 | --- | --- | --- |
-| 0000018F ProtocolVersion (vendor) | Request, zero or two placeholder bytes | u16 vendor protocol version, currently 3 |
+| 00000187 FirmwareRevision | Request, zero or two placeholder bytes | u16 numeric revision, 0 for this unnumbered custom image |
+| 0000018F ProtocolVersion | Request, zero or two placeholder bytes | u16 tHA protocol version, currently 3 |
 | 544BF001 BridgeCapabilities | Request | Four u8 values: extension version (1), current mode (0 Normal, 1 Raw), port count (5), feature flags (bit 0 bidirectional Raw, bit 1 ROM update) |
 | 544BF002 SetBridgeMode | Update, mode u8 | Echo mode: 0 Normal, 1 Raw. Busy during an inventory walk, a started transmission, an outstanding host send or a local ACK. Switching modes clears the Normal inventory; returning to Normal also clears the ACK mask. |
 | 544BF003 PortDrops | Request, port u8 | Port u8, valid records dropped u32, invalid records dropped u32. |

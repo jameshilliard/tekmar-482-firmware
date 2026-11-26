@@ -1,5 +1,7 @@
 //! The six stock active-low indicators; never configure a tN4 driver pin here.
 use super::{PCONP, PINSEL0, read, write};
+use heapless::Vec;
+use tekmar_482_firmware::onboard_test::{Notice, OnboardTest};
 
 const SCS: usize = 0xe01f_c1a0;
 const PINSEL2: usize = 0xe002_c014;
@@ -50,6 +52,8 @@ pub struct Panel {
     presses: u32,
     dip_changes: u32,
     test_start: Option<u32>,
+    sequence: OnboardTest,
+    notices: Vec<Notice, 3>,
     activity: [Option<u32>; 5],
     lit: u8,
 }
@@ -97,6 +101,8 @@ impl Panel {
             presses: 0,
             dip_changes: 0,
             test_start: None,
+            sequence: OnboardTest::default(),
+            notices: Vec::new(),
             activity: [None; 5],
             lit: 0,
         }
@@ -119,21 +125,38 @@ impl Panel {
         self.activity[port] = Some(now());
     }
 
+    pub fn reset_sequence(&mut self) {
+        self.sequence = OnboardTest::default();
+        self.notices.clear();
+    }
+
+    pub fn take_notice(&mut self) -> Option<Notice> {
+        (!self.notices.is_empty()).then(|| self.notices.remove(0))
+    }
+
     pub fn poll(&mut self) {
         let time = now();
         let sample = inputs();
+        let mut pressed = false;
         if sample == self.last_sample && sample != self.stable {
             if (sample ^ self.stable) & 1 != 0 {
                 self.dip_changes = self.dip_changes.saturating_add(1);
             }
             if sample & !self.stable & 2 != 0 {
                 self.presses = self.presses.saturating_add(1);
-                self.test_start = Some(time);
+                pressed = true;
             }
             self.stable = sample;
         }
         self.last_sample = sample;
-        let mut mask = 0;
+        self.sequence
+            .poll(time, pressed, self.stable & 1 != 0, |notice| {
+                // At most three distinct fields. Under UART backpressure keep their latest
+                // unsent values in observation order, without stalling the button sampler.
+                self.notices.retain(|n| n.method() != notice.method());
+                self.notices.push(notice).unwrap();
+            });
+        let mut mask = u8::from(self.sequence.indicator(time)) << 5;
         for (port, seen) in self.activity.iter_mut().enumerate() {
             if seen.is_some_and(|at| time.wrapping_sub(at) < 60_000_000) {
                 mask |= 1 << port;
