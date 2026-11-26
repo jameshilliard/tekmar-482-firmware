@@ -87,6 +87,25 @@ fn line_discovery_is_per_port_one_shot_and_not_device_presence() {
 }
 
 #[test]
+fn master_routes_from_its_header_without_a_hydronic_payload() {
+    let mut inv = Inventory::new();
+    let key = 3101u16.to_le_bytes();
+    let present = |inv: &mut Inventory| address(call(inv, INVENTORY, 1, &key, 1).unwrap());
+    observe(&mut inv, 3, 1, 0, 0x3ff, &[0x55], 0);
+    observe(&mut inv, 3, 1, 24, 0x36f, &[0; 8], 0);
+    assert_eq!(present(&mut inv), 3101);
+    // Identical display subnet, different full wire address. No payload
+    // from which to decode boiler or mixing fields is required to route.
+    observe(&mut inv, 3, 9, 0, 0x3ff, &[], 1);
+    assert_eq!(present(&mut inv), u16::MAX);
+    observe(&mut inv, 3, 1, 24, 0x36f, &[0; 8], 1);
+    assert_eq!(present(&mut inv), u16::MAX);
+    let probe = observe(&mut inv, 3, 9, 24, 0x36f, &[0; 8], 1).unwrap();
+    assert_eq!(probe[6], 9);
+    assert_eq!(present(&mut inv), 3101);
+}
+
+#[test]
 fn discovery_rearms_only_after_a_sampled_loss_and_recovery() {
     use crate::tn4::tx::Outcome;
     use LineProbe::{MasterQuery, NetworkInit};

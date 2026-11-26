@@ -53,7 +53,9 @@ even with serial reporting disabled. The stock application service
 - On a sampled transition to link-up, send one empty class-1 MasterQuery
   (`3F7`). Start a new 30-second window. Unless a peer sends `3DF` on
   **that port**, send `3DF` once at the end of the window. MasterPresent
-  (`3FF`) supplies the master's subnet but does not suppress the follow-up.
+  (`3FF`) supplies the routing subnet **in its header**, even if its
+  payload is empty (`0x597c`); it does not suppress the follow-up. An
+  empty payload supplies no boiler or mixing information.
 - A valid received frame or an externally ACKed send establishes link-up.
   A gateway's unacknowledged echo is not a peer. A link fault followed by
   recovery can start a new cycle; elapsed silence alone cannot. Neither

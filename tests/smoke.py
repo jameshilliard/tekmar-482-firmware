@@ -133,7 +133,7 @@ def run(path, ram, fast=False):
             assert all([b for b, _ in tx] == [init] for tx in line_sends)
             phase = "line-up"
             end = inject(bytes.fromhex("7ff00001 00"))
-            inject(bytes.fromhex("7ff05001 00"), port=1, after=end)
+            inject(bytes.fromhex("7ff05000"), port=1, after=end)
         elif phase == "line-up" and all(any(b == master for b, _ in tx) for tx in line_sends[:2]):
             phase = "line-wait"
             # Only the peer on port 1 suppresses the 30-second follow-up.

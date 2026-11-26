@@ -197,7 +197,7 @@ impl Inventory {
             return None;
         }
         if message == 0x3ff {
-            if !data.is_empty() && bus.subnet.replace(subnet).is_some_and(|old| old != subnet) {
+            if bus.subnet.replace(subnet).is_some_and(|old| old != subnet) {
                 if bus.job.active() {
                     bus.job.fail();
                 }
