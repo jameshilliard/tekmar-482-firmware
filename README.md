@@ -56,6 +56,8 @@ installation is part of this test.
 
 For the `board.py frames`, `probe`, and `send` commands,
 see the [interface map and capture procedure](docs/interfaces.md).
+For frame headers, checksum, payloads and the 483 message-ID catalog, see
+the [native tN4 wire reference](docs/tn4-frames.md).
 
 Use a **spare gateway disconnected from the tN4 buses**. Before the first
 write, retain a verified backup and the stock HEX for that unit's lot.

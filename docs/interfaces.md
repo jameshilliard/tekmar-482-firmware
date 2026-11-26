@@ -104,6 +104,9 @@ remained quiet; they have not been validated with an active source.
 
 ### Application payloads
 
+The [native tN4 frame reference](tn4-frames.md) gives byte and bit layouts,
+the snowmelt key table, a worked CRC example and the other known message IDs.
+
 The host decodes these native IDs without changing the firmware or sending bus
 traffic. Field layouts come from the 483 application (`message_types_in.rb`,
 `message_types.rb`, `subnet_in.rb` and `snow_pair_in.rb`), not from tRPC
