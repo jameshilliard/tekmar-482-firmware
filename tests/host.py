@@ -45,7 +45,7 @@ class HelperTest(unittest.TestCase):
         os.write(master, encode(6, bytes([3 if update else 4]) + mid + reply))
 
     def capabilities(self, master):
-        self.exchange(master, 1, bytes([1, 0, 5, 3]))
+        self.exchange(master, 1, bytes([2, 0, 5, 3]))
 
     def test_handoff(self):
         master, proc = self.start_helper("enter-isp")
@@ -80,13 +80,13 @@ class HelperTest(unittest.TestCase):
         master, proc = self.start_helper("panel", "--check-input", which, "--seconds", "5")
         self.capabilities(master)
         for state in states:
-            self.exchange(master, 7, struct.pack("<7I", *state))
+            self.exchange(master, 7, struct.pack("<2I2Q3I", *state))
         out, err = proc.communicate(timeout=2)
         return proc.returncode, out + err
 
     def test_observed_button_requires_press_release_and_indicator(self):
-        base = PanelState(1, 1, 4, 2, 7, 7, 0)
-        pressed = base._replace(inputs=3, presses=5, leds=39, pins=39)
+        base = PanelState(1, 1, (1 << 32) - 1, 2, 7, 7, 0)
+        pressed = base._replace(inputs=3, presses=1 << 32, leds=39, pins=39)
         end = pressed._replace(inputs=1)
         status, output = self.panel_check("test", [base, pressed, end])
         self.assertEqual(status, 0, output)
@@ -121,11 +121,11 @@ class HelperTest(unittest.TestCase):
     def test_probe(self):
         master, proc = self.start_helper("probe")
         self.capabilities(master)
-        self.exchange(master, 10, bytes(48))
-        self.exchange(master, 10, struct.pack("<12I", *range(12)))
+        self.exchange(master, 10, bytes(68))
+        self.exchange(master, 10, struct.pack("<2I5Q5I", *range(6), (1 << 32) + 6, *range(7, 12)))
         out, err = proc.communicate(timeout=3)
         self.assertEqual(proc.returncode, 0, err)
-        self.assertIn(b"Port 4: 6 edges; last tick 11", out)
+        self.assertIn(b"Port 4: 4294967302 edges; last tick 11", out)
 
     def raw(self, master, mask=0):
         self.capabilities(master)
@@ -146,7 +146,7 @@ class HelperTest(unittest.TestCase):
             os.write(master, packets)
             self.close_raw(master)
             for p in range(5):
-                self.exchange(master, 3, struct.pack("<BII", p, p, 0), bytes([p]))
+                self.exchange(master, 3, struct.pack("<BQQ", p, p, 0), bytes([p]))
             out, err = proc.communicate(timeout=3)
             self.assertEqual(proc.returncode, 0, err)
             self.assertEqual(target.read_bytes(), packets)

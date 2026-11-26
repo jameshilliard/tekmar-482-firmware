@@ -50,17 +50,24 @@ the request body is empty. All integers are little endian.
 | --- | --- | --- |
 | 00000187 FirmwareRevision | Request, zero or two placeholder bytes | u16 numeric revision, 0 for this unnumbered custom image |
 | 0000018F ProtocolVersion | Request, zero or two placeholder bytes | u16 tHA protocol version, currently 3 |
-| 544BF001 BridgeCapabilities | Request | Four u8 values: extension version (1), current mode (0 Normal, 1 Raw), port count (5), feature flags (bit 0 bidirectional Raw, bit 1 ROM update, bit 2 Normal trace) |
+| 544BF001 BridgeCapabilities | Request | Four u8 values: extension wire version (2), current mode (0 Normal, 1 Raw), port count (5), feature flags (bit 0 bidirectional Raw, bit 1 ROM update, bit 2 Normal trace) |
 | 544BF002 SetBridgeMode | Update, mode u8 | Echo mode: 0 Normal, 1 Raw. Busy during an inventory walk, a started transmission, an outstanding host send or a local ACK. Switching modes clears the Normal inventory; returning to Normal also clears the ACK mask. |
-| 544BF003 PortDrops | Request, port u8 | Port u8, valid records dropped u32, invalid records dropped u32. |
+| 544BF003 PortDrops | Request, port u8 | Port u8, valid records dropped u64, invalid records dropped u64. |
 | 544BF004 FirmwareBuild | Request | Build revision without a terminator: 40 lowercase hexadecimal digits or `unversioned` |
 | 544BF005 EnterFirmwareUpdate | Update | Empty positive reply. Finish transmitting it, drain the last UART stop bit, release peripherals and enter ROM ISP. No erase or application programming is performed by this call. |
 | 544BF006 BridgeError | Response only | Rejected method u32, reason u8: 1 busy, 2 invalid service/body, 3 unavailable in this mode |
-| 544BF007 Panel | Request | Seven u32: boot inputs, current inputs, Test press count, DIP transition count, LED mask, pin readback mask, lamp test active. |
+| 544BF007 Panel | Request | Boot and current inputs (two u32); Test presses and DIP transitions (two u64); LED mask, pin readback mask and lamp test active (three u32). |
 | 544BF008 LedTest | Update | Empty. Starts the panel lamp sweep. |
 | 544BF009 LinkAckMask | Update, mask u8 in Raw mode | Echo mask (bit N for port N). Zero disables local ACK. |
-| 544BF00A CaptureCounters | Request | Twelve u32: two timer readings in microseconds, five edge counters and five last capture ticks in port order. |
-| 544BF00B NormalTrace | Request, empty; Update, port mask u8 | Normal only. Request returns the mask and five little-endian u32 cumulative trace-drop counts in port order. Update replaces the mask and echoes it; zero stops tracing. |
+| 544BF00A CaptureCounters | Request | Two timer readings in microseconds (u32), five edge counts (u64), five last capture ticks (u32); both port arrays in physical port order. |
+| 544BF00B NormalTrace | Request, empty; Update, port mask u8 | Normal only. Request returns the mask and five cumulative u64 trace-drop counts in port order. Update replaces the mask and echoes it; zero stops tracing. |
+
+Version 2 event counts start at zero at boot, survive mode changes and
+saturate at 2^64-1 instead of wrapping. Subtract snapshots from the same
+boot. Hardware timer readings and per-frame timestamps are still u32 and
+wrap; their width does not limit lifetime counts. Older custom wire
+version 1 used u32 for all the above counts, with wrapping drop counters.
+Stock tRPC, Raw data records and Normal trace event layouts are unchanged.
 
 An ordinary capability probe must never change operating mode. Stock
 NullMethod means the extension isn't available; a timeout is not evidence
@@ -74,7 +81,7 @@ Byte-exact frames (spaces separate fields, not transmitted bytes):
 ProtocolVersion request:   CA 07 06 01 8F010000 0000 9E 35
 ProtocolVersion response:  CA 07 06 04 8F010000 0300 A4 35
 BridgeCapabilities:        CA 05 06 01 01F04B54 9C 35
-Normal, Raw/update/trace:  CA 09 06 04 01F04B54 01000507 B0 35
+Normal, Raw/update/trace:  CA 09 06 04 01F04B54 02000507 B1 35
 EnterFirmwareUpdate:       CA 05 06 00 05F04B54 9F 35
 Drained before handoff:    CA 05 06 03 05F04B54 A2 35
 ```
@@ -123,6 +130,6 @@ Host replies and reports may overtake unstarted trace records; use the
 gateway timestamps for native timing, not UART arrival time. Trace mask
 replies delimit the capture: queued older records precede the reply.
 Trace has three dedicated slots; a full queue drops new trace records,
-increments the affected port's counter modulo 2^32 and leaves Normal
+increments the affected port's lifetime drop counter and leaves Normal
 operations running. Counters do not include Raw-mode drops. Restrict the
 port mask or use a higher negotiated baud on busy installations.

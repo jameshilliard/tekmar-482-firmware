@@ -14,7 +14,6 @@ use tekmar_482_firmware::tn4::PORT_COUNT;
 
 const SCS: usize = 0xe01f_c1a0;
 const PINSEL2: usize = 0xe002_c014;
-pub(super) const REPORT_WORDS: usize = 7;
 pub const SAMPLE_MS: u64 = 20;
 const FAST_GPIO_BOTH_PORTS: u32 = 3;
 const DIP_BUTTON_MUX: u32 = (3 << 14) | (3 << 28);
@@ -63,8 +62,8 @@ pub struct Panel {
     last_sample: u8,
     stable: u8,
     boot: u8,
-    presses: u32,
-    dip_changes: u32,
+    presses: u64,
+    dip_changes: u64,
     test_start: Option<u32>,
     sequence: OnboardTest,
     notices: Vec<Notice, 3>,
@@ -189,7 +188,11 @@ impl Panel {
         self.show(mask);
     }
 
-    pub fn report(&self) -> [u32; REPORT_WORDS] {
+    pub fn reporting_at_boot(&self) -> bool {
+        self.boot & DIP_INPUT != 0
+    }
+
+    pub fn report(&self) -> [u8; tekmar_482_firmware::diagnostics::PANEL_BYTES] {
         let pin_state = !read(FIO1 + PIN);
         let mut actual = 0;
         for (i, pin) in PINS.iter().enumerate() {
@@ -197,15 +200,15 @@ impl Panel {
                 actual |= 1 << i;
             }
         }
-        [
-            u32::from(self.boot),
-            u32::from(self.stable),
-            self.presses,
-            self.dip_changes,
-            u32::from(self.lit),
-            actual,
-            u32::from(self.test_start.is_some()),
-        ]
+        tekmar_482_firmware::diagnostics::panel(
+            [u32::from(self.boot), u32::from(self.stable)],
+            [self.presses, self.dip_changes],
+            [
+                u32::from(self.lit),
+                actual,
+                u32::from(self.test_start.is_some()),
+            ],
+        )
     }
 
     pub fn stop(&mut self) {

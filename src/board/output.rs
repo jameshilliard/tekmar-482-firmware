@@ -35,8 +35,8 @@ pub(super) struct Output {
     len: usize,
     traces: usize,
     offset: usize,
-    pub(super) drops: [[u32; 2]; PORT_COUNT],
-    pub(super) trace_drops: [u32; PORT_COUNT],
+    pub(super) drops: [[u64; 2]; PORT_COUNT],
+    pub(super) trace_drops: [u64; PORT_COUNT],
 }
 
 impl Output {
@@ -68,7 +68,7 @@ impl Output {
     }
     pub(super) fn trace(&mut self, event: u8, p: usize, ms: u32, detail: &[u8], body: &[u8]) {
         if self.traces == TRACE_SLOTS {
-            self.trace_drops[p] = self.trace_drops[p].wrapping_add(1);
+            self.trace_drops[p] = self.trace_drops[p].saturating_add(1);
             return;
         }
         // Invalid frames include a reason, bit count and up to two CRC bytes.
@@ -91,7 +91,7 @@ impl Output {
             _ => unreachable!(),
         };
         let n = &mut self.drops[usize::from(p)][i];
-        *n = n.wrapping_add(1);
+        *n = n.saturating_add(1);
     }
     fn remove(&mut self, pos: usize) -> Kind {
         let slot = self.order[pos];

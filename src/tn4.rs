@@ -109,13 +109,13 @@ pub struct Receiver {
 
 #[derive(Default)]
 pub struct RxStats {
-    pub edges: u32,
-    pub starts: u32,
-    pub stuffing: u32,
-    pub crc_mismatch: u32,
-    pub ack: u32,
-    pub no_ack: u32,
-    pub bad_trailer: u32,
+    pub edges: u64,
+    pub starts: u64,
+    pub stuffing: u64,
+    pub crc_mismatch: u64,
+    pub ack: u64,
+    pub no_ack: u64,
+    pub bad_trailer: u64,
     pub last_received_crc: u16,
     pub last_expected_crc: u16,
 }
@@ -642,6 +642,18 @@ mod tests {
         }
         assert!(rx.partial());
         assert_eq!(rx.stats.starts, 3);
+    }
+
+    #[test]
+    fn diagnostic_counts_cross_32_bits_and_never_roll_over() {
+        let mut rx = Receiver::default();
+        rx.stats.starts = u64::from(u32::MAX);
+        rx.stats.stuffing = u64::MAX;
+        for &b in b"0000000111111" {
+            rx.bit(b == b'1');
+        }
+        assert_eq!(rx.stats.starts, 1 << 32);
+        assert_eq!(rx.stats.stuffing, u64::MAX);
     }
 
     #[test]

@@ -13,6 +13,7 @@ const RAW_MODE: u8 = 1;
 use embassy_futures::yield_now;
 use tekmar_482_firmware::uptime::Uptime;
 use tekmar_482_firmware::{
+    diagnostics,
     inventory::{AddressMove, Answer, BlockProbe, Broadcast, Inventory, LineProbe},
     tn4::{
         Frame, LinkResponse, Receiver, Trailer,
@@ -104,8 +105,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
     static MOVES: static_cell::ConstStaticCell<heapless::Deque<AddressMove, MOVE_QUEUE_CAPACITY>> =
         static_cell::ConstStaticCell::new(heapless::Deque::new());
     let moves = MOVES.take();
-    inventory
-        .set_reporting(panel.borrow().report()[0] & u32::from(super::super::panel::DIP_INPUT) != 0);
+    inventory.set_reporting(panel.borrow().reporting_at_boot());
     let mut bus = Receivers::start();
     let mut decoder = tpck::Decoder::default();
     let out = Output::take();
@@ -519,43 +519,13 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                                     call.ok(&[*mask])
                                 }
                                 (method::NORMAL_TRACE, service::REQUEST, []) => {
-                                    let mut state = [0; 1 + PORT_COUNT * size_of::<u32>()];
-                                    state[0] = trace_mask;
-                                    for (word, count) in state[1..]
-                                        .as_chunks_mut::<{ size_of::<u32>() }>()
-                                        .0
-                                        .iter_mut()
-                                        .zip(out.trace_drops)
-                                    {
-                                        word.copy_from_slice(&count.to_le_bytes());
-                                    }
-                                    call.ok(&state)
+                                    call.ok(&diagnostics::trace_drops(trace_mask, out.trace_drops))
                                 }
                                 (method::PORT_DROPS, service::REQUEST, [p @ 0..=LAST_PORT]) => {
-                                    let mut b = [0; 1 + 2 * size_of::<u32>()];
-                                    b[0] = *p;
-                                    for (chunk, n) in b[1..]
-                                        .as_chunks_mut::<{ size_of::<u32>() }>()
-                                        .0
-                                        .iter_mut()
-                                        .zip(out.drops[*p as usize])
-                                    {
-                                        chunk.copy_from_slice(&n.to_le_bytes());
-                                    }
-                                    call.ok(&b)
+                                    call.ok(&diagnostics::port_drops(*p, out.drops[*p as usize]))
                                 }
                                 (method::PANEL, service::REQUEST, []) => {
-                                    let mut b =
-                                        [0; super::super::panel::REPORT_WORDS * size_of::<u32>()];
-                                    for (chunk, v) in b
-                                        .as_chunks_mut::<{ size_of::<u32>() }>()
-                                        .0
-                                        .iter_mut()
-                                        .zip(panel.borrow().report())
-                                    {
-                                        chunk.copy_from_slice(&v.to_le_bytes());
-                                    }
-                                    call.ok(&b)
+                                    call.ok(&panel.borrow().report())
                                 }
                                 (method::LED_TEST, service::UPDATE, []) => {
                                     panel.borrow_mut().start_test();
@@ -578,19 +548,9 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                                     call.error(BridgeError::Busy)
                                 }
                                 (method::CAPTURE_COUNTERS, service::REQUEST, []) => {
-                                    let mut b =
-                                        [0; (TIMERS.len() + 2 * PORT_COUNT) * size_of::<u32>()];
                                     let counts = bus.rx.each_ref().map(|r| r.stats.edges);
                                     let stamps = INPUTS.map(CaptureInput::timestamp);
-                                    for (chunk, n) in b
-                                        .as_chunks_mut::<{ size_of::<u32>() }>()
-                                        .0
-                                        .iter_mut()
-                                        .zip(now.into_iter().chain(counts).chain(stamps))
-                                    {
-                                        chunk.copy_from_slice(&n.to_le_bytes());
-                                    }
-                                    call.ok(&b)
+                                    call.ok(&diagnostics::capture(now, counts, stamps))
                                 }
                                 (
                                     method::SET_BRIDGE_MODE

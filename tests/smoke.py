@@ -351,6 +351,7 @@ def run(path, ram, fast=False):
                     retry_isp_at = None
                     if phase == "isp-after-flag":
                         phase = "enter-update"
+                        extension(10)
                         for p in range(5):
                             extension(3, bytes([p]))
                     extension(5, update=True)
@@ -536,13 +537,13 @@ def run(path, ram, fast=False):
                 extension(11)
             elif method == 0x544bf00b:
                 if data[0] == 4 and phase == "trace-congested":
-                    assert data[5:] == b"\x01" + struct.pack("<5I", 2, 0, 0, 0, 0)
+                    assert data[5:] == b"\x01" + struct.pack("<5Q", 2, 0, 0, 0, 0)
                     assert (6, bytes.fromhex("0407010000 0500")) in actual
                     assert [r[-2] for k, r in traces if k == 0] == [1, 2, 3]
                     phase = "trace-reporting"
                     send(0)
                 elif data[0] == 4:
-                    assert data[5:] == bytes(21)
+                    assert data[5:] == bytes(41)
                     extension(11, b"\x01", True)
                 elif data[5:] == b"\x01":
                     phase = "trace-invalid"
@@ -777,7 +778,7 @@ def run(path, ram, fast=False):
                 raw_mode, raw_ack_mask = False, 0
                 extension(7)
             elif method == 0x544BF007:
-                _, inputs, presses, _, _, _, sweep = struct.unpack("<7I", data[5:])
+                _, inputs, presses, _, _, _, sweep = struct.unpack("<2I2Q3I", data[5:])
                 assert presses == 4 and inputs == 1 and not sweep
                 assert (6, bytes.fromhex("0406f04b54 87010000 03")) in actual
                 # Request ISP *during* the resulting flag at either UART rate.
@@ -926,7 +927,7 @@ def run(path, ram, fast=False):
                      line_sends, expected_rx_acks - received_rx_acks, list(wire_log))
     assert actual[:4] == [
         (6, bytes.fromhex(x))
-        for x in ("048f0100000300", "0400000000", "0401f04b5401000507")
+        for x in ("048f0100000300", "0400000000", "0401f04b5402000507")
     ] + [
         (
             6,
@@ -937,7 +938,9 @@ def run(path, ram, fast=False):
     assert (6, bytes.fromhex("0306f04b5402f04b5401")) in actual
     assert phase == "enter-update" and (6, bytes.fromhex("0306f04b5405f04b5401")) in actual
     for p in range(5):
-        assert (6, bytes.fromhex("0403f04b54") + bytes([p]) + bytes(8)) in actual
+        assert (6, bytes.fromhex("0403f04b54") + bytes([p]) + bytes(16)) in actual
+    capture, = (data[5:] for kind, data in actual if kind == 6 and data[:5] == bytes.fromhex("040af04b54"))
+    assert all(struct.unpack("<2I5Q5I", capture)[2:7])
     assert not reads and not read_events and actual[-1] == (6, bytes.fromhex("0305f04b54"))
     assert expected_flags == observed_flags, (clock, expected_flags - observed_flags, observed_flags - expected_flags)
     assert tuple(telemetry) == TELEMETRY

@@ -22,14 +22,14 @@ pub enum BridgeError {
 
 const THA_VERSION: u16 = 3;
 const UNNUMBERED_FIRMWARE: u16 = 0;
-const BRIDGE_VERSION: u8 = 1;
+const BRIDGE_VERSION: u8 = 2;
 const FEATURE_BIDIRECTIONAL_RAW: u8 = 1;
 const FEATURE_ROM_UPDATE: u8 = 1 << 1;
 const FEATURE_NORMAL_TRACE: u8 = 1 << 2;
 const HEADER_BYTES: usize = 1 + size_of::<u32>();
 const REVISION_MAGIC: &[u8; 8] = b"TK48REV\0";
 const REVISION_BYTES: usize = REVISION_MAGIC.len() + 40; // hexadecimal Git object name
-const MAX_REPLY_BYTES: usize = 64;
+const MAX_REPLY_BYTES: usize = HEADER_BYTES + crate::diagnostics::CAPTURE_BYTES;
 
 const BUILD_LEN: usize = env!("TEKMAR_BUILD_REVISION").len();
 
