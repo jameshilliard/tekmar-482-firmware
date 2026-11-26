@@ -39,6 +39,89 @@ fn address(reply: Reply) -> u16 {
 }
 
 #[test]
+fn outdoor_source_precedence_expiry_and_unsent_values() {
+    let mut inv = Inventory::new();
+    let host = |i: &mut Inventory, value: u16, now| {
+        address(call(i, 0x117, 0, &value.to_le_bytes(), now).unwrap())
+    };
+    assert_eq!(
+        address(call(&mut inv, 0x117, 1, &[0; 2], 0).unwrap()),
+        0xffff
+    );
+    assert!(call(&mut inv, 0x117, 0, &[3], 0).is_none());
+    assert_eq!(host(&mut inv, 0xbea, 0), 0xffff);
+    assert!(!inv.has_broadcast(0));
+    assert_eq!(host(&mut inv, 0xbe9, 0), 0xbe9);
+    assert!(!inv.has_reports());
+    let queued = inv.next_broadcast(0, 0).unwrap();
+    assert!(queued.outdoor_echo(&[0x72, 0xf0, 0, 4, 0xe9, 0xb, 0xe9, 0xb]));
+    observe(&mut inv, 4, 0, 0, 0x32f, &[0xe9, 0xb], 0);
+    assert!(inv.stale_broadcast(0, queued, 0)); // same word, actual sensor now owns it
+    inv.set_reporting(true);
+    observe(&mut inv, 4, 0, 0, 0x32f, &[0x48, 6, 0, 0], 1);
+    assert!(inv.stale_broadcast(0, queued, 1));
+    assert!(inv.next_broadcast(1, 1).is_none()); // don't displace the actual sensor
+    assert_eq!(
+        inv.next_report(1).unwrap().payload(),
+        &[2, 0x17, 1, 0, 0, 0x48, 6]
+    );
+    assert_eq!(host(&mut inv, 1200, 500), 0x648);
+    inv.tick(630); // only 629 seconds since the sensor
+    assert!(!inv.has_reports());
+    inv.tick(631);
+    assert_eq!(address(inv.next_report(631).unwrap()), 1200);
+    for p in 0..5 {
+        let tx = inv.next_broadcast(p, 631).unwrap();
+        assert!(tx.outdoor_echo(&[0x72, 0xf0, 0, 4, 0xb0, 4, 0xb0, 4]));
+    }
+    inv.tick(740);
+    assert_eq!(address(inv.next_report(740).unwrap()), 0xffff);
+    assert_eq!(address(call(&mut inv, 0x167, 1, &[0, 0], 740).unwrap()), 0);
+}
+
+#[test]
+fn outdoor_request_captures_one_response_per_line_without_extending_a_sample() {
+    let mut inv = Inventory::new();
+    inv.set_reporting(true);
+    observe(&mut inv, 4, 0, 0, 0x32f, &[0x23, 5], u32::MAX - 100);
+    inv.set_reporting(false);
+    assert!(!inv.has_reports());
+    observe(&mut inv, 2, 1, 0, 0x327, &[7], 550);
+    assert!(!inv.has_broadcast(0));
+    observe(&mut inv, 2, 1, 0, 0x327, &[], 553);
+    inv.tick(559); // external-only TTL: 660 s across wrap
+    assert_eq!(address(call(&mut inv, 0x117, 1, &[], 559).unwrap()), 0xffff);
+    for p in 0..5 {
+        let tx = inv.next_broadcast(p, 559).unwrap();
+        assert_eq!(
+            tx.frame(p as u8),
+            Request::new(p as u8, &[0x72, 0xf0, 0, 4, 0x23, 5, 0x23, 5])
+        );
+        assert!(!inv.has_broadcast(p));
+    }
+    assert!(!inv.has_reports());
+}
+
+#[test]
+fn sustained_host_source_renews_on_bus_but_invalid_update_does_not_renew_lease() {
+    let mut inv = Inventory::new();
+    for t in [0, 200, 400] {
+        inv.tick(t);
+        assert_eq!(address(call(&mut inv, 0x117, 0, &[0, 0], t).unwrap()), 0);
+        for p in 0..5 {
+            assert_eq!(inv.next_broadcast(p, t).is_some(), t == 0);
+        }
+    }
+    inv.tick(599);
+    assert!(!inv.has_broadcast(0));
+    inv.tick(600);
+    assert!(inv.has_broadcast(0));
+    call(&mut inv, 0x117, 0, &[255, 255], 639);
+    inv.tick(640);
+    assert_eq!(address(call(&mut inv, 0x117, 1, &[], 640).unwrap()), 0xffff);
+}
+
+#[test]
 fn taking_address_is_report_only_and_follows_the_known_device() {
     let mut inv = Inventory::new(); // Reporting disabled.
     let move_to = |inv: &mut Inventory, subnet: u8, old: [u8; 2], now| {
@@ -112,7 +195,7 @@ fn group_read_is_global_and_an_expired_enable_is_not_a_stop_report() {
         call(&mut inv, 0x13d, 0, &[12, 255], 100).unwrap().payload()[6],
         255
     );
-    assert!((0..5).all(|p| !inv.has_group_send(p)));
+    assert!((0..5).all(|p| !inv.has_broadcast(p)));
     observe(&mut inv, 0, 0, 0, 0x20f, &[12, 16], 100);
     inv.set_reporting(false);
     assert!(!inv.has_reports());
@@ -127,27 +210,27 @@ fn broadcasts_send_once_per_line_replace_unsent_group_and_expire() {
     for id in 1..=12 {
         assert!(call(&mut inv, 0x13d, 0, &[id, 1], 10).is_none());
     }
-    let first = inv.next_group_send(0, 11).unwrap();
+    let first = inv.next_broadcast(0, 11).unwrap();
     assert_eq!(first.frame(0), Request::new(0, &[0x61, 0xf0, 0, 2, 1, 1]));
-    assert!(!inv.stale_group_send(0, first, 11));
+    assert!(!inv.stale_broadcast(0, first, 11));
     call(&mut inv, 0x13d, 0, &[1, 0], 12);
-    assert!(inv.stale_group_send(0, first, 12));
+    assert!(inv.stale_broadcast(0, first, 12));
     for p in 0..5 {
         for id in (2..=12).chain([1]) {
-            let frame = inv.next_group_send(p, 13).unwrap().frame(p as u8);
+            let frame = inv.next_broadcast(p, 13).unwrap().frame(p as u8);
             assert_eq!(
                 frame,
                 Request::new(p as u8, &[0x61, 0xf0, 0, 2, id, u8::from(id != 1)])
             );
         }
-        assert!(!inv.has_group_send(p));
+        assert!(!inv.has_broadcast(p));
     }
     call(&mut inv, 0x13d, 0, &[1, 1], u32::MAX - 3);
-    let tx = inv.next_group_send(2, 1).unwrap();
-    assert!(!inv.stale_group_send(2, tx, 5));
-    assert!(inv.stale_group_send(2, tx, 6));
-    assert!(inv.next_group_send(0, 6).is_none());
-    assert!((0..5).all(|p| !inv.has_group_send(p)));
+    let tx = inv.next_broadcast(2, 1).unwrap();
+    assert!(!inv.stale_broadcast(2, tx, 5));
+    assert!(inv.stale_broadcast(2, tx, 6));
+    assert!(inv.next_broadcast(0, 6).is_none());
+    assert!((0..5).all(|p| !inv.has_broadcast(p)));
 }
 
 #[test]

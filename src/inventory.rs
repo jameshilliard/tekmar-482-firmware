@@ -1,7 +1,9 @@
 //! Normal-mode inventory. Bus addresses, not product numbers, identify entries.
 use crate::trpc::{Call, Reply};
+mod broadcast;
 mod groups;
-pub use groups::GroupSend;
+mod outdoor;
+pub use broadcast::Broadcast;
 mod settings;
 mod telemetry;
 use crate::tn4::tx::Request;
@@ -59,6 +61,8 @@ struct Port {
 
 pub struct Inventory {
     groups: groups::Groups,
+    broadcasts: broadcast::Broadcasts,
+    outdoor: outdoor::Outdoor,
     ports: [Port; PORTS],
     walk: [u16; SLOTS],
     cursor: usize,
@@ -80,6 +84,8 @@ impl Inventory {
     pub const fn new() -> Self {
         Self {
             groups: groups::Groups::EMPTY,
+            broadcasts: broadcast::Broadcasts::EMPTY,
+            outdoor: outdoor::Outdoor::EMPTY,
             ports: [const {
                 Port {
                     subnet: None,
@@ -163,6 +169,18 @@ impl Inventory {
         let message = (header >> 20) & 0x3ff;
         let subnet = (header >> 12) as u8;
         let bus = self.ports.get_mut(port)?;
+        if message == 0x32f {
+            self.outdoor
+                .observe(data, now, self.reporting, &mut self.broadcasts);
+            return None;
+        }
+        if message == 0x327 && data.is_empty() {
+            self.broadcasts.push(
+                broadcast::Value::RequestedOutdoor(self.outdoor.value()),
+                now,
+            );
+            return None;
+        }
         if message == 0x20f {
             self.groups.observe(data, now, self.reporting);
             return None;
@@ -351,6 +369,8 @@ impl Inventory {
 
     pub fn reset(&mut self) {
         self.groups = groups::Groups::EMPTY;
+        self.broadcasts = broadcast::Broadcasts::EMPTY;
+        self.outdoor = outdoor::Outdoor::EMPTY;
         for port in &mut self.ports {
             port.subnet = None;
             port.devices.fill(Device::default());
@@ -365,14 +385,22 @@ impl Inventory {
     pub fn has_command(&self, p: usize) -> bool {
         self.ports[p].job.active()
     }
-    pub fn has_group_send(&self, p: usize) -> bool {
-        self.groups.pending(p)
+    pub fn tick(&mut self, now: u32) {
+        self.outdoor.tick(now, self.reporting, &mut self.broadcasts);
     }
-    pub fn next_group_send(&mut self, p: usize, now: u32) -> Option<GroupSend> {
-        self.groups.take(p, now)
+    pub fn has_broadcast(&self, p: usize) -> bool {
+        self.broadcasts.pending(p)
     }
-    pub fn stale_group_send(&self, p: usize, tx: GroupSend, now: u32) -> bool {
-        self.groups.stale(p, tx, now)
+    pub fn next_broadcast(&mut self, p: usize, now: u32) -> Option<Broadcast> {
+        while let Some(tx) = self.broadcasts.take(p, now) {
+            if !broadcast::Broadcasts::stale_outdoor(tx, &self.outdoor) {
+                return Some(tx);
+            }
+        }
+        None
+    }
+    pub fn stale_broadcast(&self, p: usize, tx: Broadcast, now: u32) -> bool {
+        self.broadcasts.stale(p, tx, now) || broadcast::Broadcasts::stale_outdoor(tx, &self.outdoor)
     }
     pub fn command_finished(&self, p: usize) -> bool {
         self.ports[p].job.terminal()
@@ -397,6 +425,7 @@ impl Inventory {
         self.reporting = on;
         if !on {
             self.groups.clear_reports();
+            self.outdoor.dirty = false;
             self.error_pending = false;
             self.discard_fields(u16::MAX);
         }
@@ -416,11 +445,17 @@ impl Inventory {
         }
     }
     pub fn has_reports(&self) -> bool {
-        self.error_pending || self.groups.has_reports() || self.ports.iter().any(|p| p.pending != 0)
+        self.error_pending
+            || self.outdoor.dirty
+            || self.groups.has_reports()
+            || self.ports.iter().any(|p| p.pending != 0)
     }
     pub fn next_report(&mut self, now: u32) -> Option<Reply> {
         if core::mem::take(&mut self.error_pending) {
             return Some(Reply::report(0x107, &self.network_error.to_le_bytes()));
+        }
+        if let Some(report) = self.outdoor.report() {
+            return Some(report);
         }
         if let Some(report) = self.groups.next_report(now) {
             return Some(report);
@@ -478,7 +513,12 @@ impl Inventory {
 
     pub fn handle(&mut self, call: &Call<'_>, now: u32) -> Answer {
         if call.method == groups::METHOD {
-            return self.groups.handle(call, now);
+            return self.groups.handle(call, now, &mut self.broadcasts);
+        }
+        if call.method == outdoor::METHOD {
+            return self
+                .outdoor
+                .handle(call, now, self.reporting, &mut self.broadcasts);
         }
         if let Some(setting) = Setting::from_method(call.method) {
             let Some((&a, _)) = call.body.split_first_chunk::<2>() else {

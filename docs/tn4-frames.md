@@ -221,7 +221,7 @@ supports them. Fields are listed in transmitted order.
 | `0x317` | RealTimeClockRequest | No payload defined. |
 | `0x322` | RHQuery | Subnet and four-byte node selector. |
 | `0x323` | RHReport | Count N, flags, control value (J1196J caches byte 2 as relative humidity), dewpoint u16, internal sensor u8. Preserve the next N bytes as a group: the 483 indexed reader overlaps its final sensor and first target. Both 483 layouts place optional humidity/dehumidity targets at offsets 6+N and 7+N. An incomplete declared sensor region is truncated, not zero-filled. |
-| `0x327` | OutdoorTemperatureRequest | No payload defined. |
+| `0x327` | OutdoorTemperatureRequest | No payload defined. [Normal mode](normal-mode.md) answers with the selected outdoor word in a 32F broadcast on all five lines. |
 | `0x347` | MixingModulePresent | Actuator type [3:0], adjustable speed [6], controllable system pump [7]; motor speed byte. |
 | `0x34f` | MixingModuleReport | Mode/logic/demand/latch/limit/fault flags; pump output; actuator percentage and direction flags. Byte 3 packs the high two bits of target, supply and return in [1:0], [3:2], [5:4] plus return/supply sensor fault bits. Bytes 4..6 carry the respective low bytes. |
 | `0x357` | MixingModuleUpdate | Output-mode/control flags and target high bits; target low byte; target pump output. An optional motor speed is declared, but the reference does not resolve its latch predicate. |

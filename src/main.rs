@@ -9,25 +9,6 @@ use static_cell::StaticCell;
 global_asm!(include_str!("startup.S"), options(raw));
 mod runtime;
 
-#[used]
-#[unsafe(link_section = ".revision")]
-static REVISION: [u8; 48] = {
-    let mut field = [0; 48];
-    let magic = b"TK48REV\0";
-    let rev = env!("TEKMAR_BUILD_REVISION").as_bytes();
-    let mut i = 0;
-    while i < magic.len() {
-        field[i] = magic[i];
-        i += 1;
-    }
-    let mut j = 0;
-    while j < rev.len() {
-        field[i + j] = rev[j];
-        j += 1;
-    }
-    field
-};
-
 mod board {
     use super::ptr;
     pub(super) mod baud;

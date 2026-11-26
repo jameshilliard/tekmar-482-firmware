@@ -107,6 +107,13 @@ def run(path, ram, fast=False):
                         inject(device_reply)
                     if phase == "group" and not any(exchanges):
                         inject(bytes.fromhex("60f00002 0c01"), port=4)
+                    if phase == "outdoor-supply" and not any(exchanges):
+                        # Request a different value after the gateway heard its own TX.
+                        call(0x117, bytes.fromhex("6506"), True)
+                    if phase == "outdoor-refresh" and not any(exchanges):
+                        inject(bytes.fromhex("72f00604 4806 0000"), port=4)
+                    if phase == "outdoor-request" and not any(exchanges):
+                        inject(bytes.fromhex("6f700603 840100"))
             if off == 0:
                 gpio[0] = value
             elif off == 0x18:
@@ -281,7 +288,28 @@ def run(path, ram, fast=False):
                     call(0x13d,b"\x0c\0")
                 else:
                     assert data[0] == 4 and data[5:] == b"\x0c\x01"
-                    inject(bytes.fromhex("6f700603 840100"))
+                    phase = "outdoor"
+                    call(0x117, bytes(2))
+            elif method == 0x117:
+                if data[0] == 4:
+                    assert encode(kind, data) == bytes.fromhex("ca07060417010000ffff2735")
+                    phase = "outdoor-supply"
+                    for exchange in exchanges:
+                        exchange.append((bytes.fromhex("72f00004 7206 7206"), None))
+                    call(0x117, bytes.fromhex("7206"), True)
+                elif data[0] == 3 and data[5:] == bytes.fromhex("6506"):
+                    phase = "outdoor-refresh"
+                    for exchange in exchanges:
+                        exchange.append((bytes.fromhex("72f00004 6506 6506"), None))
+                elif data[0] == 2 and data[5:] == bytes.fromhex("4806"):
+                    call(0x117, bytes.fromhex("7206"), True)
+                elif data[0] == 3 and data[5:] == bytes.fromhex("4806"):
+                    phase = "outdoor-request"
+                    for exchange in exchanges:
+                        exchange.append((bytes.fromhex("72f00004 4806 4806"), None))
+                    inject(bytes.fromhex("72700000"), port=3)
+                else:
+                    assert data[5:] in (bytes.fromhex("7206"), bytes.fromhex("6506"))
             elif method == 0x17f and data[0] == 2:
                 assert data[5:] == bytes.fromhex("010002")
                 phase = "move"

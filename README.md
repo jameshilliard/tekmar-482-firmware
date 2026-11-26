@@ -21,6 +21,10 @@ on cross-build and cross-Clippy commands, not globally. The production
 runtime uses the Embassy revision pinned in Cargo.lock. The Rust application
 uses Thumb-1 to fit the same dispatcher in flash and in a RAM trial. Reset
 vectors, interrupt masking and the ROM handoff use ARM instructions.
+The release profile uses `opt-level = "s"`, full LTO, a single codegen
+unit and abort-on-panic. Compare **revision-stamped binaries** when tuning:
+`"s"` currently produces a smaller image than `"z"` on the pinned toolchain.
+Debug information stays in the ELF, not in the binary loaded on the device.
 `make image` alone builds the ELF, binary and Intel HEX under
 `target/thumbv4t-none-eabi/release/tekmar-482-firmware{,.bin,.hex}`. The linker
 limits flash to the first 64 KiB. The build checks the LPC vector checksum,
@@ -48,7 +52,8 @@ slots and transmit edges are driven from the capture timers, not from
 Embassy task delays.
 
 `make ram-trial` builds the same prototype linked to run at SRAM address
-`0x40001000`. Its binary is under `target/ram-trial/thumbv4t-none-eabi/release/`.
+`0x40001000`, with a 24 KiB image limit. Its binary is under
+`target/ram-trial/thumbv4t-none-eabi/release/`.
 This is **not a flash image**. On an unprotected part, after verifying a backup,
 ISP can write the binary to RAM, read it back for comparison, and use Go in ARM
 mode at `0x40001000`. This exercises the protocol on real hardware without any

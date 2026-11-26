@@ -12,6 +12,21 @@ pub const FIRMWARE_BUILD: u32 = 0x544b_f004;
 pub const ENTER_FIRMWARE_UPDATE: u32 = 0x544b_f005;
 const BRIDGE_ERROR: u32 = 0x544b_f006;
 
+const BUILD_LEN: usize = env!("TEKMAR_BUILD_REVISION").len();
+
+// FirmwareBuild serves the installer's fixed-offset image stamp itself.
+#[used]
+#[unsafe(link_section = ".revision")]
+static REVISION: [u8; 48] = {
+    let mut field = [0; 48];
+    let (header, text) = field.split_at_mut(8);
+    header.copy_from_slice(b"TK48REV\0");
+    text.split_at_mut(BUILD_LEN)
+        .0
+        .copy_from_slice(env!("TEKMAR_BUILD_REVISION").as_bytes());
+    field
+};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AfterDrain {
     Continue,
@@ -106,7 +121,7 @@ impl<'a> Call<'a> {
                 self.response(self.method, &[1, u8::from(raw), 5, 3])
             }
             (REQUEST, FIRMWARE_BUILD) if self.body.is_empty() => {
-                self.response(self.method, env!("TEKMAR_BUILD_REVISION").as_bytes())
+                self.response(self.method, &REVISION[8..8 + BUILD_LEN])
             }
             (UPDATE, ENTER_FIRMWARE_UPDATE) if self.body.is_empty() => {
                 if busy {

@@ -15,7 +15,7 @@ native message in Raw mode does not implement its tRPC services in Normal mode.
 | 15F TakingAddress | Report the old and new addresses even with reporting disabled. Request and Update are ignored. |
 | 107 NetworkError | Request and Update return the current network error word. Reports follow native 3D7, including clearance. |
 | 10F ReportingState | Request and Update. Power-on default comes from the Reporting DIP. Test-button reporting notifications are not yet implemented. |
-| 117 OutdoorTemp | Not implemented. |
+| 117 OutdoorTemp | Read the selected network temperature, supply a four-minute local sample, and report changes. Respond to native outdoor requests on all five ports. |
 | 11F DeviceAttributes | Read the observed u16 mask, echo it on Update, and report changes. See below for the evidence behind each bit. |
 | 127 ModeSetting | Addressed Request and Update use heating setup (block 3). Report on observed mode. This is not ActiveDemand. |
 | 12F ActiveDemand, 137 CurrentTemperature, 138 CurrentFloorTemperature | Request, read-only Update echo and Report. Source and availability rules below. |
@@ -112,6 +112,25 @@ attached equipment. Raw mode preserves the physical port and native source
 if attribution is needed.
 
 ## Live readings
+
+Outdoor temperature is global. Request 117 returns the first little-endian
+degH word from native 32F, or FFFF if neither the network nor the host has
+a reading. Zero in a bus report means no network source in J1196J; native
+temperature sentinels also do not override a valid host sample. A host
+Update accepts 0 through 3049 (J1196J at `0x2230`); an invalid value does
+not renew the previous lease. The response is the **selected** temperature,
+which can differ from the supplied one. Refresh a local sample before 240
+seconds have passed. Reporting enable gates serial push, not source selection.
+
+The custom firmware selects a fresh external sensor first. Its silence
+timeout is 660 seconds without a valid host sample, or 630 with one. With
+only a host source, it broadcasts on a value change, and every 600 seconds
+if the host continues renewing the same value. It does not count its own
+transmission as an external sensor. Native 327 requests a snapshot on all
+five lines, including FFFF when unavailable. The transmitted 32F contains
+the word twice, as in J1196J at `0x3dd8`. Each unstarted broadcast has the
+same ten-second queue lifetime as a demand-group send. No link ACK changes
+the selected temperature.
 
 Air-group member (36F), master (377), and setpoint control (22F, operating
 mode 1) use different offsets for measured temperature and demand. A device

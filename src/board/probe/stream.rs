@@ -5,9 +5,9 @@ use super::super::transmit::{Attempt, LineDriver};
 use super::{CCR, CR0, Capture, INPUTS, IR, TC, TIMERS, read, write};
 use core::cell::RefCell;
 use embassy_futures::yield_now;
-use embassy_time::Instant;
+use tekmar_482_firmware::uptime::Uptime;
 use tekmar_482_firmware::{
-    inventory::{AddressMove, Answer, GroupSend, Inventory, Observation},
+    inventory::{AddressMove, Answer, Broadcast, Inventory, Observation},
     tn4::{
         Frame, LinkAck, Receiver, Trailer,
         tx::{Outcome, Request},
@@ -54,15 +54,11 @@ impl Receivers {
         }
     }
 }
-fn stamp() -> u32 {
-    Instant::now().as_millis() as u32
-}
-
 #[derive(Clone, Copy)]
 enum NormalTx {
     Probe,
     Setting,
-    Group(GroupSend),
+    Broadcast(Broadcast),
 }
 
 pub async fn run(panel: &RefCell<Panel>) -> ! {
@@ -88,7 +84,15 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
     let mut ack: [LinkAck; 5] = core::array::from_fn(|_| LinkAck::default());
     let mut ack_pin: [Option<LineDriver>; 5] = core::array::from_fn(|_| None);
     let mut ack_mask = 0u8;
+    let mut uptime = Uptime::default();
     loop {
+        let us = crate::board::panel::now();
+        let before = uptime.seconds;
+        uptime.sample(us);
+        let seconds = uptime.seconds;
+        if !raw && seconds != before {
+            inventory.tick(seconds);
+        }
         let now = TIMERS.map(|t| read(t + TC));
         bus.poll(now, |p, frame| {
             panel.borrow_mut().observe(p);
@@ -98,17 +102,21 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
             if raw {
                 let mut data = [0; 73];
                 data[1] = p as u8;
-                data[2..6].copy_from_slice(&stamp().to_le_bytes());
+                data[2..6].copy_from_slice(&uptime.millis(us).to_le_bytes());
                 data[6..6 + frame.bytes.len()].copy_from_slice(frame.bytes);
                 out.enqueue(Kind::Rx(p as u8), tpck::TN4, &data[..6 + frame.bytes.len()]);
             } else if !reboot
+                // The receiver hears our own broadcast before the sender finishes.
+                // It is not an independent outdoor sensor renewing the network value.
+                && !(matches!(owner[p], NormalTx::Broadcast(tx) if tx.outdoor_echo(frame.bytes))
+                    && sending[p].as_ref().is_some_and(Attempt::started))
                 && let Some(observed) = inventory.observe(
                     p,
                     frame.bytes,
-                    Instant::now().as_secs() as u32,
+                    seconds,
                     sending[p].is_none()
                         && !inventory.has_command(p)
-                        && !inventory.has_group_send(p),
+                        && !inventory.has_broadcast(p),
                 )
             {
                 match observed {
@@ -133,7 +141,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                 let mut data = [0; 78];
                 data[0] = 4;
                 data[1] = p as u8;
-                data[2..6].copy_from_slice(&stamp().to_le_bytes());
+                data[2..6].copy_from_slice(&uptime.millis(us).to_le_bytes());
                 data[6] = why;
                 data[7..9].copy_from_slice(&bits.to_le_bytes());
                 data[9..9 + bytes.len()].copy_from_slice(bytes);
@@ -142,15 +150,14 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
             let t = read(TIMERS[INPUTS[p].1] + TC);
             if !raw
                 && (inventory.has_command(p)
-                    || inventory.has_group_send(p)
-                    || matches!(owner[p], NormalTx::Group(_)))
+                    || inventory.has_broadcast(p)
+                    || matches!(owner[p], NormalTx::Broadcast(_)))
             {
-                let seconds = Instant::now().as_secs() as u32;
                 inventory.command_expire(p, seconds);
                 let cancel = match owner[p] {
                     NormalTx::Probe => true,
                     NormalTx::Setting => inventory.command_finished(p),
-                    NormalTx::Group(tx) => inventory.stale_group_send(p, tx, seconds),
+                    NormalTx::Broadcast(tx) => inventory.stale_broadcast(p, tx, seconds),
                 };
                 if cancel && sending[p].as_ref().is_some_and(|a| !a.started()) {
                     sending[p] = None;
@@ -169,12 +176,12 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                     {
                         out.enqueue(Kind::Control, tpck::TRPC, reply.payload());
                     } else if !inventory.has_command(p)
-                        && let Some(tx) = inventory.next_group_send(p, seconds)
+                        && let Some(tx) = inventory.next_broadcast(p, seconds)
                         && let Some(req) = tx.frame(p as u8)
                     {
                         sending[p] = Attempt::new(&req, INPUTS[p].0, t);
                         if sending[p].is_some() {
-                            owner[p] = NormalTx::Group(tx);
+                            owner[p] = NormalTx::Broadcast(tx);
                         }
                     }
                 }
@@ -296,7 +303,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                             let busy = !moves.is_empty()
                                 || inventory.walking()
                                 || (0..5).any(|p| {
-                                    inventory.has_command(p) || inventory.has_group_send(p)
+                                    inventory.has_command(p) || inventory.has_broadcast(p)
                                 })
                                 || occupied.contains(&true)
                                 || sending.iter().any(Option::is_some)
@@ -377,9 +384,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                                     } else if raw {
                                         call.error(3)
                                     } else {
-                                        match inventory
-                                            .handle(&call, Instant::now().as_secs() as u32)
-                                        {
+                                        match inventory.handle(&call, seconds) {
                                             Answer::Reply(reply) => reply,
                                             Answer::Unhandled => call.unsupported(),
                                             Answer::Silent => {
@@ -405,7 +410,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
             && !reboot
             && out.can_report()
             && inventory.has_reports()
-            && let Some(report) = inventory.next_report(Instant::now().as_secs() as u32)
+            && let Some(report) = inventory.next_report(seconds)
         {
             out.enqueue(Kind::Control, tpck::TRPC, report.payload());
         }
