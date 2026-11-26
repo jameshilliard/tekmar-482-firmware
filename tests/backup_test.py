@@ -8,8 +8,9 @@ import binascii
 import sys
 import unittest
 from collections import deque
+from contextlib import asynccontextmanager
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 import backup
@@ -91,6 +92,27 @@ class BackupTest(unittest.IsolatedAsyncioTestCase):
                 else:
                     await ram_trial.start_image(port, ram)
                     self.assertEqual(port.sent[-2:], [b"U 23130\r\n", b"G 1073745920 A\r\n"])
+
+    async def test_failed_trial_verifies_restarted_dev_firmware(self):
+        first, second = Transcript([b"0"]), Transcript([])
+        ports = iter((first, second))
+        open_now = []
+        @asynccontextmanager
+        async def connect(_):
+            self.assertFalse(open_now)
+            open_now.append(next(ports))
+            try:
+                yield open_now[0]
+            finally:
+                open_now.pop()
+        with (patch.object(ram_trial, "connect", connect), patch.object(ram_trial, "check"),
+              patch.object(ram_trial, "start_image"), patch.object(ram_trial, "synchronize"),
+              patch.object(ram_trial.asyncio, "sleep"), patch.object(ram_trial, "request") as request):
+            with self.assertRaisesRegex(ValueError, "bench failed"):
+                async with ram_trial.trial("test-port", b"ram", True):
+                    raise ValueError("bench failed")
+        self.assertEqual(request.await_args_list, [call(first, True), call(first, True), call(second, False)])
+        self.assertEqual(first.sent, [b"U 23130\r\n", b"G 0 A\r\n"])
 
 
 if __name__ == "__main__":

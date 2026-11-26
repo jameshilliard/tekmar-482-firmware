@@ -7,6 +7,7 @@
 import argparse
 import asyncio
 import binascii
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from backup import check_part, expect, line, read_page, send, synchronize
@@ -46,6 +47,37 @@ async def start_image(port, image):
     await expect(port, b"0")
 
 
+@asynccontextmanager
+async def trial(path, image, from_app):
+    check(image, ram=True)
+    restarted = False
+    try:
+        async with connect(path) as port:
+            if from_app:
+                await request(port, True)
+                await asyncio.sleep(0.1)
+                await synchronize(port)
+            await start_image(port, image)
+            try:
+                await asyncio.sleep(0.1)
+                yield port
+            finally:
+                await request(port, True)
+                await asyncio.sleep(0.1)
+                await synchronize(port)
+                if from_app:
+                    await send(port, b"U 23130")
+                    await expect(port, b"0")
+                    await send(port, b"G 0 A")
+                    # The installed app may clear the UART before the ROM reply ends.
+                    restarted = True
+                    await asyncio.sleep(0.15)
+    finally:
+        if restarted:
+            async with connect(path) as port:
+                await request(port, False)
+
+
 async def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("port")
@@ -70,41 +102,20 @@ async def main():
     if (args.diagnostics or args.tx or args.save_capture) and not args.frames:
         parser.error("--diagnostics, --tx and --save-capture require --frames")
     image = args.ram_bin.read_bytes()
-    check(image, ram=True)
-    async with connect(args.port) as port:
-        if args.from_app:
-            await request(port, True)  # checks the dev identity before entering ROM
-            await asyncio.sleep(0.1)
-            await synchronize(port)
-        await start_image(port, image)
-        await asyncio.sleep(0.1)  # The application resets the UART FIFO during startup.
-        try:
-            if args.panel_after:
-                await asyncio.sleep(args.panel_after)
-                await panel(port)
-            if args.panel_test:
-                await panel(port, test=True)
-            if args.probe:
-                await probe(port)
-            if args.echo_test:
-                await echo_test(port, range(5))
-            if args.frames:
-                tx = (int(args.tx[0]), bytes.fromhex(args.tx[1])) if args.tx else None
-                await monitor(port, args.frames, diagnostics=args.diagnostics, tx=tx,
-                              save_capture=args.save_capture)
-        finally:
-            await request(port, True)
-            await asyncio.sleep(0.1)  # Let ROM enable autobaud before sending its sync byte.
-            await synchronize(port)
-            if args.from_app:
-                await send(port, b"U 23130")
-                await expect(port, b"0")
-                await send(port, b"G 0 A")
-                # The installed app can reset the UART before ROM finishes its reply.
-                await asyncio.sleep(0.15)
-    if args.from_app:
-        async with connect(args.port) as port:
-            await request(port, False)
+    async with trial(args.port, image, args.from_app) as port:
+        if args.panel_after:
+            await asyncio.sleep(args.panel_after)
+            await panel(port)
+        if args.panel_test:
+            await panel(port, test=True)
+        if args.probe:
+            await probe(port)
+        if args.echo_test:
+            await echo_test(port, range(5))
+        if args.frames:
+            tx = (int(args.tx[0]), bytes.fromhex(args.tx[1])) if args.tx else None
+            await monitor(port, args.frames, diagnostics=args.diagnostics, tx=tx,
+                          save_capture=args.save_capture)
     print("Trial complete. Flash was not written.")
 
 
