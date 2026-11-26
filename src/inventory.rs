@@ -1,5 +1,7 @@
 //! Normal-mode inventory. Bus addresses, not product numbers, identify entries.
 use crate::trpc::{Call, Reply};
+mod groups;
+pub use groups::GroupSend;
 mod settings;
 mod telemetry;
 use crate::tn4::tx::Request;
@@ -55,6 +57,7 @@ struct Port {
 }
 
 pub struct Inventory {
+    groups: groups::Groups,
     ports: [Port; PORTS],
     walk: [u16; SLOTS],
     cursor: usize,
@@ -75,6 +78,7 @@ impl Default for Inventory {
 impl Inventory {
     pub const fn new() -> Self {
         Self {
+            groups: groups::Groups::EMPTY,
             ports: [const {
                 Port {
                     subnet: None,
@@ -142,6 +146,10 @@ impl Inventory {
         let message = (header >> 20) & 0x3ff;
         let subnet = (header >> 12) as u8;
         let bus = self.ports.get_mut(port)?;
+        if message == 0x20f {
+            self.groups.observe(data, now, self.reporting);
+            return None;
+        }
         if message == 0x3d7 {
             let [lo, hi, ..] = data else { return None };
             self.network_error = u16::from_le_bytes([*lo, *hi]);
@@ -164,6 +172,7 @@ impl Inventory {
             0x25f => 5,
             0x26f => 4,
             0x2e7 => 3,
+            0x2f7 if bus.devices[node].present(now) => 3,
             0x323 => 6 + usize::from(*data.first()?),
             0x36f => 8,
             0x377 => 13,
@@ -301,6 +310,7 @@ impl Inventory {
     }
 
     pub fn reset(&mut self) {
+        self.groups = groups::Groups::EMPTY;
         for port in &mut self.ports {
             port.subnet = None;
             port.devices.fill(Device::default());
@@ -314,6 +324,15 @@ impl Inventory {
 
     pub fn has_command(&self, p: usize) -> bool {
         self.ports[p].job.active()
+    }
+    pub fn has_group_send(&self, p: usize) -> bool {
+        self.groups.pending(p)
+    }
+    pub fn next_group_send(&mut self, p: usize, now: u32) -> Option<GroupSend> {
+        self.groups.take(p, now)
+    }
+    pub fn stale_group_send(&self, p: usize, tx: GroupSend, now: u32) -> bool {
+        self.groups.stale(p, tx, now)
     }
     pub fn command_finished(&self, p: usize) -> bool {
         self.ports[p].job.terminal()
@@ -337,6 +356,7 @@ impl Inventory {
     pub fn set_reporting(&mut self, on: bool) {
         self.reporting = on;
         if !on {
+            self.groups.clear_reports();
             self.error_pending = false;
             self.discard_fields(u16::MAX);
         }
@@ -356,11 +376,14 @@ impl Inventory {
         }
     }
     pub fn has_reports(&self) -> bool {
-        self.error_pending || self.ports.iter().any(|p| p.pending != 0)
+        self.error_pending || self.groups.has_reports() || self.ports.iter().any(|p| p.pending != 0)
     }
     pub fn next_report(&mut self, now: u32) -> Option<Reply> {
         if core::mem::take(&mut self.error_pending) {
             return Some(Reply::report(0x107, &self.network_error.to_le_bytes()));
+        }
+        if let Some(report) = self.groups.next_report(now) {
+            return Some(report);
         }
         for _ in 0..SLOTS {
             let i = self.next_slot;
@@ -414,6 +437,9 @@ impl Inventory {
     }
 
     pub fn handle(&mut self, call: &Call<'_>, now: u32) -> Answer {
+        if call.method == groups::METHOD {
+            return self.groups.handle(call, now);
+        }
         if let Some(setting) = Setting::from_method(call.method) {
             let Some((&a, _)) = call.body.split_first_chunk::<2>() else {
                 return Answer::Silent;

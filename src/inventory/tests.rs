@@ -35,6 +35,97 @@ fn address(reply: Reply) -> u16 {
     u16::from_le_bytes(reply.payload()[5..].try_into().unwrap())
 }
 
+#[test]
+fn group_read_is_global_and_an_expired_enable_is_not_a_stop_report() {
+    let mut inv = Inventory::new();
+    let initial = u32::MAX - 20;
+    let read =
+        |inv: &mut Inventory, id, now| call(inv, 0x13d, 1, &[id, 0], now).unwrap().payload()[6];
+    assert_eq!(read(&mut inv, 1, initial), 0);
+    assert_eq!(read(&mut inv, 13, initial), 255);
+    observe(&mut inv, 4, 79, 0, 0x20f, &[1, 16], initial);
+    assert!(!inv.has_reports());
+    assert_eq!(read(&mut inv, 1, 38), 1); // 59 seconds across wrap.
+    inv.set_reporting(true);
+    observe(&mut inv, 2, 14, 0, 0x20f, &[1, 1], 38);
+    assert_eq!(
+        inv.next_report(38).unwrap().payload(),
+        &[2, 0x3d, 1, 0, 0, 1, 0]
+    );
+    observe(&mut inv, 2, 14, 0, 0x20f, &[1, 16], 40);
+    assert!(inv.next_report(100).is_none());
+    assert_eq!(read(&mut inv, 1, 100), 0);
+    assert_eq!(
+        address(call(&mut inv, INVENTORY, 1, &[0, 0], 100).unwrap()),
+        0
+    );
+    assert_eq!(
+        call(&mut inv, 0x13d, 0, &[0, 1], 100).unwrap().payload()[6],
+        255
+    );
+    assert_eq!(
+        call(&mut inv, 0x13d, 0, &[12, 255], 100).unwrap().payload()[6],
+        255
+    );
+    assert!((0..5).all(|p| !inv.has_group_send(p)));
+    observe(&mut inv, 0, 0, 0, 0x20f, &[12, 16], 100);
+    inv.set_reporting(false);
+    assert!(!inv.has_reports());
+    assert_eq!(read(&mut inv, 12, 100), 1);
+    inv.reset();
+    assert_eq!(read(&mut inv, 12, 100), 0);
+}
+
+#[test]
+fn broadcasts_send_once_per_line_replace_unsent_group_and_expire() {
+    let mut inv = Inventory::new();
+    for id in 1..=12 {
+        assert!(call(&mut inv, 0x13d, 0, &[id, 1], 10).is_none());
+    }
+    let first = inv.next_group_send(0, 11).unwrap();
+    assert_eq!(first.frame(0), Request::new(0, &[0x61, 0xf0, 0, 2, 1, 1]));
+    assert!(!inv.stale_group_send(0, first, 11));
+    call(&mut inv, 0x13d, 0, &[1, 0], 12);
+    assert!(inv.stale_group_send(0, first, 12));
+    for p in 0..5 {
+        for id in (2..=12).chain([1]) {
+            let frame = inv.next_group_send(p, 13).unwrap().frame(p as u8);
+            assert_eq!(
+                frame,
+                Request::new(p as u8, &[0x61, 0xf0, 0, 2, id, u8::from(id != 1)])
+            );
+        }
+        assert!(!inv.has_group_send(p));
+    }
+    call(&mut inv, 0x13d, 0, &[1, 1], u32::MAX - 3);
+    let tx = inv.next_group_send(2, 1).unwrap();
+    assert!(!inv.stale_group_send(2, tx, 5));
+    assert!(inv.stale_group_send(2, tx, 6));
+    assert!(inv.next_group_send(0, 6).is_none());
+    assert!((0..5).all(|p| !inv.has_group_send(p)));
+}
+
+#[test]
+fn schedule_events_only_describe_an_observed_schedule_master() {
+    let mut inv = Inventory::new();
+    observe(&mut inv, 0, 0, 24, 0x2f7, &[0x84, 1, 60], 0);
+    assert!(call(&mut inv, 0x17f, 1, &[1, 0, 0], 0).is_none());
+    observe(&mut inv, 0, 0, 24, 0x36f, &[0; 8], 0);
+    inv.set_reporting(true);
+    for (flags, code) in [(4, 0), (0x44, 1), (0x84, 2), (0xc4, 255), (0x80, 255)] {
+        observe(&mut inv, 0, 0, 24, 0x2f7, &[flags, 1, 60], 1);
+        assert_eq!(
+            inv.next_report(1).unwrap().payload(),
+            &[2, 0x7f, 1, 0, 0, 1, 0, code]
+        );
+        assert_eq!(
+            call(&mut inv, 0x17f, 0, &[1, 0, 77], 1).unwrap().payload(),
+            &[3, 0x7f, 1, 0, 0, 1, 0, code]
+        );
+        assert!(!inv.has_command(0));
+    }
+}
+
 fn expect_block_read(inv: &mut Inventory, block: u8) {
     assert_eq!(
         inv.command_frame(0),

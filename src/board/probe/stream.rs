@@ -7,7 +7,7 @@ use core::cell::RefCell;
 use embassy_futures::yield_now;
 use embassy_time::Instant;
 use tekmar_482_firmware::{
-    inventory::{Answer, Inventory},
+    inventory::{Answer, GroupSend, Inventory},
     tn4::{
         Frame, LinkAck, Receiver, Trailer,
         tx::{Outcome, Request},
@@ -58,6 +58,13 @@ fn stamp() -> u32 {
     Instant::now().as_millis() as u32
 }
 
+#[derive(Clone, Copy)]
+enum NormalTx {
+    Probe,
+    Setting,
+    Group(GroupSend),
+}
+
 pub async fn run(panel: &RefCell<Panel>) -> ! {
     static INVENTORY: static_cell::ConstStaticCell<Inventory> =
         static_cell::ConstStaticCell::new(Inventory::new());
@@ -70,7 +77,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
     let mut raw = false;
     let mut reboot = false;
     let mut occupied = [false; 5];
-    let mut command_tx = [false; 5];
+    let mut owner = [NormalTx::Probe; 5];
     #[unsafe(link_section = ".low_bss")]
     static SENDERS: static_cell::StaticCell<[Option<Attempt>; 5]> = static_cell::StaticCell::new();
     let sending = SENDERS.init_with(|| core::array::from_fn(|_| None));
@@ -95,7 +102,9 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                     p,
                     frame.bytes,
                     Instant::now().as_secs() as u32,
-                    sending[p].is_none() && !inventory.has_command(p),
+                    sending[p].is_none()
+                        && !inventory.has_command(p)
+                        && !inventory.has_group_send(p),
                 )
                 && let Some(req) = Request::new(p as u8, &body)
             {
@@ -116,25 +125,42 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                 out.enqueue(Kind::Invalid(p as u8), tpck::TN4, &data[..9 + bytes.len()]);
             }
             let t = read(TIMERS[INPUTS[p].1] + TC);
-            if !raw && inventory.has_command(p) {
-                inventory.command_expire(p, Instant::now().as_secs() as u32);
-                if (!command_tx[p] || inventory.command_finished(p))
-                    && sending[p].as_ref().is_some_and(|a| !a.started())
-                {
+            if !raw
+                && (inventory.has_command(p)
+                    || inventory.has_group_send(p)
+                    || matches!(owner[p], NormalTx::Group(_)))
+            {
+                let seconds = Instant::now().as_secs() as u32;
+                inventory.command_expire(p, seconds);
+                let cancel = match owner[p] {
+                    NormalTx::Probe => true,
+                    NormalTx::Setting => inventory.command_finished(p),
+                    NormalTx::Group(tx) => inventory.stale_group_send(p, tx, seconds),
+                };
+                if cancel && sending[p].as_ref().is_some_and(|a| !a.started()) {
                     sending[p] = None;
-                    command_tx[p] = false;
+                    owner[p] = NormalTx::Probe;
                 }
                 if sending[p].is_none() {
                     if let Some(req) = inventory.command_frame(p) {
                         sending[p] = Attempt::new(&req, INPUTS[p].0, t);
-                        command_tx[p] = sending[p].is_some();
-                        if !command_tx[p] {
+                        if sending[p].is_some() {
+                            owner[p] = NormalTx::Setting;
+                        } else {
                             inventory.command_sent(p, false);
                         }
                     } else if out.can_receive()
                         && let Some(reply) = inventory.command_reply(p)
                     {
                         out.enqueue(Kind::Control, tpck::TRPC, reply.payload());
+                    } else if !inventory.has_command(p)
+                        && let Some(tx) = inventory.next_group_send(p, seconds)
+                        && let Some(req) = tx.frame(p as u8)
+                    {
+                        sending[p] = Attempt::new(&req, INPUTS[p].0, t);
+                        if sending[p].is_some() {
+                            owner[p] = NormalTx::Group(tx);
+                        }
                     }
                 }
             }
@@ -142,7 +168,10 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                 if let Some(result) = attempt.poll(t) {
                     sending[p] = None;
                     if !raw {
-                        if core::mem::take(&mut command_tx[p]) {
+                        if matches!(
+                            core::mem::replace(&mut owner[p], NormalTx::Probe),
+                            NormalTx::Setting
+                        ) {
                             inventory
                                 .command_sent(p, matches!(result, Outcome::Ack | Outcome::NoAck));
                         }
@@ -237,7 +266,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                                 && call.service == 0
                             {
                                 for (p, attempt) in sending.iter_mut().enumerate() {
-                                    if !command_tx[p]
+                                    if matches!(owner[p], NormalTx::Probe)
                                         && attempt.as_ref().is_some_and(|a| !a.started())
                                     {
                                         *attempt = None;
@@ -245,7 +274,9 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                                 }
                             }
                             let busy = inventory.walking()
-                                || (0..5).any(|p| inventory.has_command(p))
+                                || (0..5).any(|p| {
+                                    inventory.has_command(p) || inventory.has_group_send(p)
+                                })
                                 || occupied.contains(&true)
                                 || sending.iter().any(Option::is_some)
                                 || ack.iter().any(LinkAck::driving);

@@ -70,8 +70,9 @@ def run(path, ram, fast=False):
     clock = 0
     edges = deque()
     inventory_at = None
-    setting_exchange = deque()
-    drive_bits = []
+    exchanges = [deque() for _ in PORTS]
+    setting_exchange = exchanges[0]
+    driven = [[] for _ in PORTS]
 
     def level(p, high, at):
         pin, t, ch, _ = PORTS[p]
@@ -87,19 +88,24 @@ def run(path, ram, fast=False):
     def gpio_write(uc, off, size, value, data):
         nonlocal pins
         if off in (0x18, 0x1C, 0):
-            tx = 1 << PORTS[0][3]
-            if setting_exchange:
+            for p, exchange in enumerate(exchanges):
+                if not exchange:
+                    continue
+                tx = 1 << PORTS[p][3]
+                drive_bits = driven[p]
                 if off == 0 and value & tx and not gpio[0] & tx:
                     drive_bits.append("1" if pins & tx else "0")
                 elif off in (0x18, 0x1C) and gpio[0] & tx and value & tx:
                     drive_bits.append("1" if off == 0x18 else "0")
                 elif off == 0 and not value & tx and gpio[0] & tx:
-                    expected, device_reply = setting_exchange.popleft()
+                    expected, device_reply = exchange.popleft()
                     # Ten delimiter/ACK/EOF bits, then the driver's final release.
                     assert "".join(drive_bits) == protected_bits(expected) + "0" * 11
                     drive_bits.clear()
                     if device_reply:
                         inject(device_reply)
+                    if phase == "group" and not any(exchanges):
+                        inject(bytes.fromhex("60f00002 0c01"), port=4)
             if off == 0:
                 gpio[0] = value
             elif off == 0x18:
@@ -180,12 +186,12 @@ def run(path, ram, fast=False):
     overlap = False
     phase = "capture"
 
-    def inject(body):
+    def inject(body, port=0):
         wire = protected_bits(body) + "0" * 18
         start = clock + 30_000
         for i, bit in enumerate(wire):
             if i == 0 or bit != wire[i - 1]:
-                edges.append((start + i * 2500, 0, bit == "1"))
+                edges.append((start + i * 2500, port, bit == "1"))
         return start + len(wire) * 2500
 
     def reply(kind, data):
@@ -205,7 +211,13 @@ def run(path, ram, fast=False):
                 assert data[5:] == struct.pack("<HI", 1, 29104)
                 call(0x10f, b"\x01", True)
             elif method == 0x10f and data[5:] == b"\x01":
-                inject(bytes.fromhex("76f00608 2003000a06000000"))
+                if phase == "group":
+                    for exchange in exchanges:
+                        exchange.append((bytes.fromhex("61f00002 0c01"), None))
+                    call(0x13d,b"\x0c\x01",True)
+                    call(0x13d,b"\x0c\0")
+                else:
+                    inject(bytes.fromhex("76f00608 2003000a06000000"))
             elif method == 0x12f and data[0] == 2:
                 assert data[5:] == bytes.fromhex("010003")
                 assert (6,bytes.fromhex("023701000001000a06")) in actual
@@ -235,6 +247,25 @@ def run(path, ram, fast=False):
                 call(0x14f, bytes.fromhex("01000745"), True)
             elif method == 0x14f and data[0] == 3:
                 assert not setting_exchange and data[5:] == bytes.fromhex("01000044")
+                phase = "group"
+                call(0x10f,b"\x01",True)
+            elif method == 0x13d:
+                assert data[0] != 3  # Not acknowledged by the gateway.
+                if data[0] == 4 and phase == "group":
+                    assert data[5:] == b"\x0c\0" and any(exchanges)
+                elif data[0] == 2 and phase == "group":
+                    assert not any(exchanges) and data[5:] == b"\x0c\0"
+                    phase = "group-active"
+                    inject(bytes.fromhex("60f00002 0c10"), port=4)
+                elif data[0] == 2 and phase == "group-active":
+                    assert data[5:] == b"\x0c\x01"
+                    call(0x13d,b"\x0c\0")
+                else:
+                    assert data[0] == 4 and data[5:] == b"\x0c\x01"
+                    inject(bytes.fromhex("6f700603 840100"))
+            elif method == 0x17f and data[0] == 2:
+                assert data[5:] == bytes.fromhex("010002")
+                phase = "capture"
                 extension(2, b"\x01", True)
             elif method == 0x544BF002 and data[5:] == bytes([1]):
                 plant_inputs()
@@ -339,8 +370,8 @@ def run(path, ram, fast=False):
 
     cpu.mmio_map(0xE000C000, 0x1000, read, None, write, None)
     cpu.hook_add(UC_HOOK_CODE, rom, begin=0x7FFFFFF0, end=0x7FFFFFF0)
-    cpu.emu_start(base, 0xFFFFFFFF, count=65_000_000)
-    assert entered, (clock, phase, results, actual[-10:])
+    cpu.emu_start(base, 0xFFFFFFFF, count=100_000_000)
+    assert entered, (clock, phase, [len(x) for x in exchanges], results, actual[-10:])
     assert actual[:4] == [
         (6, bytes.fromhex(x))
         for x in ("048f0100000300", "0400000000", "0401f04b5401000503")

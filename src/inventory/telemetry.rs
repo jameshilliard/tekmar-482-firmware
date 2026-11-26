@@ -16,9 +16,10 @@ pub(super) enum Field {
     Fan,
     HumidityMin,
     HumidityMax,
+    Events,
 }
 impl Field {
-    const ALL: [Self; 12] = [
+    const ALL: [Self; 13] = [
         Self::Temperature,
         Self::Floor,
         Self::Demand,
@@ -31,6 +32,7 @@ impl Field {
         Self::Fan,
         Self::HumidityMin,
         Self::HumidityMax,
+        Self::Events,
     ];
     pub(super) fn from_method(method: u32) -> Option<Self> {
         Self::ALL.into_iter().find(|f| f.method() == method)
@@ -49,6 +51,7 @@ impl Field {
             Self::Fan => 0x157,
             Self::HumidityMin => 0x152,
             Self::HumidityMax => 0x151,
+            Self::Events => 0x17f,
         }
     }
     pub(super) fn mask(self) -> u16 {
@@ -77,6 +80,7 @@ pub(super) struct Telemetry {
     slab: u16,
     demand: u8,
     humidity: u8,
+    events: u8,
     setback: u8,
     mode: u8,
     targets: [[u8; 2]; 4],
@@ -112,6 +116,7 @@ impl Telemetry {
         slab: 0,
         demand: 0,
         humidity: 0,
+        events: 0,
         setback: 0,
         mode: 0,
         targets: [[0; 2]; 4],
@@ -126,6 +131,7 @@ impl Telemetry {
         slab: u16::MAX,
         demand: 255,
         humidity: 255,
+        events: 255,
         setback: 255,
         mode: 255,
         targets: [[255; 2]; 4],
@@ -288,6 +294,15 @@ impl Telemetry {
                 self.humidity = data[2];
                 return Humidity.mask();
             }
+            0x2f7 => {
+                let code = data[0] >> 6;
+                self.events = if data[0] & 4 != 0 && code < 3 {
+                    code
+                } else {
+                    255
+                };
+                return Field::Events.mask() | if self.setback < 7 { Setback.mask() } else { 0 };
+            }
             0x26f => {
                 self.slab = temperature(data, 2);
                 let target =
@@ -320,6 +335,7 @@ impl Telemetry {
             Field::Floor => u16::MAX,
             Field::Demand => self.demand.into(),
             Field::Humidity => self.humidity.into(),
+            Field::Events => self.events.into(),
             Field::Setback => self.setback.into(),
             Field::Mode => self.mode.into(),
             Field::Heat => u16::from_le_bytes(self.targets[0]),

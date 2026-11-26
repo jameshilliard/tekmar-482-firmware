@@ -18,12 +18,13 @@ native message in Raw mode does not implement its tRPC services in Normal mode.
 | 117 OutdoorTemp, 11F DeviceAttributes | Not implemented. |
 | 127 ModeSetting | Addressed Request and Update use heating setup (block 3). Report on observed mode. This is not ActiveDemand. |
 | 12F ActiveDemand, 137 CurrentTemperature, 138 CurrentFloorTemperature | Request, read-only Update echo and Report. Source and availability rules below. |
-| 13D SetpointGroupEnable, 13E SetpointDevice | Not implemented. The documented melt/storm controls are group operations, not discovered device addresses. |
+| 13D SetpointGroupEnable | Request cached state for group 1..12; Update broadcasts on all five lines. Report from observed group status. |
+| 13E SetpointDevice | Not implemented. This addressed target is distinct from group enable. |
 | 13F HeatSetpoint, 147 CoolSetpoint | Addressed Request and Update by setback, using native blocks 5 and 6. Report the active slot when a block is observed and the active setback is known. |
 | 14F SlabSetpoint, 157 FanPercent | Addressed Request, Update and active-slot Report. Blocks 7 and 9; see sensor requirements and fan units below. |
 | 150 RelativeHumidity | Request and Report from RHReport. Update is ignored. |
 | 151 HumidityMax, 152 HumidityMin | Addressed Request, Update and Report. Require an RH source and the corresponding block A3 enable flag. Not setback-indexed in tHA. |
-| 17F SetbackEvents | Not implemented. |
+| 17F SetbackEvents | Request, read-only Update echo and Report. Returns the schedule master's configuration code (0/1/2 for zero/two/four events); FF if unknown, reserved or not a master. |
 | 16F SetbackEnable, 177 SetbackState | Read or set the gateway enable flag; read the active setback and receive setback reports when enabled. The flag also determines which heat, cool, floor and fan slots an Update changes. |
 | 187 FirmwareRevision, 1A7 DateTime | Not implemented. FirmwareBuild is a separate custom extension, not a vendor revision. |
 
@@ -54,6 +55,29 @@ Repeated observations of the same device are rate-limited to one probe per
 minute. Raw mode does not issue these requests, cache identities or expose
 internal probes as host transmit results.
 
+## Setpoint groups
+
+SetpointGroupEnable is global, with a two-byte body: group ID and enable.
+It does not take a thermostat address. The 654 defaults to group 1 for
+melt and group 12 for storm; those are configurable, not model identifiers.
+An Update with value 0 or 1 queues native 21F on each of the five lines.
+Newer updates to the same group replace a copy that has not started on
+that line. An already-started copy finishes before the next. Unstarted
+copies expire after ten seconds; there is no automatic retransmission.
+Invalid group IDs or enable bytes never cause a bus write.
+
+As in J1196J, the gateway does not echo success for a valid Update.
+Reporting must be enabled to receive a group Report. Only native 20F
+updates the cache: byte 0 selects the group; bit 4 of byte 1 is the
+**actual** enable, not bit 0 (requested enable). Link ACKs, outgoing
+commands and cache expiry never generate a success report.
+
+A Request reads the cache without transmitting. An active value expires
+60 seconds after the last active status. An idle or never-seen valid group
+reads 0; an invalid group reads FF. Neither zero nor expiry identifies
+attached equipment. Raw mode preserves the physical port and native source
+if attribution is needed.
+
 ## Live readings
 
 Air-group member (36F), master (377), and setpoint control (22F, operating
@@ -76,6 +100,12 @@ If the UART is busy, pending samples of the same device and field collapse
 to the latest value. Disabling reporting clears pending samples; explicit
 reads still work. SetbackEnable gates setback reports, not temperature or
 demand. No telemetry Update writes a thermostat setting.
+
+ScheduleStatus (2F7) describes a schedule, not necessarily the thermostat's
+effective setback. A known device with the schedule-master flag (byte 0,
+bit 2) advertises its event configuration in bits 7:6. Both the serial
+packet and Raw mode preserve the code rather than a literal event count.
+Do not interpret the two-bit native current-state field as a tHA setback.
 
 ## Thermostat settings
 
