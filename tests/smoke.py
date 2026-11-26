@@ -124,9 +124,11 @@ def run(path, ram, fast=False):
     drive_start = [0] * len(PORTS)
     expected_rx_acks = set()
     received_rx_acks = set()
+    expected_flags, observed_flags = set(), set()
+    ack_seen = [False] * len(PORTS)
     raw_mode, raw_ack_mask = False, 0
     master, init = bytes.fromhex("7f700000"), bytes.fromhex("7df00000")
-    line_wires = {protected_bits(body) + "0" * 11: body for body in (master, init)}
+    line_wires = {protected_bits(body) + "0" * tail: body for body in (master, init) for tail in (3, 11)}
     probe_slots = {protected_bits(body) + "00" for body in (master, init)}
     line_sends = [[] for _ in PORTS]
     wire_log = deque(maxlen=12)
@@ -163,7 +165,7 @@ def run(path, ram, fast=False):
 
     def line_progress():
         nonlocal phase, jump_at, discovery_end, inventory_at
-        if phase == "line-cold" and len(actual) >= 4 and all(line_sends):
+        if phase == "line-cold" and len(actual) >= 4 and all(line_sends) and len(observed_flags) == 5:
             assert all([b for b, _ in tx] == [init] for tx in line_sends)
             phase = "line-up"
             contend(1, master, bytes.fromhex("7ff05001 00"), "master")
@@ -205,7 +207,13 @@ def run(path, ram, fast=False):
                 drive_bits = driven[p]
                 if off == 0 and value & tx and not gpio[0] & tx:
                     drive_start[p] = clock
+                    ack_seen[p] = False
                     drive_bits.append("1" if pins & tx else "0")
+                    if phase == "await-isp-flag" and p == 2:
+                        assert pins & tx and any(port == p and abs(at - clock) < 625 for port, at in expected_flags)
+                        phase = "isp-during-flag"
+                        extension(5, update=True)
+                        at_line_rate()
                     ack_prefixes[p].clear()
                     if not raw_mode and p in peers:
                         ack_prefixes[p].update(probe_slots)
@@ -214,6 +222,7 @@ def run(path, ram, fast=False):
                 elif off in (0x18, 0x1C) and gpio[0] & tx and value & tx:
                     drive_bits.append("1" if off == 0x18 else "0")
                     peer_ack[p] = bool(ack_prefixes[p]) and "".join(drive_bits) in ack_prefixes[p]
+                    ack_seen[p] |= peer_ack[p]
                     compete(p, drive_bits)
                 elif off == 0 and not value & tx and gpio[0] & tx:
                     if p in interrupted:
@@ -225,16 +234,30 @@ def run(path, ram, fast=False):
                             exchange.popleft()  # Raw ends here; the setting write is rebuilt.
                         continue
                     if drive_bits == ["1", "0"]:
-                        # Receiver drives only the link ACK slot, never its own frame.
+                        if clock - drive_start[p] > 5000:
+                            assert not raw_mode, "Raw mode drove a recovery flag"
+                            flags = [f for f in expected_flags if f[0] == p and abs(f[1] - drive_start[p]) < 625]
+                            assert len(flags) == 1, (phase, p, drive_start[p], expected_flags - observed_flags, list(wire_log))
+                            flag, = flags
+                            assert flag not in observed_flags and abs(clock - flag[1] - 15000) < 625
+                            observed_flags.add(flag)
+                            drive_bits.clear()
+                            line_progress()
+                            continue
                         slot, = (s for s in expected_rx_acks if s[0] == p and abs(s[1] - drive_start[p]) < 625)
                         assert slot not in received_rx_acks and abs(clock - slot[1] - 2500) < 625
                         received_rx_acks.add(slot)
                         drive_bits.clear()
                         continue
                     wire = "".join(drive_bits)
+                    # A Normal sender without a peer ends at the ACK sample.
+                    tail = 3 if not raw_mode and not ack_seen[p] else 11
+                    if tail == 3:
+                        expected_flags.add((p, drive_start[p] + (len(wire) - 1) * 2500))
                     wire_log.append((drive_start[p], "tx", p, wire[:48], len(wire)))
                     if wire in line_wires:
                         assert not raw_mode, "autonomous discovery in Raw mode"
+                        assert wire == protected_bits(line_wires[wire]) + "0" * tail
                         line_sends[p].append((line_wires[wire], drive_start[p] + uptime_offset))
                         drive_bits.clear()
                         line_progress()
@@ -245,7 +268,7 @@ def run(path, ram, fast=False):
                         continue
                     expected, device_reply = exchange.popleft()
                     # Ten delimiter/ACK/EOF bits, then the driver's final release.
-                    assert wire == protected_bits(expected) + "0" * 11, (p, phase, expected.hex(), wire)
+                    assert wire == protected_bits(expected) + "0" * tail, (p, phase, expected.hex(), wire)
                     drive_bits.clear()
                     if device_reply:
                         end = inject(device_reply)
@@ -298,6 +321,10 @@ def run(path, ram, fast=False):
                 clock += 40
                 if retry_isp_at is not None and clock >= retry_isp_at:
                     retry_isp_at = None
+                    if phase == "isp-after-flag":
+                        phase = "enter-update"
+                        for p in range(5):
+                            extension(3, bytes([p]))
                     extension(5, update=True)
                     at_line_rate()
                 if jump_at is not None and clock >= jump_at:
@@ -410,6 +437,8 @@ def run(path, ram, fast=False):
         wire_log.append((start, "rx", port, body.hex()))
         if not bad_crc and (not raw_mode or raw_ack_mask & (1 << port)):
             expected_rx_acks.add((port, start + (len(protected) + 1) * 2500))
+        if bad_crc and not raw_mode:
+            expected_flags.add((port, start + len(protected) * 2500))
         for i, bit in enumerate(wire):
             if i == 0 or bit != wire[i - 1]:
                 edges.append((start + i * 2500, port, bit == "1"))
@@ -657,24 +686,20 @@ def run(path, ram, fast=False):
                 plant_inputs()
             elif method == 0x544BF002 and data[5:] == bytes([0]):
                 raw_mode, raw_ack_mask = False, 0
-                # A discovery attempt waiting for idle must not block an ISP handoff.
-                external[2] = True
-                level(2, True, clock)
                 extension(7)
             elif method == 0x544BF007:
                 _, inputs, presses, _, _, _, sweep = struct.unpack("<7I", data[5:])
                 assert presses == 4 and inputs == 1 and not sweep
                 assert (6, bytes.fromhex("0406f04b54 87010000 03")) in actual
-                phase = "enter-update"
-                for p in range(5):
-                    extension(3, bytes([p]))
-                extension(5, update=True)
-                # Deliver these contiguous commands at line rate into a
-                # finite hardware FIFO, not the harness's unlimited backlog.
-                at_line_rate()
+                # Request ISP *during* the resulting flag at either UART rate.
+                phase = "await-isp-flag"
+                external[2] = True
+                level(2, True, clock)
+                expected_flags.add((2, clock + 6 * 2500))
             elif method == 0x544BF006 and data[5:] == bytes.fromhex("05f04b54 01"):
-                # A Normal frame already on the wire must finish before entering ISP.
-                assert phase == "enter-update" and retry_isp_at is None
+                assert phase in ("isp-during-flag", "enter-update") and retry_isp_at is None
+                if phase == "isp-during-flag":
+                    phase = "isp-after-flag"
                 retry_isp_at = clock + 25_000
             return
         service, p = data[:2]
@@ -817,9 +842,11 @@ def run(path, ram, fast=False):
         )
     ]
     assert (6, bytes.fromhex("0306f04b5402f04b5401")) in actual
+    assert phase == "enter-update" and (6, bytes.fromhex("0306f04b5405f04b5401")) in actual
     for p in range(5):
         assert (6, bytes.fromhex("0403f04b54") + bytes([p]) + bytes(8)) in actual
     assert not reads and not read_events and actual[-1] == (6, bytes.fromhex("0305f04b54"))
+    assert expected_flags == observed_flags, (clock, expected_flags - observed_flags, observed_flags - expected_flags)
     assert tuple(telemetry) == TELEMETRY
     assert [b for b, _ in line_sends[2]] == [init, master]
     assert not conflicts and not interrupted and lost == {"master", "write", "raw"}

@@ -48,6 +48,11 @@ neither is in the header. A destination, when defined, is in the payload.
 The same source and body may appear on two ports; retain both observations.
 A link ACK means a receiver asserted the ACK slot, not that a thermostat
 applied a setting. CRC success and trailer success are separate results.
+Six consecutive dominant bits can also be an **error flag**, not a new
+frame. A Normal-mode receiver or transmitter can signal a fault this way;
+the delimiter ends after eight consecutive recessive bits. Raw mode does
+not add error flags to the bus. See [link recovery](normal-mode.md#bus-compatibility)
+for the fault and arbitration rules.
 
 **Worked example.** A synthetic Rx record has type 01 and payload
 `00 03 19 00 00 00 7d 71 23 42 05 82`: valid frame, port 3, timestamp 25 ms.

@@ -9,8 +9,8 @@ use tekmar_482_firmware::uptime::Uptime;
 use tekmar_482_firmware::{
     inventory::{AddressMove, Answer, Broadcast, Inventory, LineProbe, Observation},
     tn4::{
-        Frame, LinkAck, Receiver, Trailer,
-        tx::{Outcome, Request},
+        Frame, LinkResponse, Receiver, Trailer,
+        tx::{Mode, Outcome, Request},
     },
     tpck,
     trpc::{AfterDrain, Call},
@@ -83,8 +83,8 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
     #[unsafe(link_section = ".low_bss")]
     static SENDERS: static_cell::StaticCell<[Option<Attempt>; 5]> = static_cell::StaticCell::new();
     let sending = SENDERS.init_with(|| core::array::from_fn(|_| None));
-    let mut ack: [LinkAck; 5] = core::array::from_fn(|_| LinkAck::default());
-    let mut ack_pin: [Option<LineDriver>; 5] = core::array::from_fn(|_| None);
+    let mut response: [LinkResponse; 5] = core::array::from_fn(|_| LinkResponse::default());
+    let mut response_pin: [Option<LineDriver>; 5] = core::array::from_fn(|_| None);
     let mut ack_mask = 0u8;
     let mut uptime = Uptime::default();
     let mut last_service = None;
@@ -117,7 +117,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                     p,
                     frame.bytes,
                     seconds,
-                    sending[p].is_none() && !ack[p].driving()
+                    sending[p].is_none() && !response[p].busy()
                         && !inventory.has_command(p)
                         && !inventory.has_broadcast(p),
                 )
@@ -125,7 +125,8 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                 match observed {
                     Observation::Probe(body) => {
                         if let Some(req) = Request::new(p as u8, &body) {
-                            sending[p] = Attempt::new(&req, INPUTS[p].0, now[INPUTS[p].1]);
+                            sending[p] =
+                                Attempt::new(&req, INPUTS[p].0, now[INPUTS[p].1], Mode::Normal);
                         }
                     }
                     Observation::Moved(moved) => {
@@ -138,30 +139,46 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
             }
         });
         for p in 0..5 {
-            if bus.rx[p].take_gap_fault() && !raw {
-                inventory.line(p).start_backoff();
+            let listening = !reboot && !sending[p].as_ref().is_some_and(Attempt::started);
+            let mut fault_at = bus.rx[p].take_drive_fault();
+            if fault_at.is_some() {
+                inventory.line(p).sent(Outcome::EchoMismatch);
             }
-            if let Some((why, bits, bytes)) = bus.rx[p].take_failure() {
+            if let Some(at) = bus.rx[p].take_gap_fault()
+                && !raw
+                && listening
+            {
+                inventory.line(p).start_backoff();
+                fault_at = Some(at);
+            }
+            if let Some(fault) = bus.rx[p].take_failure() {
                 if raw {
                     let mut data = [0; 78];
                     data[0] = 4;
                     data[1] = p as u8;
                     data[2..6].copy_from_slice(&uptime.millis(us).to_le_bytes());
-                    data[6] = why;
-                    data[7..9].copy_from_slice(&bits.to_le_bytes());
-                    data[9..9 + bytes.len()].copy_from_slice(bytes);
-                    out.enqueue(Kind::Invalid(p as u8), tpck::TN4, &data[..9 + bytes.len()]);
-                } else if !bus.rx[p].early_start()
-                    && !sending[p].as_ref().is_some_and(Attempt::started)
-                {
+                    data[6] = fault.reason;
+                    data[7..9].copy_from_slice(&fault.bits.to_le_bytes());
+                    data[9..9 + fault.bytes.len()].copy_from_slice(fault.bytes);
+                    out.enqueue(
+                        Kind::Invalid(p as u8),
+                        tpck::TN4,
+                        &data[..9 + fault.bytes.len()],
+                    );
+                } else if listening && fault_at.is_none() {
                     inventory.line(p).frame_error();
+                    fault_at = Some(fault.next_bit);
                 }
+            }
+            if let Some(at) = fault_at {
+                response[p].recover(&mut bus.rx[p], at);
             }
             if !raw && bus.rx[p].stuck_dominant() {
                 inventory.line(p).down();
             }
             let t = read(TIMERS[INPUTS[p].1] + TC);
-            let may_start = raw || inventory.line(p).may_start(t, bus.rx[p].idle());
+            let may_start =
+                raw || inventory.line(p).may_start(t, bus.rx[p].idle()) && !bus.rx[p].recovering();
             if !raw && !reboot {
                 let foreground = inventory.has_command(p) || inventory.has_broadcast(p);
                 let discovery = inventory.line(p).pending();
@@ -172,15 +189,19 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                     NormalTx::Setting => inventory.command_finished(p),
                     NormalTx::Broadcast(tx) => inventory.stale_broadcast(p, tx, seconds),
                 };
-                if cancel && !ack[p].driving() && sending[p].as_ref().is_some_and(|a| !a.started())
+                if cancel
+                    && !response[p].busy()
+                    && sending[p].as_ref().is_some_and(|a| !a.started())
                 {
                     sending[p] = None;
                     owner[p] = NormalTx::Probe;
                 }
-                if (foreground || discovery.is_some()) && sending[p].is_none() && !ack[p].driving()
+                if (foreground || discovery.is_some())
+                    && sending[p].is_none()
+                    && !response[p].busy()
                 {
                     if let Some(req) = inventory.command_frame(p) {
-                        sending[p] = Attempt::new(&req, INPUTS[p].0, t);
+                        sending[p] = Attempt::new(&req, INPUTS[p].0, t, Mode::Normal);
                         if sending[p].is_some() {
                             owner[p] = NormalTx::Setting;
                         } else {
@@ -193,7 +214,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                     } else if let Some(tx) = inventory.next_broadcast(p, seconds)
                         && let Some(req) = tx.frame(p as u8)
                     {
-                        sending[p] = Attempt::new(&req, INPUTS[p].0, t);
+                        sending[p] = Attempt::new(&req, INPUTS[p].0, t, Mode::Normal);
                         if sending[p].is_some() {
                             owner[p] = NormalTx::Broadcast(tx);
                         }
@@ -201,7 +222,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                         && let Some(probe) = discovery
                         && let Some(req) = probe.frame(p as u8)
                     {
-                        sending[p] = Attempt::new(&req, INPUTS[p].0, t);
+                        sending[p] = Attempt::new(&req, INPUTS[p].0, t, Mode::Normal);
                         if sending[p].is_some() {
                             owner[p] = NormalTx::Discovery(probe);
                         }
@@ -210,31 +231,38 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
             }
             // A queued send is still a receiver until it actually drives SOF.
             // Never acknowledge our own transmission. Raw RX ACK is opt-in.
-            if !reboot
+            let ack_slot = if listening
                 && (if raw {
                     ack_mask & (1 << p) != 0
                 } else {
                     !bus.rx[p].early_start()
-                })
-                && !sending[p].as_ref().is_some_and(Attempt::started)
-                && let Some(high) = ack[p].poll(t, bus.rx[p].ack_slot())
-            {
+                }) {
+                bus.rx[p].ack_slot()
+            } else {
+                None
+            };
+            if let Some(high) = response[p].poll(t, ack_slot) {
                 if let Some(waiting) = sending[p].as_mut() {
-                    waiting.receive_ack(high);
+                    waiting.respond(high);
                 } else if high {
-                    ack_pin[p] = LineDriver::claim(p as u8, INPUTS[p].0);
-                    if let Some(pin) = ack_pin[p].as_mut() {
+                    response_pin[p] = LineDriver::claim(p as u8, INPUTS[p].0);
+                    if let Some(pin) = response_pin[p].as_mut() {
                         pin.drive(true);
                     }
                 } else {
-                    ack_pin[p] = None;
+                    response_pin[p] = None;
+                }
+                if high && !raw && (sending[p].is_some() || response_pin[p].is_some()) {
+                    bus.rx[p].verify_response_drive();
                 }
             }
-            if !ack[p].driving()
+            if !response[p].busy()
                 && let Some(attempt) = sending[p].as_mut()
             {
                 let result = attempt.poll(t, may_start);
-                let Some(result) = result else { continue };
+                let Some((result, fault_at)) = result else {
+                    continue;
+                };
                 if !raw
                     && result == Outcome::ArbitrationLost
                     && !matches!(owner[p], NormalTx::Setting)
@@ -244,6 +272,9 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                 }
                 sending[p] = None;
                 if !raw {
+                    if let Some(at) = fault_at {
+                        response[p].recover(&mut bus.rx[p], at);
+                    }
                     inventory.line(p).sent(result);
                     match core::mem::replace(&mut owner[p], NormalTx::Probe) {
                         NormalTx::Setting => inventory.command_sent(p, result),
@@ -308,14 +339,15 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                                     if !raw {
                                         reason = 3;
                                     } else if let Some(req) = Request::new(*port, body) {
-                                        if ack[p].driving() {
+                                        if response[p].busy() {
                                             reason = 4;
                                         } else {
-                                            ack_pin[p] = None;
+                                            response_pin[p] = None;
                                             sending[p] = Attempt::new(
                                                 &req,
                                                 INPUTS[p].0,
                                                 read(TIMERS[INPUTS[p].1] + TC),
+                                                Mode::Raw,
                                             );
                                             if sending[p].is_none() {
                                                 reason = 2;
@@ -339,7 +371,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                                 && call.service == 0
                             {
                                 for (p, attempt) in sending.iter_mut().enumerate() {
-                                    if !ack[p].driving()
+                                    if !response[p].busy()
                                         && matches!(
                                             owner[p],
                                             NormalTx::Probe | NormalTx::Discovery(_)
@@ -358,7 +390,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                                 })
                                 || occupied.contains(&true)
                                 || sending.iter().any(Option::is_some)
-                                || ack.iter().any(LinkAck::driving);
+                                || response.iter().any(LinkResponse::busy);
                             let reply = match (call.method, call.service, call.body) {
                                 (0x544bf002, 0, [m @ 0..=1]) if !busy => {
                                     if raw != (*m == 1) {
@@ -369,7 +401,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                                     raw = *m == 1;
                                     if !raw {
                                         ack_mask = 0;
-                                        ack_pin = core::array::from_fn(|_| None);
+                                        response_pin = core::array::from_fn(|_| None);
                                     }
                                     call.ok(&[*m])
                                 }
@@ -404,7 +436,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                                     call.ok(&[])
                                 }
                                 (0x544bf009, 0, [mask @ 0..=31]) if raw && !busy => {
-                                    for (p, pin) in ack_pin.iter_mut().enumerate() {
+                                    for (p, pin) in response_pin.iter_mut().enumerate() {
                                         if mask & (1 << p) == 0 {
                                             *pin = None;
                                         }
@@ -478,7 +510,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
         match out.pump() {
             Some(Kind::Result(p)) => occupied[p as usize] = false,
             Some(Kind::Reboot) => {
-                drop(ack_pin);
+                drop(response_pin);
                 drop(bus);
                 panel.borrow_mut().stop();
                 super::super::enter_isp();

@@ -1,4 +1,4 @@
-//! One bus attempt. No automatic retransmission or active error flags.
+//! One bus attempt. Only Normal mode schedules a link error response.
 use super::BIT_US;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -85,6 +85,13 @@ pub enum Action {
     None,
     Drive(bool),
     Finish(Outcome),
+    Fault { outcome: Outcome, next_bit: u32 },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    Normal,
+    Raw,
 }
 
 enum Phase {
@@ -102,6 +109,7 @@ enum Symbol {
 }
 
 pub struct Sender {
+    mode: Mode,
     bits: Protected,
     phase: Phase,
     quiet_since: u32,
@@ -111,8 +119,9 @@ pub struct Sender {
 }
 
 impl Sender {
-    pub fn new(request: &Request, now: u32) -> Self {
+    pub fn new(request: &Request, now: u32, mode: Mode) -> Self {
         Self {
+            mode,
             bits: Protected::new(request),
             phase: Phase::Idle,
             quiet_since: now,
@@ -131,6 +140,17 @@ impl Sender {
         Action::Finish(outcome)
     }
 
+    fn wire_fault(&mut self, outcome: Outcome) -> Action {
+        if self.mode == Mode::Raw {
+            return self.finish(outcome);
+        }
+        self.phase = Phase::Done;
+        Action::Fault {
+            outcome,
+            next_bit: self.due,
+        }
+    }
+
     pub fn started(&self) -> bool {
         !matches!(self.phase, Phase::Idle)
     }
@@ -140,7 +160,7 @@ impl Sender {
         if !matches!(self.phase, Phase::Lost) {
             return false;
         }
-        *self = Self::new(&self.bits.request, now);
+        *self = Self::new(&self.bits.request, now, self.mode);
         true
     }
 
@@ -179,14 +199,17 @@ impl Sender {
         self.due = self.due.wrapping_add(BIT_US / 2);
         if matches!(self.phase, Phase::Sample) {
             match self.symbol {
+                Symbol::Trailer(1) if !high && self.mode == Mode::Normal => {
+                    return self.wire_fault(Outcome::NoAck);
+                }
                 Symbol::Trailer(1) => self.ack = high,
-                Symbol::Trailer(_) if high => return self.finish(Outcome::BadEnd),
+                Symbol::Trailer(_) if high => return self.wire_fault(Outcome::BadEnd),
                 Symbol::Protected(level) if level != high => {
-                    return self.finish(if high {
-                        Outcome::ArbitrationLost
+                    return if high {
+                        self.finish(Outcome::ArbitrationLost)
                     } else {
-                        Outcome::EchoMismatch
-                    });
+                        self.wire_fault(Outcome::EchoMismatch)
+                    };
                 }
                 _ => {}
             }
@@ -270,7 +293,7 @@ mod tests {
     #[test]
     fn one_shot_with_and_without_peer_ack() {
         for ack in [true, false] {
-            let mut s = Sender::new(&request(), u32::MAX - 800);
+            let mut s = Sender::new(&request(), u32::MAX - 800, Mode::Raw);
             assert_eq!(s.poll(20_000, false), Action::None);
             let mut now = 60_000;
             for (i, b) in GOLDEN.iter().copied().chain(*b"0000000000").enumerate() {
@@ -292,16 +315,64 @@ mod tests {
     }
 
     #[test]
+    fn only_normal_wire_faults_schedule_the_following_slot() {
+        for (index, level, outcome) in [
+            (0, false, Outcome::EchoMismatch),
+            (1, true, Outcome::ArbitrationLost),
+            (GOLDEN.len(), true, Outcome::BadEnd),
+            (GOLDEN.len() + 1, false, Outcome::NoAck),
+            (GOLDEN.len() + 2, true, Outcome::BadEnd),
+            (GOLDEN.len() + 9, true, Outcome::BadEnd),
+        ] {
+            for mode in [Mode::Raw, Mode::Normal] {
+                let start = u32::MAX - 100_000;
+                let mut sender = Sender::new(&request(), start - 40_000, mode);
+                let mut at = start;
+                for (i, b) in GOLDEN.iter().copied().chain(*b"0100000000").enumerate() {
+                    assert!(matches!(sender.poll(at, false), Action::Drive(_)));
+                    let action = sender.poll(
+                        at.wrapping_add(BIT_US / 2 + 100),
+                        if i == index { level } else { b == b'1' },
+                    );
+                    at = at.wrapping_add(BIT_US);
+                    if i == index && (mode == Mode::Normal || outcome != Outcome::NoAck) {
+                        if mode == Mode::Normal && outcome != Outcome::ArbitrationLost {
+                            assert_eq!(
+                                action,
+                                Action::Fault {
+                                    outcome,
+                                    next_bit: at
+                                }
+                            );
+                        } else {
+                            assert_eq!(action, Action::Finish(outcome));
+                        }
+                        assert_eq!(sender.poll(at, false), Action::None);
+                        break;
+                    }
+                    assert_eq!(action, Action::None);
+                    if i == GOLDEN.len() + 9 {
+                        assert_eq!(sender.poll(at, false), Action::Finish(Outcome::NoAck));
+                    }
+                }
+            }
+        }
+        let mut late = Sender::new(&request(), 0, Mode::Normal);
+        late.poll(40_000, false);
+        assert_eq!(late.poll(42_000, false), Action::Finish(Outcome::Late));
+    }
+
+    #[test]
     fn stops_on_late_edges_or_bus_disagreement() {
         for (time, level, out) in [
             (41_250, false, Outcome::EchoMismatch),
             (42_000, true, Outcome::Late),
         ] {
-            let mut s = Sender::new(&request(), 0);
+            let mut s = Sender::new(&request(), 0, Mode::Raw);
             assert_eq!(s.poll(40_000, false), Action::Drive(true));
             assert_eq!(s.poll(time, level), Action::Finish(out));
         }
-        let mut s = Sender::new(&request(), 0);
+        let mut s = Sender::new(&request(), 0, Mode::Normal);
         for (t, level) in [(40_000, false), (41_250, true), (42_500, true)] {
             s.poll(t, level);
         }
@@ -321,7 +392,7 @@ mod tests {
             assert!(!s.hold_if_waiting(at));
             assert_eq!(s.poll(at + BIT_US / 2, b == b'1'), Action::None);
         }
-        let mut s = Sender::new(&request(), 0);
+        let mut s = Sender::new(&request(), 0, Mode::Raw);
         assert_eq!(s.poll(5_000_000, true), Action::None);
     }
 }

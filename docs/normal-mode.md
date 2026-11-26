@@ -83,16 +83,26 @@ A dominant first interframe bit also starts this backoff. Valid traffic
 can still be received and ACKed; it does not pay down or cancel the wait.
 Other lines continue to operate.
 
-There are still differences from J1196J:
+**Active error recovery is per port.** In Normal mode a stuffing or CRC
+error, a dominant delimiter, a dominant bit in EOF or the first interframe
+bit, or failure to see a locally driven dominant bit triggers an error flag.
+Only the *sender* flags a missing ACK; hearing another sender go
+unacknowledged is not itself a receive fault. As in J1196J
+(`0x42b8`, `0x4354`, `0x4838`), start at the next bit boundary,
+drive six dominant bits, release, and wait for eight **consecutive**
+recessive bits followed by the three-bit interframe gap. Overlapping
+flags restart the quiet count. The gateway does not transmit a late
+flag if it misses the drive window. Raw never generates an error flag,
+including when receive ACKs are enabled; it reports malformed input
+and send outcomes to the host instead.
 
-- Stock actively drives six dominant recovery bits after certain link
-  faults. The custom gateway releases its transmitter and resynchronizes
-  on idle; it does not generate those active error flags.
-- Stock settings often reply from cache. This implementation reads the
-  device for supported setting operations, so a response can take longer,
-  report the value the device actually retained, or indicate a busy port.
-  It does not reproduce the stock two-minute deferral of background
-  queries on native WaterCycleStart (`37F`, handler `0x68e4`).
+Stock settings often reply from cache. This implementation reads the device
+for supported setting operations, so a response can take longer, report
+the value the device actually retained, or indicate a busy port. The
+stock gate on discretionary block queries after WaterCycleStart (`37F`,
+handler `0x68e4`) is not implemented. Stock also updates active thermostat
+heat/cool targets from air-group status; reports from stored configuration
+blocks alone do not cover that path.
 
 The stock **native application dispatcher** at `0x6d98` is a separate
 check from the 26 serial methods. Its cases are:

@@ -1,5 +1,5 @@
 use super::{PINSEL0, read, write};
-use tekmar_482_firmware::tn4::tx::{Action, Outcome, Request, Sender};
+use tekmar_482_firmware::tn4::tx::{Action, Mode, Outcome, Request, Sender};
 
 const FIO: usize = 0x3fff_c000;
 const MASK: usize = FIO + 0x10;
@@ -69,7 +69,7 @@ impl Attempt {
         self.sender.started()
     }
 
-    pub(super) fn receive_ack(&mut self, dominant: bool) {
+    pub(super) fn respond(&mut self, dominant: bool) {
         debug_assert!(!self.started());
         if dominant {
             self.pin.drive(true);
@@ -78,10 +78,10 @@ impl Attempt {
         }
     }
 
-    pub(super) fn new(request: &Request, rx_pin: u32, now: u32) -> Option<Self> {
+    pub(super) fn new(request: &Request, rx_pin: u32, now: u32, mode: Mode) -> Option<Self> {
         Some(Self {
             pin: LineDriver::claim(request.port, rx_pin)?,
-            sender: Sender::new(request, now),
+            sender: Sender::new(request, now, mode),
         })
     }
 
@@ -91,7 +91,7 @@ impl Attempt {
         debug_assert!(reset);
     }
 
-    pub(super) fn poll(&mut self, now: u32, may_start: bool) -> Option<Outcome> {
+    pub(super) fn poll(&mut self, now: u32, may_start: bool) -> Option<(Outcome, Option<u32>)> {
         if !may_start && self.sender.hold_if_waiting(now) {
             return None;
         }
@@ -100,7 +100,8 @@ impl Attempt {
                 self.pin.drive(high);
                 None
             }
-            Action::Finish(outcome) => Some(outcome),
+            Action::Finish(outcome) => Some((outcome, None)),
+            Action::Fault { outcome, next_bit } => Some((outcome, Some(next_bit))),
             Action::None => None,
         }
     }

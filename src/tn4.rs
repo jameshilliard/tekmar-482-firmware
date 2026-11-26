@@ -1,6 +1,8 @@
 //! Listen-only tN4 link decoder. Logic high is dominant; idle is low.
 
+mod response;
 pub mod tx;
+pub use response::LinkResponse;
 
 const BIT_US: u32 = 2500;
 const MAX_BYTES: usize = 4 + 63;
@@ -21,12 +23,21 @@ pub struct Frame<'a> {
     pub early_start: bool,
 }
 
+pub struct InvalidFrame<'a> {
+    pub reason: u8,
+    pub bits: u16,
+    pub bytes: &'a [u8],
+    pub next_bit: u32,
+}
+
 #[derive(Clone, Copy)]
 enum State {
     Seek(u8),
     Dominant(u8),
     Idle,
     Gap(u8),
+    ErrorFlag(u32),
+    ErrorDelimiter(i8),
     Data,
     Check(u8),
     Delimiter,
@@ -44,8 +55,10 @@ pub struct Receiver {
     received: u16,
     capture: [u8; MAX_BYTES + 2],
     captured: usize,
-    failure: Option<u8>,
-    gap_fault: bool,
+    failure: Option<(u8, u32)>,
+    gap_fault: Option<u32>,
+    verify_drive: bool,
+    drive_fault: Option<u32>,
     early_start: bool,
     ack: bool,
     start: u32,
@@ -80,7 +93,9 @@ impl Default for Receiver {
             capture: [0; MAX_BYTES + 2],
             captured: 0,
             failure: None,
-            gap_fault: false,
+            gap_fault: None,
+            verify_drive: false,
+            drive_fault: None,
             early_start: false,
             ack: false,
             start: 0,
@@ -92,19 +107,20 @@ impl Default for Receiver {
 }
 
 impl Receiver {
-    pub fn take_failure(&mut self) -> Option<(u8, u16, &[u8])> {
-        let reason = self.failure.take()?;
-        Some((
+    pub fn take_failure(&mut self) -> Option<InvalidFrame<'_>> {
+        let (reason, next_bit) = self.failure.take()?;
+        Some(InvalidFrame {
             reason,
-            self.captured as u16,
-            &self.capture[..self.captured.div_ceil(8)],
-        ))
+            bits: self.captured as u16,
+            bytes: &self.capture[..self.captured.div_ceil(8)],
+            next_bit,
+        })
     }
 
     /// The physical slot boundary, fixed when the verified CRC delimiter was sampled.
-    pub fn ack_slot(&self) -> Option<(u32, u32)> {
+    pub fn ack_slot(&self) -> Option<u32> {
         match self.state {
-            State::Ack(at) => Some((self.start, at)),
+            State::Ack(at) => Some(at),
             _ => None,
         }
     }
@@ -118,7 +134,12 @@ impl Receiver {
     pub fn partial(&self) -> bool {
         !matches!(
             self.state,
-            State::Seek(_) | State::Dominant(_) | State::Idle | State::Gap(_)
+            State::Seek(_)
+                | State::Dominant(_)
+                | State::Idle
+                | State::Gap(_)
+                | State::ErrorFlag(_)
+                | State::ErrorDelimiter(_)
         )
     }
 
@@ -126,8 +147,21 @@ impl Receiver {
         matches!(self.state, State::Idle) && !self.level
     }
 
-    pub fn take_gap_fault(&mut self) -> bool {
-        core::mem::take(&mut self.gap_fault)
+    pub fn take_gap_fault(&mut self) -> Option<u32> {
+        self.gap_fault.take()
+    }
+
+    /// Arm only after the Normal-mode link response actually claimed and drove the pin.
+    pub fn verify_response_drive(&mut self) {
+        self.verify_drive = true;
+    }
+
+    pub fn take_drive_fault(&mut self) -> Option<u32> {
+        self.drive_fault.take()
+    }
+
+    pub fn recovering(&self) -> bool {
+        matches!(self.state, State::ErrorFlag(_) | State::ErrorDelimiter(_))
     }
 
     pub fn early_start(&self) -> bool {
@@ -135,7 +169,7 @@ impl Receiver {
     }
 
     pub fn stuck_dominant(&self) -> bool {
-        matches!(self.state, State::Dominant(14))
+        matches!(self.state, State::Dominant(14) | State::ErrorDelimiter(14))
     }
 
     /// Sample at bit centers, re-centering on each captured transition.
@@ -171,11 +205,13 @@ impl Receiver {
 
     fn bit(&mut self, high: bool) -> Option<Trailer> {
         let b = u8::from(high);
+        // advance() has already moved the sample clock to the following bit center.
+        let next_bit = self.sample_us.wrapping_sub(BIT_US / 2);
         if matches!(self.state, State::Data | State::Check(_)) {
             self.history = ((self.history << 1) | b) & 63;
             match self.history {
                 0 | 63 => {
-                    self.failure = Some(1);
+                    self.failure = Some((1, next_bit));
                     self.stats.stuffing = self.stats.stuffing.saturating_add(1);
                     self.state = State::Seek(0);
                     return None;
@@ -197,11 +233,29 @@ impl Receiver {
             State::Dominant(_) => State::Seek(1),
             State::Seek(6) => State::Idle,
             State::Seek(n) => State::Seek(n + 1),
+            State::ErrorFlag(end)
+                if (self.sample_us.wrapping_sub(BIT_US).wrapping_sub(end) as i32) < 0 =>
+            {
+                if self.verify_drive && !high {
+                    self.drive_fault = Some(next_bit);
+                    self.verify_drive = false;
+                }
+                self.state
+            }
+            State::ErrorFlag(_) => {
+                self.verify_drive = false;
+                State::ErrorDelimiter(if high { 1 } else { -1 })
+            }
+            State::ErrorDelimiter(n) if high => State::ErrorDelimiter((n.max(0) + 1).min(14)),
+            State::ErrorDelimiter(-7) => State::Gap(3),
+            State::ErrorDelimiter(n) => State::ErrorDelimiter(n.min(0) - 1),
             State::Gap(1) | State::Idle if !high => State::Idle,
             State::Gap(n) if !high => State::Gap(n - 1),
             State::Gap(_) | State::Idle => {
                 self.early_start = matches!(self.state, State::Gap(3));
-                self.gap_fault |= self.early_start;
+                if self.early_start {
+                    self.gap_fault = Some(next_bit);
+                }
                 self.capture[0] = 0x80;
                 self.captured = 1;
                 self.stats.starts = self.stats.starts.saturating_add(1);
@@ -237,22 +291,27 @@ impl Receiver {
                     self.stats.crc_mismatch = self.stats.crc_mismatch.saturating_add(1);
                     self.stats.last_received_crc = self.received;
                     self.stats.last_expected_crc = self.crc;
-                    self.failure = Some(2);
+                    self.failure = Some((2, next_bit));
                     State::Seek(0)
                 }
             }
             State::Delimiter if high => {
-                self.failure = Some(3);
+                self.failure = Some((3, next_bit));
                 self.state = State::Seek(0);
                 return Some(Trailer::BadDelimiter);
             }
-            State::Delimiter => State::Ack(self.sample_us.wrapping_sub(BIT_US / 2)),
+            State::Delimiter => State::Ack(next_bit),
             State::Ack(_) => {
+                if core::mem::take(&mut self.verify_drive) && !high {
+                    self.drive_fault = Some(next_bit);
+                    self.state = State::Seek(0);
+                    return None;
+                }
                 self.ack = high;
                 State::End(8)
             }
             State::End(_) if high => {
-                self.failure = Some(4);
+                self.failure = Some((4, next_bit));
                 self.state = State::Seek(0);
                 return Some(Trailer::BadEnd { ack: self.ack });
             }
@@ -267,53 +326,6 @@ impl Receiver {
             State::End(n) => State::End(n - 1), // ACK delimiter then seven low EOF bits
         };
         None
-    }
-}
-
-/// Schedule at most one dominant bit per received frame; a missed boundary is not retried.
-#[derive(Default)]
-pub struct LinkAck {
-    release: Option<u32>,
-    handled: Option<u32>,
-    driven_frame: Option<u32>,
-    pub pulses: u32,
-    pub late: u32,
-}
-
-impl LinkAck {
-    pub fn driving(&self) -> bool {
-        self.release.is_some()
-    }
-
-    pub fn poll(&mut self, now: u32, slot: Option<(u32, u32)>) -> Option<bool> {
-        if let Some(end) = self.release {
-            if (now.wrapping_sub(end) as i32) < 0 {
-                return None;
-            }
-            self.release = None;
-            return Some(false);
-        }
-        let Some((frame, at)) = slot else {
-            self.handled = None;
-            return None;
-        };
-        let elapsed = now.wrapping_sub(at) as i32;
-        if elapsed < 0 || self.handled == Some(at) {
-            return None;
-        }
-        self.handled = Some(at);
-        if elapsed >= (BIT_US / 4) as i32 {
-            self.late = self.late.saturating_add(1);
-            return None;
-        }
-        self.release = Some(at.wrapping_add(BIT_US));
-        self.driven_frame = Some(frame);
-        self.pulses = self.pulses.saturating_add(1);
-        Some(true)
-    }
-
-    pub fn drove_frame(&mut self, start: u32) -> bool {
-        self.driven_frame.take() == Some(start)
     }
 }
 
@@ -401,8 +413,8 @@ mod tests {
             rx.bit(true);
             assert!(rx.partial());
             assert_eq!(rx.early_start(), quiet == 0);
-            assert_eq!(rx.take_gap_fault(), quiet == 0);
-            assert!(!rx.take_gap_fault());
+            assert_eq!(rx.take_gap_fault().is_some(), quiet == 0);
+            assert!(rx.take_gap_fault().is_none());
         }
     }
 
@@ -424,7 +436,7 @@ mod tests {
             }
             rx.sample_us = 21_250;
             rx.bit(delimiter);
-            assert_eq!(rx.ack_slot(), valid.then_some((0, 20_000)));
+            assert_eq!(rx.ack_slot(), valid.then_some(20_000));
             rx.bit(false);
             assert!(rx.ack_slot().is_none());
         }
@@ -432,20 +444,120 @@ mod tests {
 
     #[test]
     fn ack_pulse_is_one_slot_even_across_wrap() {
-        let mut ack = LinkAck::default();
+        let mut ack = LinkResponse::default();
         let at = u32::MAX - 300;
-        let slot = Some((7, at));
+        let slot = Some(at);
         assert_eq!(ack.poll(at - 1, slot), None);
         assert_eq!(ack.poll(at + 5, slot), Some(true));
         assert_eq!(ack.poll(at.wrapping_add(BIT_US - 1), None), None);
         assert_eq!(ack.poll(at.wrapping_add(BIT_US), None), Some(false));
         assert_eq!(ack.poll(at.wrapping_add(BIT_US + 1), slot), None);
-        assert!(ack.drove_frame(7));
-        assert!(!ack.drove_frame(7));
-        assert_eq!(ack.poll(20_700, Some((8, 20_000))), None);
-        assert_eq!(ack.poll(20_701, Some((8, 20_000))), None);
-        assert!(!ack.drove_frame(8));
-        assert_eq!((ack.pulses, ack.late), (1, 1));
+        assert_eq!(ack.poll(20_700, Some(20_000)), None);
+        assert_eq!(ack.poll(20_701, Some(20_000)), None);
+        assert!(!ack.busy());
+    }
+
+    #[test]
+    fn normal_flag_wraps_once_then_requires_eight_consecutive_quiet_bits_and_gap() {
+        let mut rx = Receiver::default();
+        let mut response = LinkResponse::default();
+        let at = u32::MAX - 4000;
+        let end = at.wrapping_add(6 * BIT_US);
+        response.recover(&mut rx, at);
+        assert!(response.busy() && rx.recovering() && !rx.idle());
+        assert_eq!(response.poll(at - 1, Some(at - 1)), None);
+        assert_eq!(response.poll(at + 10, None), Some(true));
+        response.recover(&mut rx, at + 200); // Must not lengthen the flag.
+        rx.verify_response_drive();
+        rx.sample_us = at.wrapping_add(BIT_US / 2);
+        let tick = |rx: &mut Receiver, high: bool| {
+            rx.level = high;
+            rx.advance(rx.sample_us, |_| {
+                panic!("recovery emitted an application frame")
+            });
+        };
+        for _ in 0..6 {
+            tick(&mut rx, true);
+        }
+        assert!(rx.take_drive_fault().is_none());
+        assert_eq!(response.poll(end - 1, None), None);
+        assert_eq!(response.poll(end, None), Some(false));
+        for _ in 0..7 {
+            tick(&mut rx, false);
+        }
+        for _ in 0..14 {
+            tick(&mut rx, true); // Overlapping peer flag restarts the delimiter, not our output.
+        }
+        assert!(rx.stuck_dominant() && !response.busy());
+        for _ in 0..7 {
+            tick(&mut rx, false);
+            assert!(rx.recovering());
+        }
+        tick(&mut rx, false);
+        for _ in 0..3 {
+            assert!(!rx.recovering() && !rx.idle());
+            tick(&mut rx, false);
+        }
+        assert!(rx.idle() && rx.take_failure().is_none() && rx.stats.starts == 0);
+        tick(&mut rx, true);
+        assert!(rx.partial() && !rx.early_start());
+    }
+
+    #[test]
+    fn normal_drive_failure_is_distinct_from_listening_to_a_missing_ack() {
+        let mut rx = Receiver {
+            state: State::Ack(10_000),
+            sample_us: 13_750,
+            ..Receiver::default()
+        };
+        rx.verify_response_drive();
+        rx.bit(false);
+        assert_eq!(rx.take_drive_fault(), Some(12_500));
+        assert!(rx.take_failure().is_none());
+        let mut response = LinkResponse::default();
+        response.recover(&mut rx, 12_500);
+        assert_eq!(response.poll(12_500, None), Some(true));
+        rx.verify_response_drive();
+        rx.sample_us = 16_250;
+        rx.bit(false);
+        assert_eq!(rx.take_drive_fault(), Some(15_000));
+        response.recover(&mut rx, 15_000); // A broken output cannot perpetuate recovery.
+        rx.bit(false);
+        assert!(rx.take_drive_fault().is_none());
+        assert_eq!(response.poll(27_500, None), Some(false));
+        assert!(!response.busy());
+        rx.state = State::Ack(32_000);
+        rx.bit(false);
+        assert!(rx.take_drive_fault().is_none());
+    }
+
+    #[test]
+    fn faults_preserve_raw_evidence_and_late_flags_are_never_driven() {
+        for (reason, damaged) in [
+            (1, b"111111".to_vec()),
+            (2, [BITS[..BITS.len() - 1].to_vec(), b"0".to_vec()].concat()),
+            (3, [BITS, b"1"].concat()),
+            (4, [BITS, b"001"].concat()),
+            (4, [BITS, b"010001"].concat()),
+        ] {
+            let mut rx = Receiver {
+                state: State::Idle,
+                ..Receiver::default()
+            };
+            for &b in &damaged {
+                rx.sample_us += BIT_US;
+                rx.bit(b == b'1');
+            }
+            let expected = rx.sample_us - BIT_US / 2;
+            let fault = rx.take_failure().unwrap();
+            assert_eq!((fault.reason, fault.next_bit), (reason, expected));
+            assert!(!fault.bytes.is_empty() && !rx.recovering());
+            let mut response = LinkResponse::default();
+            response.recover(&mut rx, expected);
+            assert_eq!(response.poll(expected + BIT_US / 4, None), None);
+            assert_eq!(response.poll(expected + BIT_US, None), None);
+            assert!(!response.busy());
+        }
     }
 
     #[test]
