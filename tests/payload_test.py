@@ -64,6 +64,9 @@ class PayloadTests(unittest.TestCase):
         self.assertIsNone(config(100103, None).offers(Mode.HEAT))
         self.assertTrue(config(100101).offers(Mode.VENT))
         self.assertFalse(config(100101).offers(Mode.BACKUP))
+        self.assertEqual(Mode.AUTO.setup_dependencies(identify_product(105102)), (4, 0x97))
+        self.assertEqual(Mode.EMERGENCY.setup_dependencies(identify_product(105102)), (0x97,))
+        self.assertFalse(Mode.HEAT.setup_dependencies(identify_product(105102)))
 
     def test_water_status_optional_word_and_extensions(self):
         base = "bc07 00c0 0000 19ff f9"

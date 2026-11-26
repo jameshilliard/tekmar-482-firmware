@@ -29,6 +29,18 @@ class ThermostatMode(IntEnum):
     def decode(cls, raw: int | None) -> "ThermostatMode | None":
         return cls(raw) if raw is not None and raw in range(len(cls)) else None
 
+    def setup_dependencies(self, product: NativeProduct) -> tuple[int, ...]:
+        if self in (self.AUTO, self.COOL):
+            return tuple(b for b in (COOLING_SETUP, HEAT_PUMP_CONFIG) if b in product.candidate_blocks)
+        if self is self.EMERGENCY and product.model == "553":
+            return (HEAT_PUMP_CONFIG,)
+        return ()
+
+
+# SW 11 decodes Humidity and Backup but omits both from the remote selector.
+REMOTE_MODES = (ThermostatMode.AUTO, ThermostatMode.HEAT, ThermostatMode.COOL,
+                ThermostatMode.VENT, ThermostatMode.OFF, ThermostatMode.EMERGENCY)
+
 
 @dataclass(frozen=True, slots=True)
 class ThermostatConfiguration:
@@ -63,6 +75,10 @@ class ThermostatConfiguration:
 
     def offers(self, mode: ThermostatMode) -> bool | None:
         """SW 11's remote selector, not a list of every mode a unit can report."""
+        if not isinstance(mode, ThermostatMode):
+            raise TypeError("expected a native thermostat mode")
+        if mode not in REMOTE_MODES:
+            return False
         model = self.product.model
         if model == "538":
             if self.z_number is None or self.z_number not in range(26):
@@ -136,6 +152,8 @@ class AirStatus:
     @classmethod
     def read(cls, r: Reader, *, master: bool) -> "AirStatus":
         group = r.byte()
+        heat: AirReading | None
+        cool: AirReading | None
         if master:
             cycle = r.byte()
             heat, cool = AirReading.read(r), AirReading.read(r)
