@@ -114,6 +114,7 @@ method IDs. Link trailer status is always reported separately.
 | 0x22f | Setpoint enable, setback, operating/demand/actuator/relay states, priorities, three temperatures and status excuses |
 | 0x23f | DHW enable, setback, priorities, operating/demand/actuator states, target and tank temperatures |
 | 0x24f | Plant device ID/count/type; subtype 6 (modulating boiler) state, pump, modulation levels, inlet/outlet raw values, output and return protection |
+| 0x2d7, 0x2df, 0x2e7 | Block request (target subnet and node mask), update (address and values), report (support bitmap and packed values). Setpoint blocks 5/6 decode Wake, Unoccupied, Occupied, Sleep and Away in degE. |
 | 0x32f | Outdoor temperature; the 482 sends a second copy of the word (J1196J 0x3dd8) and reads the first (0x3e38). Show both even if they differ. |
 | 0x337, 0x33f | Maximum boiler percent; air group and requested cycle length |
 | 0x367 | Water subnet, stage, override, priority, pump flags and delay; target temperature only when output is on |
@@ -185,6 +186,11 @@ ended capture before completion. The host requires both an ACK result and
 the matching CRC-verified echo. Verify device changes independently with
 a fresh application-level readback. Capture continues until the host stops
 it; diagnostic summaries and END are the same as for RX-DIAG.
+
+Verified on a physical thermostat: an SRAM build requested heat block 5,
+changed Away by one degE step, and restored it. Each update produced a
+report; separate addressed requests confirmed both the changed value and
+the complete original block after restoration. No flash write was needed.
 
 ### Front panel
 

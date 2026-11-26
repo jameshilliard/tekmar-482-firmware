@@ -35,6 +35,10 @@ class PayloadTests(unittest.TestCase):
                         current_modulation_level=5, minimum_modulation_level=10,
                         maximum_modulation_level=100, input_temp_raw=170, outlet_temp_raw=187,
                         output=18, return_protection=7)),
+            0x2d7: ("05000104000000", dict(block_id=5, target_subnet=1, target_nodes_mask="0x00000004")),
+            0x2df: ("012305002c202a251e", dict(block_id=5, target_node=3, target_node_flags=1,
+                        wake_f=71.6, away_f=59.0)),
+            0x2e7: ("0600142830", dict(block_id=6, support_mask="0x14", occupied_raw=40, away_raw=48)),
             0x32f: ("32053205", dict(outdoor_temp_f=48.0, second_word_raw=1330, matches_first=1)),
             0x337: ("42", dict(max_value=66)),
             0x33f: ("0320", dict(air_group_id=3, requested_length=32)),
@@ -73,6 +77,12 @@ class PayloadTests(unittest.TestCase):
         self.assertEqual(fields["pair2_value_raw"], 0x3412)
         self.assertEqual(decode(0x337, "641234")["extension_hex"], "1234")
         self.assertEqual(decode(0x155, "abcd"), {})
+        self.assertEqual(decode(0x2e7, "efbe810142"), dict(block_id=0xbeef, support_mask="0x81",
+                                                           byte1_raw=1, byte8_raw=66))
+        self.assertNotIn("wake_raw", decode(0x2e7, "0500101e"))
+        self.assertEqual(decode(0x2d7, "0500070200000078563412")["arguments"], 0x12345678)
+        self.assertIn("truncated", decode(0x2e7, "05001f01"))
+        self.assertIn("truncated", decode(0x2df, "0101050028202a25"))
 
     def test_truncation_and_sentinels(self):
         for mid in DECODERS:

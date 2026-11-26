@@ -122,6 +122,46 @@ def outdoor(r: Reader) -> Fields:
     return fields
 
 
+def block_request(r: Reader) -> Fields:
+    block, destination = r.word(), r.byte()
+    mask = int.from_bytes(r.take(4), "little")
+    fields: Fields = {"block_id": block, "target_subnet": destination,
+                      "target_nodes_mask": f"0x{mask:08x}"}
+    if len(r.remaining) >= 4:  # Optional arguments in the 483 layout, absent in the 482 request.
+        fields["arguments"] = int.from_bytes(r.take(4), "little")
+    return fields
+
+
+SETPOINT_FIELDS = ("wake", "unoccupied", "occupied", "sleep", "away")
+
+
+def block_fields(block: int, index: int, value: int) -> Fields:
+    if block in (5, 6) and index < len(SETPOINT_FIELDS):
+        return temp(SETPOINT_FIELDS[index], value, deg_e=True)
+    return {f"byte{index + 1}_raw": value}
+
+
+def block_report(r: Reader) -> Fields:
+    block, support = r.word(), r.byte()
+    fields: Fields = {"block_id": block, "support_mask": f"0x{support:02x}"}
+    for index in range(8):
+        if support & (1 << index):
+            fields.update(block_fields(block, index, r.byte()))
+    return fields
+
+
+def block_update(r: Reader) -> Fields:
+    dest, node = r.take(2)
+    block = r.word()
+    fields: Fields = {"target_subnet": dest, "target_node": node & 31,
+                      "target_node_flags": node >> 5, "block_id": block}
+    if block in (5, 6):
+        # Unlike a report, an update carries the full ordered block without a mask.
+        for index in range(len(SETPOINT_FIELDS)):
+            fields.update(block_fields(block, index, r.byte()))
+    return fields
+
+
 def stage(r: Reader) -> Fields:
     fields = subnet(r.byte())
     b, p = r.take(2)
@@ -176,6 +216,9 @@ DECODERS: dict[int, tuple[str, Callable[[Reader], Fields]]] = {
     0x22f: ("SetpointStatus", setpoint),
     0x23f: ("DHWStatus", dhw),
     0x24f: ("PlantOutputStatus", plant),
+    0x2d7: ("BlockRequest", block_request),
+    0x2df: ("BlockUpdate", block_update),
+    0x2e7: ("BlockReport", block_report),
     0x32f: ("OutdoorTemperatureReport", outdoor),
     0x337: ("MaximumBoilerPercent", lambda r: {"max_value": r.byte()}),
     0x33f: ("CycleLengthRequest", lambda r: {"air_group_id": r.byte(), "requested_length": r.byte()}),
