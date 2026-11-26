@@ -450,7 +450,33 @@ subnet and node bytes, distinct from the six-bit native header node.
 Discovery also carries a channel count; count distinct channel IDs per
 reporting source, without assuming numbering starts at zero. For a
 channel read match the payload channel too. An unsolicited 1F2 change
-report remains telemetry, not the 1F3 service. Humidity query 322 carries
+report remains telemetry, not the 1F3 service. A 1F5 discovery reply
+contains a current sample as well as metadata; a 1F3 or 1F2 omits the
+count and label rather than clearing them. Keep all six label bytes,
+including embedded zero and non-ASCII bytes, and any trailing extension.
+A positive consistent count must be met by distinct IDs from the same
+sender and payload endpoint in one discovery exchange. A partial reply,
+a count change, and a link ACK do not prove a channel disappeared.
+
+The 483 SW 11 `IoChannel` model names these channel types (the value is
+always a little-endian u16):
+
+| Type | Interpretation |
+| --- | --- |
+| 0, 255 | Unused, disabled. Neither means an active output of zero. |
+| 1, 7 | Relay, demand: 0 off/inactive, 1 on/active. Keep other words raw. |
+| 2, 3, 4 | 0-10 V output, 0-10 V input, 4-20 mA output. The raw-to-engineering scale is not established by the wire layout. |
+| 5, 10 | Sensor(H), Sensor(F). The I/O model does not establish a usable temperature conversion for these samples. |
+| 6, 9, 11 | Humidity, variable-speed pump, PWM cycle. Values 0..100 can be displayed as percent; preserve other words without assigning a percentage. |
+| 8, other | Integer, or unknown type: preserve the type ID and value. |
+
+The 483 terminal-reference tables cover models 553 (channels 0..5), 557
+(0..9), and 654 (0..10). These are board labels, not discovery results or
+proof a relay is active. For example, 654 channels 1, 2 and 3 are all
+marked `Mod`; they remain three distinct IDs. The wire label is separate.
+These services provide reads and observations, not a generic I/O write.
+
+Humidity query 322 carries
 a subnet and four-byte little-endian selector. The 483 calls it
 `node_id`; a BlockRequest bitmap conversion is not established here.
 Keep the selector raw and match 323 by its reporting source.

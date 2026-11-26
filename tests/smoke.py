@@ -28,7 +28,9 @@ RAW_READS = ((bytes.fromhex("6d70000b 100000 00008000 00000000"), bytes.fromhex(
              (bytes.fromhex("6d70000b 380000 00008000 02000000"), bytes.fromhex("6e70060b 3800ff 7a 90020304050607")),
              (bytes.fromhex("6d70000b 090000 00008000 00000000"), bytes.fromhex("6e700608 09001f 000205070a")),
              (bytes.fromhex("17f00003 11 01 1b"), bytes.fromhex("57e250c5 19 01 1b1204")),
-             (bytes.fromhex("17f00004 12 02 1922"), bytes.fromhex("57e250c8 1a 02 220006 190300")))
+             (bytes.fromhex("17f00004 12 02 1922"), bytes.fromhex("57e250c8 1a 02 220006 190300")),
+             (bytes.fromhex("1f600002 43a5"), bytes.fromhex("5f5250ce 43a5e7 01 410042caff00 08 3412 35")),
+             (bytes.fromhex("1f400003 43a5e7"), bytes.fromhex("5f3250c6 43a5e7 08 7856")))
 TELEMETRY = ((1, bytes.fromhex("7cf25fca bc07 00c0 0000 19ff f9 ca")),
              (3, bytes.fromhex("7ce25fcb bc07 00c0 0000 19ff f9 ca35")),
              (2, bytes.fromhex("76f250c8 a4 62 2a 0000 07 0080")),
@@ -45,7 +47,8 @@ TELEMETRY = ((1, bytes.fromhex("7cf25fca bc07 00c0 0000 19ff f9 ca")),
              (4, bytes.fromhex("6f7250c4 65 f2 ca 35")),
              (4, bytes.fromhex("6f7250c3 68 0d ff")),
              (0, bytes.fromhex("57e250cc 19 03 220006 220106 1b1704 ca")),
-             (0, bytes.fromhex("57e250c8 1a 02 22ff05 190300")))
+             (0, bytes.fromhex("57e250c8 1a 02 22ff05 190300")),
+             (2, bytes.fromhex("5f2250c7 43a5e7 08 ca35 e4")))
 
 def protected_bits(body):
     data = "".join(f"{byte:08b}" for byte in body)

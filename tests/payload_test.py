@@ -10,6 +10,7 @@ from frames import encode, replay
 from payloads import DECODERS, decode_payload
 from payloads.climate import AirStatus, ThermostatConfiguration, ThermostatMode as Mode
 from payloads.codec import Reader
+from payloads.io import IoEndpoint, IoReport, IoType, io_terminal
 from payloads.line import ClockReport, GroupReport, SetpointAssignment, ZoneSyncAdjustment, ZoneTargetMode, group_command
 from payloads.plant import BoilerChillerOutput, HeatPumpOutput, MixingPresent, MixingReport, MixingUpdate, PlantKind, PlantOutput, StageBits, StageCounts
 from payloads.products import block_selectors, identify_product
@@ -64,6 +65,34 @@ class PayloadTests(unittest.TestCase):
         self.assertIsNone(StageDemand.read(r).target_raw)
         self.assertEqual(r.remaining, b"\x22\x06")
         self.assertEqual([BoilerMaximum(v).percent for v in (0, 100, 255)], [0, 100, None])
+
+    def test_io_channel_values_labels_and_terminal_references(self):
+        endpoint = IoEndpoint(0x43, 0xa5)
+        for kind in IoType:
+            r = Reader(bytes([0x43, 0xa5, 0xff, kind, 1, 0, 0xca]))
+            sample = IoReport.read_value(r)
+            self.assertEqual((sample.endpoint, sample.channel, sample.kind, r.remaining),
+                             (endpoint, 255, kind, b"\xca"))
+            self.assertEqual(sample.active, True if kind in (IoType.RELAY, IoType.DEMAND) else None)
+            self.assertEqual(sample.percent, 1 if kind in (IoType.HUMIDITY, IoType.VARIABLE_SPEED_PUMP, IoType.PWM_CYCLE) else None)
+        for raw in (0x100, 0xffff):
+            for kind in (1, 6, 7, 0x97):
+                sample = IoReport(endpoint, 6, kind, raw)
+                self.assertEqual((sample.active, sample.percent), (None, None))
+                self.assertEqual(sample.fields()["io_value"], raw)
+        payload = bytes.fromhex("43a5 ff 09 410042ff0000 9d 3412 ca35")
+        r = Reader(payload)
+        sample = IoReport.read_discovery(r)
+        self.assertEqual((sample.kind, sample.count, sample.label, sample.value, r.remaining),
+                         (None, 9, bytes.fromhex("410042ff0000"), 0x1234, b"\xca\x35"))
+        self.assertEqual(decode_payload(0x1f5, payload)["extension_hex"], "ca35")
+        for mid, width in ((0x1f2, 6), (0x1f3, 6), (0x1f5, 13)):
+            for n in range(width):
+                self.assertIn("truncated", decode_payload(mid, payload[:n]))
+        self.assertEqual([io_terminal("654", c) for c in (1, 2, 3)], ["Mod"] * 3)
+        self.assertEqual((io_terminal("553", 5), io_terminal("557", 9)), ("S2", "OB"))
+        self.assertIsNone(io_terminal("553", -1))
+        self.assertIsNone(io_terminal("402", 0))
 
     def test_thermostat_operating_samples_do_not_supply_settings(self):
         r = Reader(bytes.fromhex("e9 0a06 00c0 ca"))
