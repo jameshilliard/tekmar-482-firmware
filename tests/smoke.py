@@ -22,6 +22,8 @@ PORTS = [(4, 0, 1, 28), (11, 1, 1, 13), (6, 0, 2, 22), (10, 1, 0, 8), (2, 0, 0, 
 BITS = "10001001000110000010000010000010000110100101000111000101111"
 BODY = bytes.fromhex("12300001a5")
 SCENE = bytes.fromhex("2ff00003 07e001")  # 483 scene 8, eight hours.
+WEEK_QUERY = bytes.fromhex("6d70000b 100000 00008000 00000000")
+WEEK_REPORT = bytes.fromhex("6e70060a 10007f 90020304050607")
 
 def protected_bits(body):
     data = "".join(f"{byte:08b}" for byte in body)
@@ -213,8 +215,8 @@ def run(path, ram, fast=False):
                     all_edges.append((start + i * 2500, p, bit == "1"))
         edges.extend(sorted(all_edges))
 
-    def send(p):
-        incoming.extend(encode(1, bytes([1, p]) + SCENE))
+    def send(p, body=SCENE):
+        incoming.extend(encode(1, bytes([1, p]) + body))
 
     corrupt = bytearray(encode(6, bytes.fromhex("0005f04b54")))
     corrupt[-2] ^= 1
@@ -227,6 +229,7 @@ def run(path, ram, fast=False):
     valid = set()
     invalid = set()
     results = set()
+    weekly = set()
     overlap = False
     phase = "capture"
 
@@ -445,6 +448,15 @@ def run(path, ram, fast=False):
             assert protected & 0x7FFF == 0x0E2E
             invalid.add(p)
         elif service == 0:
+            if phase == "weekly-read":
+                assert data[6:] in (SCENE, WEEK_QUERY, WEEK_REPORT)
+                if data[6:] == WEEK_REPORT:
+                    assert p == 0
+                    weekly.add("report")
+                    if "result" in weekly:
+                        extension(2, bytes(1), True)
+                        at_line_rate()
+                return
             assert data[6:] == (BODY if phase == "capture" else SCENE)
             if phase == "capture":
                 assert p in invalid
@@ -462,12 +474,21 @@ def run(path, ram, fast=False):
             overlap = True
         elif service == 2:
             assert data[2:] == bytes([2, 1]), data
+            if phase == "weekly-read":
+                assert p == 0 and "result" not in weekly
+                weekly.add("result")
+                if "report" in weekly:
+                    extension(2, bytes(1), True)
+                    at_line_rate()
+                return
             assert p not in results and (p != 0 or overlap)
             results.add(p)
             if len(results) == 5:
                 assert not any(exchanges)
-                extension(2, b"\x00", True)
-                at_line_rate()  # The host cannot reply before the last stop bit.
+                phase = "weekly-read"
+                exchanges[0].append((WEEK_QUERY, WEEK_REPORT))
+                send(0, WEEK_QUERY)
+                at_line_rate()
         else:
             raise AssertionError(data)
 
@@ -549,7 +570,7 @@ def run(path, ram, fast=False):
     assert (6, bytes.fromhex("0306f04b5402f04b5401")) in actual
     for p in range(5):
         assert (6, bytes.fromhex("0403f04b54") + bytes([p]) + bytes(8)) in actual
-    assert actual[-1] == (6, bytes.fromhex("0305f04b54"))
+    assert weekly == {"result", "report"} and actual[-1] == (6, bytes.fromhex("0305f04b54"))
     painted = bytes(cpu.mem_read(floor, top - floor))
     free = len(painted) - len(painted.lstrip(b"\xa5"))
     assert free >= 256, free

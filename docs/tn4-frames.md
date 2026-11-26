@@ -223,7 +223,7 @@ or absolute date. A missing day in a report is not a disabled event.
 | Block | Fields in logical slot order |
 | --- | --- |
 | 000F | Heating schedule ID, cooling schedule ID, cycling rate, daily event configuration, optimum start operation, RTC setback enable. Cycling rates 0..3 correspond to 24-hour, 5-2, 5-1-1 and 7-day. Event configuration 1 = two events (Wake/Sleep); 2 = four. |
-| 0010..0013 | One event per block: Wake, Unoccupied, Occupied, Sleep. Seven time bytes, Monday through Sunday. |
+| 0010..0013 | One event per block: Wake, Unoccupied, Occupied, Sleep. Seven time bytes; normally Monday through Sunday, with the revision exceptions below. |
 | 0038..003B | The same four events for indexed schedules. First byte: schedule ID [2:0], master flag [3], cycling rate [5:4], event configuration [7:6]. Then seven day bytes. |
 
 In the 483 request queue the optional little-endian u32 BlockRequest
@@ -234,6 +234,32 @@ preserving the other days and, for indexed schedules, the whole selector
 byte. Read the same block back to verify changes; a link ACK is not a
 schedule confirmation. Single-schedule setup and all four weekday tables
 have been observed in addressed reads; indexed layouts are reference-derived.
+
+**Owner and calendar.** In 483 SW 11 `Schedule::SCHEDULE_TYPES`, a setup
+ID of 0 means no schedule, 1 a device's zone schedule, 2..5 master of
+system schedule 1..4, 6..9 member of system schedule 1..4, and 10
+Unoccupied. A member is not the owner of a second editable copy. On a
+033 timer, query selectors 0..3 for system schedules 1..4; the master
+bit in the indexed Wake block identifies slots the timer actually owns.
+For thermostats with only a heating schedule ID the 483 also uses it for
+cooling. Its per-model tables specify an independent cooling ID for 540,
+545 and 546; a missing cooling byte on one of these is unknown, not heat.
+
+Daily event codes 0/1/2 mean zero/two/four timed events. In a two-event
+schedule the **Wake** and **Sleep** wire rows are displayed as Occupied
+and Unoccupied, not the separate Occ/UnOcc four-event rows. A 24-hour
+edit applies the same time to all seven days; 5-2 groups Monday-Friday
+and Saturday-Sunday; 5-1-1 separates the weekend days; 7-day changes one
+day. Preserve the reported bytes on reads even if grouped days disagree.
+
+**Revision exceptions.** Block zero's Z byte is zero-based (0 = A). The
+483's `BlockFixups` puts Sunday first on the wire for 552 A-N and 557 A-C
+in single-schedule blocks 10..13 only. Translate both the weekday and its
+support bit when reading, editing, and verifying readback. Without the
+affected device's revision, retain wire slots but do not assign weekdays.
+The 483 also documents 545/546 through K losing mastership on a setup
+rewrite. Do not rewrite 0F when it could demote an existing or proposed
+heat or cool master; editing an event row does not rewrite 0F.
 
 ### Plant output subtypes
 

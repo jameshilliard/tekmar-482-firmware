@@ -10,6 +10,7 @@ from payloads import DECODERS, decode_payload
 from payloads.products import block_selectors, identify_product
 from payloads.queries import NativeStatusQuery, ReplyPart, SnowmeltRole, StatusRequest
 from payloads.scenes import NativeScene, SceneReport, SceneResponse
+from payloads.schedules import DailyEvents, ScheduleBinding, ScheduleCycle, ScheduleEvent, ScheduleProfile
 from payloads.writes import BlockPatch, NativeField as F, WritableBlock
 
 
@@ -18,6 +19,55 @@ def decode(mid, hex_bytes):
 
 
 class PayloadTests(unittest.TestCase):
+    def test_calendar_day_mapping_and_readback_follow_identified_revision(self):
+        for tektra, part, last in ((105103, 1213, 13), (104401, 1215, 2)):
+            for z, monday in ((0, 1), (last, 1), (last + 1, 0)):
+                profile = ScheduleProfile.from_identification(dict(product_number=tektra, j_number=part, z_number=z))
+                for block in range(0x10, 0x14):
+                    patch = BlockPatch.from_fields(block, {F.MONDAY: 35}).for_schedule(profile)
+                    wire = patch.apply(1 << monday, bytes.fromhex("01020304050607"))
+                    self.assertEqual(wire[monday], 35)
+                    self.assertTrue(patch.matches(1 << monday, bytes([35])))
+                    self.assertEqual(profile.wire_day(block, 6), (6 + monday) % 7)
+                self.assertEqual(profile.wire_day(0x38, 0), 0)
+            for z in (None, 26, 255):
+                with self.assertRaisesRegex(ValueError, "revision"):
+                    ScheduleProfile.from_identification(dict(product_number=tektra, z_number=z)).wire_day(0x13, 0)
+
+    def test_protect_early_schedule_masters_and_only_known_edit_codes(self):
+        for number in (99201, 99202):
+            for z in (0, 10, None):
+                profile = ScheduleProfile.from_identification(dict(product_number=number, z_number=z))
+                for before, mask, changes in (("020103010000", 15, {F.NUM_DAILY_EVENTS: 2}),
+                                             ("010103010000", 15, {F.COOLING_SCHEDULE_ID: 5}),
+                                             ("010103010000", 13, {F.SCHEDULE_CYCLING_RATE: 1})):
+                    with self.assertRaisesRegex(ValueError, "mastership"):
+                        BlockPatch.from_fields(0xf, changes).for_schedule(profile).apply(mask, bytes.fromhex(before))
+            profile = ScheduleProfile.from_identification(dict(product_number=number, z_number=11))
+            patch = BlockPatch.from_fields(0xf, {F.NUM_DAILY_EVENTS: 2}).for_schedule(profile)
+            self.assertEqual(patch.apply(15, bytes.fromhex("020103010000")).hex(), "020103020000")
+        for block, changes in ((0xf, {F.HEATING_SCHEDULE_ID: 11}), (0xf, {F.SCHEDULE_CYCLING_RATE: 4}),
+                               (0x3b, {F.NUM_DAILY_EVENTS: 3})):
+            with self.assertRaises(ValueError):
+                BlockPatch.from_fields(block, changes)
+
+    def test_calendar_binding_event_count_and_day_groups(self):
+        for n in range(1, 5):
+            self.assertEqual(ScheduleBinding(n + 1).system_number, n)
+            self.assertTrue(ScheduleBinding(n + 1).owns_table)
+            self.assertEqual(ScheduleBinding(n + 5).system_number, n)
+            self.assertFalse(ScheduleBinding(n + 5).owns_table)
+        self.assertIsNone(ScheduleBinding.ZONE.system_number)
+        self.assertFalse(ScheduleBinding.UNOCCUPIED.owns_table)
+        self.assertEqual(ScheduleCycle.FIVE_TWO.days_for(6), (5, 6))
+        self.assertEqual(ScheduleCycle.FIVE_ONE_ONE.days_for(3), tuple(range(5)))
+        self.assertEqual(ScheduleCycle.FIVE_ONE_ONE.days_for(5), (5,))
+        self.assertEqual(ScheduleCycle.DAILY.days_for(2), tuple(range(7)))
+        self.assertEqual(DailyEvents.TWO.events, (ScheduleEvent.WAKE, ScheduleEvent.SLEEP))
+        self.assertEqual(DailyEvents.TWO.display_event(ScheduleEvent.SLEEP), ScheduleEvent.UNOCCUPIED)
+        self.assertEqual(decode(0x2e7, "0f000f 03070001")["cooling_schedule_id_name"], "member_2")
+        self.assertNotIn("heating_schedule_id_name", decode(0x2e7, "0f0001 fa"))
+
     def test_scene_report_numbers_durations_and_future_fields(self):
         vectors = ("000000", "010000", "020000", "030000", "040000", "05b400", "06f000", "07e001")
         for scene, vector in zip(NativeScene, vectors, strict=True):
