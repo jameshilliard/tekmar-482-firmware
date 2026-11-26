@@ -223,11 +223,11 @@ FFFFFFFF means not yet known. For an absent address neither method replies;
 use an exact inventory lookup to establish absence. A missing device must
 never return uninitialized version bytes.
 
-Normal mode issues an addressed, read-only native block-0 request on
-qualifying traffic when identity is incomplete and that port is available.
-Repeated observations of the same device are rate-limited to one probe per
-minute. Raw mode does not issue these requests, cache identities or expose
-internal probes as host transmit results.
+Qualifying traffic queues an addressed, read-only native block-0 request
+when identity is incomplete. Normal mode can retain it while the port is
+busy. Repeated observations of the same device trigger at most one identity
+probe per minute. Raw mode does not issue these requests, cache identities
+or expose internal probes as host transmit results.
 
 ## Device attributes
 
@@ -340,10 +340,10 @@ Operating status also schedules CurrentFloorTemperature (FFFF without a
 configured floor reading), not ModeSetting. Recognition withdraws pending
 thermostat mode, heat and cool reports and prevents unstarted writes to
 those thermostat blocks. Operating heat/cool direction is not a mode setting.
-Normal mode probes application setup on operating status. If identity was
-missing it requests block 0 first, then setup on the identity reply or a
-subsequent operating status. Unanswered setup probes are limited to one per
-minute; a recognized application remains fresh for five minutes.
+Operating status queues an addressed application setup read independently of
+any missing identity fields. Setup does not depend on a block-0 reply.
+Unanswered setup probes are limited to one per minute; a recognized
+application remains fresh for five minutes.
 
 For Raw consumers, the 483 SW 11 model for the 161/162 presents the **live**
 target and temp1 as E for DHW (application 2), H otherwise. Do not assume
