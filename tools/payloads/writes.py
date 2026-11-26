@@ -250,6 +250,8 @@ class BlockPatch:
     def apply(self, support: int, body: bytes) -> bytes:
         """Produce positional update data without changing or synthesizing siblings."""
         width = _LAYOUTS[self.block].size
+        if self.block == SETUP_BLOCK and len(body) == 5 and support < 0x20:
+            body += b"\x00"  # SW 11 0F writer always emits zero for the sixth byte.
         if self.block == 0x2e and len(body) == 6 and not support & 0xc0:
             width = 6  # Some floor controls have no fourth word.
         if len(body) != width or support >> width:

@@ -35,6 +35,11 @@ class PayloadTests(unittest.TestCase):
                     ScheduleProfile.from_identification(dict(product_number=tektra, z_number=z)).wire_day(0x13, 0)
 
     def test_protect_early_schedule_masters_and_only_known_edit_codes(self):
+        zone = BlockPatch.from_fields(0xf, {F.HEATING_SCHEDULE_ID: ScheduleBinding.ZONE})
+        self.assertEqual(zone.apply(0x1d, bytes.fromhex("00ec030201")).hex(), "01ec03020100")
+        for mask, body in ((0x1d, bytes(4)), (0x3d, bytes(5)), (0x1d, bytes.fromhex("00ec030201cc"))):
+            with self.assertRaises(ValueError):
+                zone.apply(mask, body)
         for number in (99201, 99202):
             for z in (0, 10, None):
                 profile = ScheduleProfile.from_identification(dict(product_number=number, z_number=z))

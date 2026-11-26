@@ -261,6 +261,11 @@ The 483 also documents 545/546 through K losing mastership on a setup
 rewrite. Do not rewrite 0F when it could demote an existing or proposed
 heat or cool master; editing an event row does not rewrite 0F.
 
+A 553 can return exactly five positional setup bytes with no sixth support
+bit. The 483 writer's sixth byte is a literal zero, so this layout is
+sufficient to construct its six-byte write. Do not invent any of the first
+five bytes from a shorter report or clear a nonzero sixth byte.
+
 ### Plant output subtypes
 
 The subtype determines field widths, even for equipment with similar names.
