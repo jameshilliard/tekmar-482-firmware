@@ -15,13 +15,15 @@ native message in Raw mode does not implement its tRPC services in Normal mode.
 | 15F TakingAddress | Native address changes update the cache. Serial report not yet implemented. |
 | 107 NetworkError | Request and Update return the current network error word. Reports follow native 3D7, including clearance. |
 | 10F ReportingState | Request and Update. Power-on default comes from the Reporting DIP. Test-button reporting notifications are not yet implemented. |
-| 117 OutdoorTemp, 11F DeviceAttributes, 127 ModeSetting | Not implemented. |
+| 117 OutdoorTemp, 11F DeviceAttributes | Not implemented. |
+| 127 ModeSetting | Addressed Request and Update use heating setup (block 3). Report on observed mode. This is not ActiveDemand. |
 | 12F ActiveDemand, 137 CurrentTemperature, 138 CurrentFloorTemperature | Request, read-only Update echo and Report. Source and availability rules below. |
 | 13D SetpointGroupEnable, 13E SetpointDevice | Not implemented. The documented melt/storm controls are group operations, not discovered device addresses. |
-| 13F HeatSetpoint, 147 CoolSetpoint, 14F SlabSetpoint, 157 FanPercent | Not implemented. |
+| 13F HeatSetpoint, 147 CoolSetpoint | Addressed Request and Update by setback, using native blocks 5 and 6. Report the active slot when a block is observed and the active setback is known. |
+| 14F SlabSetpoint, 157 FanPercent | Not implemented. |
 | 150 RelativeHumidity | Request and Report from RHReport. Update is ignored. |
 | 151 HumidityMax, 152 HumidityMin, 17F SetbackEvents | Not implemented. |
-| 16F SetbackEnable, 177 SetbackState | Read or set the gateway enable flag; read the active setback and receive reports when enabled. Per-slot setpoint operations are not yet implemented. |
+| 16F SetbackEnable, 177 SetbackState | Read or set the gateway enable flag; read the active setback and receive setback reports when enabled. The flag also determines which heat/cool slots an Update changes. |
 | 187 FirmwareRevision, 1A7 DateTime | Not implemented. FirmwareBuild is a separate custom extension, not a vendor revision. |
 
 ## Inventory and identity
@@ -73,3 +75,30 @@ If the UART is busy, pending samples of the same device and field collapse
 to the latest value. Disabling reporting clears pending samples; explicit
 reads still work. SetbackEnable gates setback reports, not temperature or
 demand. No telemetry Update writes a thermostat setting.
+
+## Thermostat settings
+
+Normal mode accepts one native setting operation per physical port. A
+Request sends an addressed 2D7 and waits for a matching 2E7 from the same
+port, subnet and node. An Update first does the same read. For mode it
+changes byte 0, preserving heating cycle rate and air-group ID. For heat
+and cool, the five positional bytes are the native setback values. With
+setbacks enabled, selectors 0/2/4 read byte 0 and write bytes 0 and 2;
+1/3/5 read byte 1 and write bytes 1 and 3; Away (6) uses byte 4. With
+setbacks disabled a write changes all supported slots. CURRENT (7) uses
+the last observed active setback; an unknown active slot is not guessed.
+
+An Update needs a complete fixed-width block: the gateway will not invent
+missing siblings or discard an extension. It preserves unsupported bytes.
+If the selected bytes already match, it replies from that fresh read.
+Otherwise it sends one native 2DF Update, then requests the block again.
+Response:Update contains the value actually read back, including when the
+device kept the old value. A link ACK is not application confirmation.
+There is no automatic write retry or atomic lock against another bus writer.
+
+An unsupported field, incomplete write layout, lost transaction or expiry
+returns FF for the value, not the requested setting. After a failed update
+the on-device state may be unknown. Read it before deciding whether to try
+again. The transaction budget is ten seconds; allow more than that on the
+host to receive a negative reply from a quiet device. An overlapping setting
+command on the same port returns BridgeError (Busy). Raw mode is unaffected.

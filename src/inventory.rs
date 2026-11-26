@@ -1,6 +1,9 @@
 //! Normal-mode inventory. Bus addresses, not product numbers, identify entries.
 use crate::trpc::{Call, Reply};
+mod settings;
 mod telemetry;
+use crate::tn4::tx::Request;
+use settings::{Operation, Setting};
 use telemetry::{Field, Telemetry};
 
 const NODES: usize = 24;
@@ -14,6 +17,7 @@ const UNKNOWN: u32 = u32::MAX;
 #[derive(Clone, Copy, Default)]
 struct Device {
     address: u16,
+    setpoint_device: bool,
     last_seen: u32,
     product: u32,
     version: u32,
@@ -25,6 +29,7 @@ struct Device {
 impl Device {
     const EMPTY: Self = Self {
         address: 0,
+        setpoint_device: false,
         last_seen: 0,
         product: 0,
         version: 0,
@@ -42,6 +47,7 @@ struct Port {
     subnet: Option<u8>,
     devices: [Device; NODES],
     pending: u32,
+    job: Operation,
 }
 
 pub struct Inventory {
@@ -70,6 +76,7 @@ impl Inventory {
                     subnet: None,
                     devices: [Device::EMPTY; NODES],
                     pending: 0,
+                    job: Operation::IDLE,
                 }
             }; PORTS],
             walk: [0; SLOTS],
@@ -139,6 +146,9 @@ impl Inventory {
         }
         if message == 0x3ff {
             if !data.is_empty() && bus.subnet.replace(subnet).is_some_and(|old| old != subnet) {
+                if bus.job.active() {
+                    bus.job.fail();
+                }
                 bus.devices.fill(Device::default());
                 bus.pending = 0;
             }
@@ -159,11 +169,19 @@ impl Inventory {
         if data.len() < required || *bus.subnet.get_or_insert(subnet) != subnet {
             return None;
         }
+        if message == 0x3e7 && bus.job.active() && bus.job.address == bus.devices[node].address {
+            bus.job.fail();
+        }
         if message == 0x3e7
             && data[0] == subnet
             && let Some(old) = node_index(data[1])
             && old != node
         {
+            if bus.job.active()
+                && [bus.devices[old].address, bus.devices[node].address].contains(&bus.job.address)
+            {
+                bus.job.fail();
+            }
             // At a new address do not inherit the identity of a displaced device.
             bus.devices[node] = core::mem::take(&mut bus.devices[old]);
             bus.pending &= !(1 << old | 1 << node);
@@ -172,15 +190,30 @@ impl Inventory {
         let address = port as u16 * 1000 + u16::from(subnet & 7) * 100 + (NODES - node) as u16;
         let row = &mut bus.devices[node];
         if !row.present(now) {
+            if bus.job.active() && bus.job.address == address {
+                bus.job.fail();
+            }
             row.product = UNKNOWN;
             row.version = UNKNOWN;
             row.next_probe = now;
             row.sensor_probe = now;
             row.live = Telemetry::UNKNOWN;
+            row.setpoint_device = false;
             bus.pending &= !(1 << node);
         }
         row.address = address;
         row.last_seen = now;
+        if message == 0x22f && data[1] & 0x30 == 0x10
+            || message == 0x2e7
+                && matches!(data, [0x26 | 0x28 | 0x2a | 0x2c | 0x2e | 0x30, 0, _, _, ..])
+        {
+            row.setpoint_device = true;
+        }
+        if row.setpoint_device && bus.job.active() && bus.job.address == address {
+            bus.job.fail();
+        } else if message == 0x2e7 {
+            bus.job.sample(address, subnet, data);
+        }
         if message == 0x2e7
             && let [0, 0, mask, values @ ..] = data
         {
@@ -198,6 +231,8 @@ impl Inventory {
         {
             row.sensor_probe = now.wrapping_add(3600);
             changed
+        } else if message == 0x2e7 && !row.setpoint_device {
+            row.live.setting_report(data)
         } else {
             row.live.observe(message, data)
         };
@@ -232,10 +267,33 @@ impl Inventory {
             port.subnet = None;
             port.devices.fill(Device::default());
             port.pending = 0;
+            port.job = Operation::IDLE;
         }
         self.remaining = 0;
         self.error_pending = false;
         self.network_error = 0;
+    }
+
+    pub fn has_command(&self, p: usize) -> bool {
+        self.ports[p].job.active()
+    }
+    pub fn command_finished(&self, p: usize) -> bool {
+        self.ports[p].job.terminal()
+    }
+    pub fn command_expire(&mut self, p: usize, now: u32) {
+        self.ports[p].job.expire(now);
+    }
+    pub fn command_frame(&mut self, p: usize) -> Option<Request> {
+        self.ports[p].job.take_frame(p as u8)
+    }
+    pub fn command_sent(&mut self, p: usize, complete: bool) {
+        self.ports[p].job.sent(complete);
+    }
+    pub fn command_reply(&mut self, p: usize) -> Option<Reply> {
+        let slot = &mut self.ports[p].job;
+        let reply = slot.reply()?;
+        *slot = Operation::IDLE;
+        Some(reply)
     }
 
     pub fn set_reporting(&mut self, on: bool) {
@@ -318,6 +376,41 @@ impl Inventory {
     }
 
     pub fn handle(&mut self, call: &Call<'_>, now: u32) -> Answer {
+        if let Some(setting) = Setting::from_method(call.method) {
+            let Some((&a, _)) = call.body.split_first_chunk::<2>() else {
+                return Answer::Silent;
+            };
+            let address = u16::from_le_bytes(a);
+            let Some(bus) = self.ports.get_mut(usize::from(address / 1000)) else {
+                return Answer::Silent;
+            };
+            let Some(subnet) = bus.subnet else {
+                return Answer::Silent;
+            };
+            let Some((i, row)) = bus
+                .devices
+                .iter()
+                .enumerate()
+                .find(|(_, r)| r.address == address && r.present(now))
+            else {
+                return Answer::Silent;
+            };
+            let Some(mut op) = Operation::begin(
+                call,
+                setting,
+                subnet,
+                i as u8 + 1,
+                row.live.setback(),
+                self.setbacks,
+                now,
+            ) else {
+                return Answer::Silent;
+            };
+            if row.setpoint_device {
+                op.fail();
+            }
+            return settings::accept(&mut bus.job, op, call);
+        }
         match call.method {
             0x10f | 0x16f => {
                 match (call.service, call.body) {
@@ -364,6 +457,13 @@ impl Inventory {
         let address = u16::from_le_bytes(address);
         if call.method == INVENTORY && self.remaining != 0 {
             return Answer::Reply(call.error(1));
+        }
+        if call.method == INVENTORY && call.service == 0 {
+            for p in &mut self.ports {
+                if p.job.active() && (address == 0 || address == p.job.address) {
+                    p.job.fail();
+                }
+            }
         }
         let rows = self.ports.iter_mut().flat_map(|p| &mut p.devices);
         if call.method == INVENTORY && address == 0 {

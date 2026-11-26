@@ -70,6 +70,8 @@ def run(path, ram, fast=False):
     clock = 0
     edges = deque()
     inventory_at = None
+    setting_exchange = deque()
+    drive_bits = []
 
     def level(p, high, at):
         pin, t, ch, _ = PORTS[p]
@@ -85,6 +87,19 @@ def run(path, ram, fast=False):
     def gpio_write(uc, off, size, value, data):
         nonlocal pins
         if off in (0x18, 0x1C, 0):
+            tx = 1 << PORTS[0][3]
+            if setting_exchange:
+                if off == 0 and value & tx and not gpio[0] & tx:
+                    drive_bits.append("1" if pins & tx else "0")
+                elif off in (0x18, 0x1C) and gpio[0] & tx and value & tx:
+                    drive_bits.append("1" if off == 0x18 else "0")
+                elif off == 0 and not value & tx and gpio[0] & tx:
+                    expected, device_reply = setting_exchange.popleft()
+                    # Ten delimiter/ACK/EOF bits, then the driver's final release.
+                    assert "".join(drive_bits) == protected_bits(expected) + "0" * 11
+                    drive_bits.clear()
+                    if device_reply:
+                        inject(device_reply)
             if off == 0:
                 gpio[0] = value
             elif off == 0x18:
@@ -199,6 +214,16 @@ def run(path, ram, fast=False):
                 call(0x137,b"\x01\0\xff\xff",True)
             elif method == 0x137 and data[0] == 3:
                 assert data[5:] == bytes.fromhex("01000a06")
+                query = bytes.fromhex("6d700007 0300 00 00008000")
+                report = bytes.fromhex("6e700606 030007 010309")
+                setting_exchange.extend([
+                    (query, report),
+                    (bytes.fromhex("6df00007 0018 0300 020309"), None),
+                    (query, report),
+                ])
+                call(0x127, bytes.fromhex("010002"), True)
+            elif method == 0x127 and data[0] == 3:
+                assert not setting_exchange and data[5:] == bytes.fromhex("010001")
                 extension(2, b"\x01", True)
             elif method == 0x544BF002 and data[5:] == bytes([1]):
                 plant_inputs()
@@ -303,7 +328,7 @@ def run(path, ram, fast=False):
 
     cpu.mmio_map(0xE000C000, 0x1000, read, None, write, None)
     cpu.hook_add(UC_HOOK_CODE, rom, begin=0x7FFFFFF0, end=0x7FFFFFF0)
-    cpu.emu_start(base, 0xFFFFFFFF, count=18_000_000)
+    cpu.emu_start(base, 0xFFFFFFFF, count=40_000_000)
     assert entered, (clock, phase, results, actual[-10:])
     assert actual[:4] == [
         (6, bytes.fromhex(x))

@@ -36,6 +36,120 @@ fn address(reply: Reply) -> u16 {
 }
 
 #[test]
+fn mode_write_preserves_siblings_and_confirms_only_from_postwrite_read() {
+    let mut inv = Inventory::new();
+    observe(&mut inv, 0, 8, 24, 0x36f, &[0; 8], 0);
+    assert!(call(&mut inv, 0x127, 0, &[1, 0, 2, 0], 0).is_none());
+    let read = Request::new(0, &[0x6d, 0x70, 0, 7, 3, 0, 8, 0, 0, 128, 0]);
+    assert_eq!(inv.command_frame(0), read);
+    let sample = |inv: &mut Inventory, mode| {
+        observe(inv, 0, 8, 24, 0x2e7, &[3, 0, 7, mode, 3, 9], 1);
+    };
+    sample(&mut inv, 1); // Before our request has left the line.
+    inv.command_sent(0, true);
+    observe(&mut inv, 1, 8, 24, 0x2e7, &[3, 0, 7, 1, 3, 9], 1);
+    observe(&mut inv, 0, 0, 24, 0x2e7, &[3, 0, 7, 1, 3, 9], 1);
+    observe(&mut inv, 0, 8, 23, 0x2e7, &[3, 0, 7, 1, 3, 9], 1);
+    observe(&mut inv, 0, 8, 24, 0x2e7, &[4, 0, 7, 1, 3, 9], 1);
+    assert!(inv.command_frame(0).is_none());
+    sample(&mut inv, 1);
+    assert_eq!(
+        inv.command_frame(0),
+        Request::new(0, &[0x6d, 0xf0, 0, 7, 8, 24, 3, 0, 2, 3, 9])
+    );
+    sample(&mut inv, 2);
+    inv.command_sent(0, true);
+    assert_eq!(inv.command_frame(0), read);
+    sample(&mut inv, 2);
+    inv.command_sent(0, true);
+    assert!(inv.command_reply(0).is_none());
+    sample(&mut inv, 1); // Device kept its previous mode.
+    assert_eq!(
+        inv.command_reply(0).unwrap().payload(),
+        &[3, 0x27, 1, 0, 0, 1, 0, 1]
+    );
+    assert!(!inv.has_command(0));
+}
+
+#[test]
+fn setpoints_resolve_current_preserve_slots_and_report_observed_values() {
+    let mut inv = Inventory::new();
+    for (enable, selector, slot, want) in [
+        (1, 7, 3, [10, 99, 12, 99, 14]),
+        (1, 4, 4, [99, 11, 99, 13, 14]),
+        (1, 6, 6, [10, 11, 12, 13, 99]),
+        (0, 2, 2, [99; 5]),
+    ] {
+        call(&mut inv, 0x16f, 0, &[enable], 0);
+        observe(&mut inv, 0, 0, 1, 0x36f, &[0, 12, 0, 0, 0, 0, 0, 0], 0);
+        assert!(call(&mut inv, 0x13f, 0, &[24, 0, selector, 99], 0).is_none());
+        assert!(inv.command_frame(0).is_some());
+        inv.command_sent(0, true);
+        observe(&mut inv, 0, 0, 1, 0x2e7, &[5, 0, 31, 10, 11, 12, 13, 14], 0);
+        let mut bytes = [0x6d, 0xf0, 0, 9, 0, 1, 5, 0, 0, 0, 0, 0, 0];
+        bytes[8..].copy_from_slice(&want);
+        assert_eq!(inv.command_frame(0), Request::new(0, &bytes));
+        inv.command_sent(0, true);
+        assert!(inv.command_frame(0).is_some());
+        inv.command_sent(0, true);
+        observe(&mut inv, 0, 0, 1, 0x2e7, &[5, 0, 31, 88, 88, 88, 88, 88], 0);
+        assert_eq!(
+            &inv.command_reply(0).unwrap().payload()[5..],
+            &[24, 0, slot, 88]
+        );
+    }
+    inv.set_reporting(true);
+    observe(&mut inv, 0, 0, 1, 0x2e7, &[6, 0, 31, 10, 11, 12, 13, 14], 0);
+    assert_eq!(
+        inv.next_report(0).unwrap().payload(),
+        &[2, 0x47, 1, 0, 0, 24, 0, 3, 11]
+    );
+}
+
+#[test]
+fn unsupported_ambiguous_and_abandoned_operations_never_generate_an_update() {
+    let mut inv = Inventory::new();
+    let start = u32::MAX - 2;
+    observe(&mut inv, 0, 0, 1, 0x36f, &[0; 8], start);
+    let begin = |inv: &mut Inventory| {
+        assert!(call(inv, 0x127, 0, &[24, 0, 1], start).is_none());
+        assert!(inv.command_frame(0).is_some());
+        inv.command_sent(0, true);
+    };
+    for (block, out) in [(&[3, 0, 1, 2][..], 255), (&[3, 0, 7, 1, 3, 9], 1)] {
+        begin(&mut inv);
+        observe(&mut inv, 0, 0, 1, 0x2e7, block, start);
+        assert!(inv.command_frame(0).is_none());
+        assert_eq!(inv.command_reply(0).unwrap().payload()[7], out);
+    }
+    begin(&mut inv);
+    assert!(call(&mut inv, 0x127, 1, &[24, 0], start).is_some()); // Same port busy.
+    inv.command_expire(0, 7);
+    assert_eq!(inv.command_reply(0).unwrap().payload()[7], 255);
+    begin(&mut inv);
+    observe(&mut inv, 0, 0, 1, 0x2e7, &[3, 0, 7, 2, 3, 9], start);
+    observe(&mut inv, 0, 0, 2, 0x3e7, &[0, 1], start);
+    assert!(inv.command_frame(0).is_none());
+    assert_eq!(inv.command_reply(0).unwrap().payload()[7], 255);
+    observe(
+        &mut inv,
+        0,
+        0,
+        2,
+        0x22f,
+        &[0, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        start,
+    );
+    assert_eq!(
+        call(&mut inv, 0x127, 0, &[23, 0, 1], start)
+            .unwrap()
+            .payload()[7],
+        255
+    );
+    assert!(!inv.has_command(0));
+}
+
+#[test]
 fn full_walk_is_a_snapshot_with_one_terminator() {
     let mut inv = Inventory::default();
     for p in 0..PORTS {

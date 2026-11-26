@@ -9,14 +9,20 @@ pub(super) enum Field {
     Demand,
     Humidity,
     Setback,
+    Mode,
+    Heat,
+    Cool,
 }
 impl Field {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 8] = [
         Self::Temperature,
         Self::Floor,
         Self::Demand,
         Self::Humidity,
         Self::Setback,
+        Self::Mode,
+        Self::Heat,
+        Self::Cool,
     ];
     pub(super) fn from_method(method: u32) -> Option<Self> {
         Self::ALL.into_iter().find(|f| f.method() == method)
@@ -28,13 +34,19 @@ impl Field {
             Self::Demand => 0x12f,
             Self::Humidity => 0x150,
             Self::Setback => 0x177,
+            Self::Mode => 0x127,
+            Self::Heat => 0x13f,
+            Self::Cool => 0x147,
         }
     }
     pub(super) fn mask(self) -> u8 {
         1 << self as u8
     }
     pub(super) fn width(self) -> usize {
-        if matches!(self, Self::Temperature | Self::Floor) {
+        if matches!(
+            self,
+            Self::Temperature | Self::Floor | Self::Heat | Self::Cool
+        ) {
             2
         } else {
             1
@@ -49,6 +61,8 @@ pub(super) struct Telemetry {
     demand: u8,
     humidity: u8,
     setback: u8,
+    mode: u8,
+    targets: [[u8; 2]; 2],
     floor: Floor,
     pub(super) dirty: u8,
 }
@@ -70,12 +84,17 @@ fn temperature(data: &[u8], i: usize) -> u16 {
 }
 
 impl Telemetry {
+    pub(super) fn setback(&self) -> u8 {
+        self.setback
+    }
     pub(super) const EMPTY: Self = Self {
         air: 0,
         slab: 0,
         demand: 0,
         humidity: 0,
         setback: 0,
+        mode: 0,
+        targets: [[0; 2]; 2],
         floor: Floor::Unknown,
         dirty: 0,
     };
@@ -85,6 +104,8 @@ impl Telemetry {
         demand: 255,
         humidity: 255,
         setback: 255,
+        mode: 255,
+        targets: [[255; 2]; 2],
         ..Self::EMPTY
     };
     pub(super) fn sensor_setup(&mut self, mask: u8, values: &[u8]) -> Option<u8> {
@@ -116,6 +137,36 @@ impl Telemetry {
         } else {
             0
         })
+    }
+
+    pub(super) fn setting_report(&mut self, data: &[u8]) -> u8 {
+        let [block, 0, mask, values @ ..] = data else {
+            return 0;
+        };
+        match *block {
+            3 => {
+                let Some(mode) = block_byte(*mask, values, 0) else {
+                    return 0;
+                };
+                self.mode = mode;
+                Field::Mode.mask()
+            }
+            5 | 6 => {
+                let Some((i, _)) = super::settings::slots(self.setback) else {
+                    return 0;
+                };
+                let Some(value) = block_byte(*mask, values, i) else {
+                    return 0;
+                };
+                self.targets[usize::from(*block - 5)] = [self.setback, value];
+                if *block == 5 {
+                    Field::Heat.mask()
+                } else {
+                    Field::Cool.mask()
+                }
+            }
+            _ => 0,
+        }
     }
 
     /// Called only after the enclosing dispatcher checks the native payload length.
@@ -184,6 +235,9 @@ impl Telemetry {
             Field::Demand => self.demand.into(),
             Field::Humidity => self.humidity.into(),
             Field::Setback => self.setback.into(),
+            Field::Mode => self.mode.into(),
+            Field::Heat => u16::from_le_bytes(self.targets[0]),
+            Field::Cool => u16::from_le_bytes(self.targets[1]),
         }
     }
     fn body(&self, address: u16, field: Field) -> [u8; 4] {

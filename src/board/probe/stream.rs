@@ -70,6 +70,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
     let mut raw = false;
     let mut reboot = false;
     let mut occupied = [false; 5];
+    let mut command_tx = [false; 5];
     let mut sending: [Option<Attempt>; 5] = core::array::from_fn(|_| None);
     let mut ack: [LinkAck; 5] = core::array::from_fn(|_| LinkAck::default());
     let mut ack_pin: [Option<LineDriver>; 5] = core::array::from_fn(|_| None);
@@ -92,7 +93,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                     p,
                     frame.bytes,
                     Instant::now().as_secs() as u32,
-                    sending[p].is_none(),
+                    sending[p].is_none() && !inventory.has_command(p),
                 )
                 && let Some(req) = Request::new(p as u8, &body)
             {
@@ -113,11 +114,37 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                 out.enqueue(Kind::Invalid(p as u8), tpck::TN4, &data[..9 + bytes.len()]);
             }
             let t = read(TIMERS[INPUTS[p].1] + TC);
+            if !raw && inventory.has_command(p) {
+                inventory.command_expire(p, Instant::now().as_secs() as u32);
+                if (!command_tx[p] || inventory.command_finished(p))
+                    && sending[p].as_ref().is_some_and(|a| !a.started())
+                {
+                    sending[p] = None;
+                    command_tx[p] = false;
+                }
+                if sending[p].is_none() {
+                    if let Some(req) = inventory.command_frame(p) {
+                        sending[p] = Attempt::new(&req, INPUTS[p].0, t);
+                        command_tx[p] = sending[p].is_some();
+                        if !command_tx[p] {
+                            inventory.command_sent(p, false);
+                        }
+                    } else if out.can_receive()
+                        && let Some(reply) = inventory.command_reply(p)
+                    {
+                        out.enqueue(Kind::Control, tpck::TRPC, reply.payload());
+                    }
+                }
+            }
             if let Some(attempt) = sending[p].as_mut() {
                 if let Some(result) = attempt.poll(t) {
                     sending[p] = None;
                     if !raw {
-                        continue; // internal Normal-mode read; no Raw TxResult
+                        if core::mem::take(&mut command_tx[p]) {
+                            inventory
+                                .command_sent(p, matches!(result, Outcome::Ack | Outcome::NoAck));
+                        }
+                        continue;
                     }
                     let why = match result {
                         Outcome::Ack => 0,
@@ -207,13 +234,16 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                                 && matches!(call.method, 0x544bf002 | 0x544bf005)
                                 && call.service == 0
                             {
-                                for attempt in &mut sending {
-                                    if attempt.as_ref().is_some_and(|a| !a.started()) {
+                                for (p, attempt) in sending.iter_mut().enumerate() {
+                                    if !command_tx[p]
+                                        && attempt.as_ref().is_some_and(|a| !a.started())
+                                    {
                                         *attempt = None;
                                     }
                                 }
                             }
                             let busy = inventory.walking()
+                                || (0..5).any(|p| inventory.has_command(p))
                                 || occupied.contains(&true)
                                 || sending.iter().any(Option::is_some)
                                 || ack.iter().any(LinkAck::driving);
