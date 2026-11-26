@@ -10,6 +10,7 @@ mod board {
     use super::ptr;
     pub mod panel;
     pub mod probe;
+    mod transmit;
 
     const MAMCR: usize = 0xe01f_c000;
     const MAMTIM: usize = 0xe01f_c004;
@@ -147,8 +148,13 @@ extern "C" fn firmware_main() -> ! {
                 },
                 Some(cmd @ (Command::RxStream | Command::RxDiagnostics)) => {
                     drop(probe.take());
-                    board::probe::stream(cmd == Command::RxDiagnostics, &mut panel);
+                    board::probe::stream(cmd == Command::RxDiagnostics, &mut panel, None);
                 }
+                Some(Command::Send(request)) => {
+                    drop(probe.take());
+                    board::probe::stream(true, &mut panel, Some(&request));
+                }
+                Some(Command::BadSend) => board::send(b"ERR TX\r\n"),
                 Some(Command::EnterIsp) => {
                     drop(probe.take());
                     panel.stop();

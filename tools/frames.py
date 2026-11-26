@@ -52,8 +52,15 @@ class FrameAudit:
         self.require_stats = require_stats
         self.seen = [Counter() for _ in range(5)]
         self.drops = {}
+        self.tx_result = None
 
     def record(self, line: bytes) -> str:
+        if line.startswith(b"T "):
+            match = re.fullmatch(rb"T ([0-4]) (ACK|NOACK|ARBITRATION|ECHO|BAD-END|BUSY|LATE|PIN-BUSY|STOPPED)\r\n", line)
+            if not match or self.drops or self.tx_result is not None:
+                raise ValueError(f"invalid or duplicate TX result: {line!r}")
+            self.tx_result = int(match[1]), match[2].decode("ascii")
+            return f"port={self.tx_result[0]} tx_result={self.tx_result[1]}"
         if not line.startswith(b"D "):
             if self.drops:
                 raise ValueError("frame received after diagnostic summaries")

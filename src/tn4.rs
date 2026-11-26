@@ -1,5 +1,7 @@
 //! Listen-only tN4 link decoder. Logic high is dominant; idle is low.
 
+pub mod tx;
+
 const BIT_US: u32 = 2500;
 const MAX_BYTES: usize = 4 + 63;
 

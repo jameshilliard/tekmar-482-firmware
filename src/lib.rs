@@ -14,15 +14,26 @@ pub enum Command {
     RxEnd,
     RxStream,
     RxDiagnostics,
+    Send(tn4::tx::Request),
+    BadSend,
     EnterIsp,
 }
 
 /// Accept whole lines only. A damaged or oversized line is ignored until LF.
-#[derive(Default)]
 pub struct Decoder {
-    bytes: [u8; b"ENTER-ISP\r".len()],
+    bytes: [u8; 145],
     len: usize,
     discard: bool,
+}
+
+impl Default for Decoder {
+    fn default() -> Self {
+        Self {
+            bytes: [0; 145],
+            len: 0,
+            discard: false,
+        }
+    }
 }
 
 impl Decoder {
@@ -39,6 +50,9 @@ impl Decoder {
                 (false, b"RX-STREAM") => Some(Command::RxStream),
                 (false, b"RX-DIAG") => Some(Command::RxDiagnostics),
                 (false, b"ENTER-ISP") => Some(Command::EnterIsp),
+                (false, [b'T', b'X', b' ', request @ ..]) => {
+                    Some(tn4::tx::Request::parse(request).map_or(Command::BadSend, Command::Send))
+                }
                 _ => None,
             };
             self.len = 0;

@@ -1,5 +1,7 @@
+use super::super::transmit::Attempt;
 use super::super::{LSR, THRE, UART0};
 use super::{CCR, CR0, Capture, INPUTS, IR, TC, TIMERS, read, send, write};
+use tekmar_482_firmware::tn4::tx::Request;
 use tekmar_482_firmware::tn4::{Frame, Receiver, Trailer};
 
 fn hex(dst: &mut [u8], value: u32) {
@@ -34,14 +36,24 @@ impl Outbox {
         }
         let end = 20 + f.bytes.len() * 2;
         line[end..end + 2].copy_from_slice(b"\r\n");
-        if end + 2 > self.buf.len() - self.len {
+        if end + 2 + 32 > self.buf.len() - self.len {
             self.dropped[port] = self.dropped[port].saturating_add(1);
             return;
         }
-        for &b in &line[..end + 2] {
+        self.append(&line[..end + 2]);
+    }
+
+    fn append(&mut self, line: &[u8]) {
+        for &b in line {
             self.buf[(self.tail + self.len) % self.buf.len()] = b;
             self.len += 1;
         }
+    }
+
+    fn result(&mut self, port: u8, outcome: &[u8]) {
+        self.append(&[b'T', b' ', b'0' + port, b' ']);
+        self.append(outcome);
+        self.append(b"\r\n");
     }
 
     fn pump(&mut self) {
@@ -57,7 +69,7 @@ impl Outbox {
     }
 }
 
-pub fn stream(diagnostic: bool, panel: &mut super::super::panel::Panel) {
+pub fn stream(diagnostic: bool, panel: &mut super::super::panel::Panel, request: Option<&Request>) {
     let mut rx: [Receiver; 5] = core::array::from_fn(|_| Receiver::default());
     let mut rising = [true; 5];
     let mut out = Outbox {
@@ -67,14 +79,30 @@ pub fn stream(diagnostic: bool, panel: &mut super::super::panel::Panel) {
         dropped: [0; 5],
     };
     let mut max_delay = [0; 5];
-    send(if diagnostic {
+    send(if request.is_some() {
+        b"OK TX\r\n"
+    } else if diagnostic {
         b"OK DIAG\r\n"
     } else {
         b"OK FRAMES\r\n"
     });
     let capture = Capture::arm(5); // positive edges first; idle is low
+    let mut attempt = request.and_then(|r| Attempt::new(r, INPUTS[usize::from(r.port)].0, 0));
+    if let Some(r) = request
+        && attempt.is_none()
+    {
+        out.result(r.port, b"PIN-BUSY");
+    }
     while read(LSR) & 1 == 0 {
         let now = TIMERS.map(|t| read(t + TC));
+        if let Some(tx) = &mut attempt
+            && let Some(outcome) = tx.poll(now[0])
+        {
+            drop(attempt.take()); // release the line before reporting the result
+            if let Some(r) = request {
+                out.result(r.port, outcome);
+            }
+        }
         let pending = TIMERS.map(|t| read(t + IR));
         for (port, (_, timer, ch)) in INPUTS.into_iter().enumerate() {
             let t = TIMERS[timer];
@@ -103,6 +131,11 @@ pub fn stream(diagnostic: bool, panel: &mut super::super::panel::Panel) {
         panel.poll();
     }
     read(UART0); // any byte stops capture; subsequent commands use normal training
+    if attempt.take().is_some()
+        && let Some(r) = request
+    {
+        out.result(r.port, b"STOPPED");
+    }
     drop(capture);
     while out.len != 0 {
         out.pump();

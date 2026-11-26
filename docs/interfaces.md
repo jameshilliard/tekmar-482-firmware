@@ -2,9 +2,9 @@
 
 The LPC2146 has a UART0 host link and five tN4 receive paths. The table
 uses the logical port numbers in the stock J1196J sampling routines, not
-thermostat addresses. The TX pins are listed for reference only.
+thermostat addresses. Only the explicit TX command can drive a bus.
 
-| Port | RX pin | Capture input | TX pin (untouched) | Stock sample routine |
+| Port | RX pin | Capture input | TX pin | Stock sample routine |
 | ---: | --- | --- | --- | --- |
 | 0 | P0.4 | CAP0.1 | P0.28 | 0x7f24 |
 | 1 | P0.11 | CAP1.1 | P0.13 | 0x823c |
@@ -68,7 +68,7 @@ bits. SOF is high. Header, payload and 15-bit check word are MSB-first.
 Stuffing continues across those fields; the check is computed over SOF and
 the unstuffed header and payload (polynomial 0x4599). The low CRC delimiter,
 ACK slot, low ACK delimiter and seven low EOF bits are checked separately.
-The receiver never asserts an ACK, sends a probe, or drives any bus.
+Passive capture never asserts an ACK, sends a probe, or drives any bus.
 
 Send `A\nRX-STREAM\n`; the gateway replies `OK FRAMES\r\n`. Each record is
 one ASCII line, `F port start_us crc status header_and_payload\r\n`. The
@@ -161,6 +161,30 @@ their outcomes, and reconciles delivered frames and drops for all five ports.
 Service delay measures from the capture latch to re-arming the next edge;
 the timer has no FIFO or hardware overrun counter. A clean summary does not
 prove a pulse was never missed.
+
+### One-shot transmit
+
+`board.py send PORT --tx BUS HEX --seconds 10` sends one native header and
+payload while monitoring all five ports. The equivalent SRAM trial takes
+`--frames 10 --tx BUS HEX`. The host supplies the complete header, including
+source, and the payload; the firmware supplies stuffing, bus CRC and trailer.
+The UART request is `A\nTX BUS HEX CHECK\n`, where CHECK is four hex digits
+of CRC-16/CCITT (poly 0x1021, initial 0xffff, no reflection or final XOR)
+over one binary port byte followed by the header and payload. An invalid
+length, port or check returns `ERR TX` without driving a pin.
+
+After `OK TX`, the sender waits for 16 quiet bit periods, attempts the
+frame once, checks its receive echo at each bit center and releases the
+selected driver before emitting `T port result`. It does not retry.
+`ACK` and `NOACK` describe only the link slot; `ARBITRATION` denotes a
+dominant bit while sending recessive data, `ECHO` the reverse mismatch,
+and `BAD-END` a dominant delimiter or EOF. `LATE` aborts a missed timing
+window, `BUSY` means no idle opportunity within five seconds, `PIN-BUSY`
+means the TX pin was not a free GPIO input, and `STOPPED` means the host
+ended capture before completion. The host requires both an ACK result and
+the matching CRC-verified echo. Verify device changes independently with
+a fresh application-level readback. Capture continues until the host stops
+it; diagnostic summaries and END are the same as for RX-DIAG.
 
 ### Front panel
 

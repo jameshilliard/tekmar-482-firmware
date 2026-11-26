@@ -54,13 +54,14 @@ async def main():
     parser.add_argument("--panel-test", action="store_true", help="cycle and read back each panel LED")
     parser.add_argument("--frames", type=int, metavar="SECONDS", help="monitor live frames from SRAM")
     parser.add_argument("--diagnostics", action="store_true", help="verify receiver totals with --frames")
+    parser.add_argument("--tx", nargs=2, metavar=("BUS", "HEX"), help="send one native frame during --frames")
     parser.add_argument("--from-app", action="store_true",
                         help="enter ISP from the installed dev image and return to it after the trial")
     args = parser.parse_args()
     if args.frames is not None and args.frames < 1:
         parser.error("--frames must be positive")
-    if args.diagnostics and not args.frames:
-        parser.error("--diagnostics requires --frames")
+    if (args.diagnostics or args.tx) and not args.frames:
+        parser.error("--diagnostics and --tx require --frames")
     image = args.ram_bin.read_bytes()
     check(image, ram=True)
     async with connect(args.port) as port:
@@ -76,7 +77,8 @@ async def main():
             if args.probe:
                 await probe(port)
             if args.frames:
-                await monitor(port, args.frames, diagnostics=args.diagnostics)
+                tx = (int(args.tx[0]), bytes.fromhex(args.tx[1])) if args.tx else None
+                await monitor(port, args.frames, diagnostics=args.diagnostics, tx=tx)
         finally:
             await request(port, True)
             await asyncio.sleep(0.1)  # Let ROM enable autobaud before sending its sync byte.

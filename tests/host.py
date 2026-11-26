@@ -96,5 +96,27 @@ class HelperTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 describe(b"F 2 000061a8 0e2f A " + raw + b"\r\n")
 
+    def test_send_requires_acknowledged_echo(self):
+        for echoed in (False, True):
+            with self.subTest(echoed=echoed):
+                master, proc = self.start_helper("send", "--seconds", "1", "--tx", "0", "12300001a5")
+                self.expect(master, b"A\nID?\n")
+                os.write(master, b"TEKMAR-482-DEV\r\n")
+                self.expect(master, b"A\nTX 0 12300001a5 b45e\n")
+                os.write(master, b"OK TX\r\n")
+                if echoed:
+                    os.write(master, b"F 0 00009c40 0e2f A 12300001a5\r\n")
+                os.write(master, b"T 0 ACK\r\n")
+                self.expect(master, b"\n")
+                for port in range(5):
+                    ack = int(echoed and port == 0)
+                    counts = [30 * ack, ack, 0, 0, ack, 0, 0, 0, 0, 12, 0, 0]
+                    os.write(master, (f"D {port}" + "".join(f" {n:08x}" for n in counts) + "\r\n").encode())
+                os.write(master, b"END 00000000\r\n")
+                _, err = proc.communicate(timeout=3)
+                self.assertEqual(proc.returncode, 0 if echoed else 1, err)
+                if not echoed:
+                    self.assertIn(b"missing CRC-verified", err)
+
 if __name__ == "__main__":
     unittest.main()

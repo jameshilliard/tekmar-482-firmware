@@ -6,6 +6,7 @@
 
 import argparse
 import asyncio
+import binascii
 import re
 import sys
 from typing import NamedTuple
@@ -102,12 +103,32 @@ async def probe(port) -> None:
         print(f"Port {idx}: {status}")
 
 
-async def monitor(port, seconds: float, *, diagnostics=False) -> None:
+def tx_command(bus, data):
+    if not 0 <= bus <= 4 or len(data) < 4 or (data[3] & 63) + 4 != len(data):
+        raise ValueError("expected port 0..4 and a complete tN4 header and payload")
+    checksum = binascii.crc_hqx(bytes([bus]) + data, 0xffff)
+    return f"A\nTX {bus} {data.hex()} {checksum:04x}\n".encode("ascii")
+
+
+async def monitor(port, seconds: float, *, diagnostics=False, tx=None, on_record=None) -> None:
     await identify(port)
-    audit = FrameAudit(require_stats=diagnostics)
-    await port.write(b"A\nRX-DIAG\n" if diagnostics else b"A\nRX-STREAM\n")
-    if await port.readline(64) != (b"OK DIAG\r\n" if diagnostics else b"OK FRAMES\r\n"):
+    audit = FrameAudit(require_stats=diagnostics or tx is not None)
+    command, greeting = ((b"A\nRX-DIAG\n", b"OK DIAG\r\n") if diagnostics else
+                         (b"A\nRX-STREAM\n", b"OK FRAMES\r\n"))
+    if tx is not None:
+        command, greeting = tx_command(*tx), b"OK TX\r\n"
+    await port.write(command)
+    if await port.readline(64) != greeting:
         raise RuntimeError("frame stream did not start")
+    echoed = False
+    def accept(line):
+        nonlocal echoed
+        print(audit.record(line), flush=True)
+        if tx is not None and line.startswith(b"F "):
+            _, bus, _, _, status, body = line.split()
+            echoed |= int(bus) == tx[0] and status == b"A" and bytes.fromhex(body.decode()) == tx[1]
+        if on_record is not None:
+            on_record(line)
     loop = asyncio.get_running_loop()
     deadline = loop.time() + seconds
     try:
@@ -116,7 +137,7 @@ async def monitor(port, seconds: float, *, diagnostics=False) -> None:
                 line = await port.readline(160, timeout=remaining)
             except asyncio.TimeoutError:
                 break
-            print(audit.record(line), flush=True)
+            accept(line)
     finally:
         await port.write(b"\n")
         deadline = loop.time() + 4
@@ -125,21 +146,30 @@ async def monitor(port, seconds: float, *, diagnostics=False) -> None:
             if (dropped := dropped_records(line)) is not None:
                 audit.finish(dropped)
                 break
-            print(audit.record(line), flush=True)
+            accept(line)
+    if tx is not None and audit.tx_result != (tx[0], "ACK"):
+        raise RuntimeError(f"transmit not acknowledged: {audit.tx_result}")
+    if tx is not None and not echoed:
+        raise RuntimeError("missing CRC-verified, acknowledged echo on the selected port")
 
 
 async def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["identify", "probe", "frames", "diagnostics", "panel", "led-test", "enter-isp"])
+    parser.add_argument("action", choices=["identify", "probe", "frames", "diagnostics", "send", "panel", "led-test", "enter-isp"])
     parser.add_argument("port", help="local serial device (requires exclusive access)")
     parser.add_argument("--baud", type=int, default=9600)
     parser.add_argument("--seconds", type=int, default=30, help="frame capture duration")
+    parser.add_argument("--tx", nargs=2, metavar=("BUS", "HEX"), help="one native frame, for send only")
     args = parser.parse_args()
     if args.seconds < 1:
         parser.error("--seconds must be positive")
+    if (args.action == "send") != bool(args.tx):
+        parser.error("send requires --tx BUS HEX")
     try:
         async with connect(args.port, args.baud) as port:
-            if args.action in ("frames", "diagnostics"):
+            if args.action == "send":
+                await monitor(port, args.seconds, tx=(int(args.tx[0]), bytes.fromhex(args.tx[1])))
+            elif args.action in ("frames", "diagnostics"):
                 await monitor(port, args.seconds, diagnostics=args.action == "diagnostics")
             elif args.action in ("panel", "led-test"):
                 await panel(port, args.action == "led-test")
