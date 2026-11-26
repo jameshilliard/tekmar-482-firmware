@@ -65,9 +65,9 @@ the request body is empty. All integers are little endian.
 Version 2 event counts start at zero at boot, survive mode changes and
 saturate at 2^64-1 instead of wrapping. Subtract snapshots from the same
 boot. Hardware timer readings and per-frame timestamps are still u32 and
-wrap; their width does not limit lifetime counts. Older custom wire
-version 1 used u32 for all the above counts, with wrapping drop counters.
-Stock tRPC, Raw data records and Normal trace event layouts are unchanged.
+wrap; their width does not limit lifetime counts. The host requires the
+current custom wire version and does not decode previous diagnostic
+layouts. This check does not apply to commands supported by stock firmware.
 
 An ordinary capability probe must never change operating mode. Stock
 NullMethod means the extension isn't available; a timeout is not evidence

@@ -11,7 +11,7 @@ from contextlib import nullcontext
 from pathlib import Path
 from typing import NamedTuple
 
-from bridge_diagnostics import LAYOUTS
+from bridge_diagnostics import CAPTURE_COUNTERS, MAX_COUNTER, PANEL, PORT_DROPS, WIRE_VERSION
 from frames import describe, encode
 from port import connect
 
@@ -51,8 +51,8 @@ async def call(port, method, body=b"", *, update=False, receive=None):
     return await asyncio.wait_for(wait(), 5)
 
 
-async def panel_state(port, layout):
-    state = PanelState(*layout.panel.unpack(await call(port, 7)))
+async def panel_state(port):
+    state = PanelState(*PANEL.unpack(await call(port, 7)))
     if max(state.boot, state.inputs) > 3 or max(state.pins, state.leds) > 63 or state.test > 1:
         raise ValueError(f"invalid panel flags: {state}")
     if state.leds != state.pins:
@@ -60,15 +60,15 @@ async def panel_state(port, layout):
     return state
 
 
-async def check_panel_input(port, initial, which, seconds, layout):
+async def check_panel_input(port, initial, which, seconds):
     print("Use only controls accessible with the enclosure closed.", flush=True)
     if which == "test":
-        if initial.inputs & 2 or initial.pins & 32 or initial.test or initial.presses == layout.maximum:
+        if initial.inputs & 2 or initial.pins & 32 or initial.test or initial.presses == MAX_COUNTER:
             raise RuntimeError("start with Test released, Test LED off and press counter available")
         print("Waiting for a Test press: hold for one second, then release. "
               "Watch the Test LED.", flush=True)
     elif which == "dip":
-        if initial.changes >= layout.maximum - 1:
+        if initial.changes >= MAX_COUNTER - 1:
             raise RuntimeError("DIP counter cannot record two more changes")
         print(f"Waiting for Reporting DIP to change from {initial.inputs & 1} "
               "and return to its starting position.", flush=True)
@@ -79,7 +79,7 @@ async def check_panel_input(port, initial, which, seconds, layout):
     asserted = False
     lit = False
     while loop.time() < deadline:
-        state = await panel_state(port, layout)
+        state = await panel_state(port)
         if state.boot != initial.boot:
             raise RuntimeError("boot input state changed during panel test")
         if which == "test":
@@ -114,14 +114,13 @@ async def check_panel_input(port, initial, which, seconds, layout):
 
 
 async def panel(port, test=False, *, check_input=None, seconds=60):
-    caps = await identify(port)
-    layout = LAYOUTS[caps[0]]
-    state = await panel_state(port, layout)
+    await identify(port)
+    state = await panel_state(port)
     print(f"panel: DIP at boot={state.boot & 1} now={state.inputs & 1} "
           f"test_button={state.inputs >> 1} presses={state.presses} DIP_changes={state.changes} "
           f"LED_pin_mask=0x{state.pins:02x}")
     if check_input is not None:
-        await check_panel_input(port, state, check_input, seconds, layout)
+        await check_panel_input(port, state, check_input, seconds)
         return
     if not test:
         return
@@ -130,7 +129,7 @@ async def panel(port, test=False, *, check_input=None, seconds=60):
     observed = []
     deadline = asyncio.get_running_loop().time() + 5
     while asyncio.get_running_loop().time() < deadline:
-        state = await panel_state(port, layout)
+        state = await panel_state(port)
         if not state.test:
             break
         if not observed or observed[-1] != state.pins:
@@ -148,8 +147,10 @@ async def identify(port):
             await port.write(preamble)
             await asyncio.sleep(0.08)
     caps = await call(port, 1)
-    if len(caps) != 4 or caps[0] not in LAYOUTS or caps[1] > 1 or caps[2] != 5:
+    if len(caps) != 4 or caps[1] > 1 or caps[2] != 5:
         raise RuntimeError("missing binary bridge capabilities")
+    if caps[0] != WIRE_VERSION:
+        raise RuntimeError(f"unsupported custom bridge wire version {caps[0]}; expected {WIRE_VERSION}")
     return caps
 
 
@@ -164,11 +165,10 @@ async def request(port, enter_isp):
 
 
 async def probe(port):
-    caps = await identify(port)
-    capture = LAYOUTS[caps[0]].capture
-    first = capture.unpack(await call(port, 10))
+    await identify(port)
+    first = CAPTURE_COUNTERS.unpack(await call(port, 10))
     await asyncio.sleep(1)
-    second = capture.unpack(await call(port, 10))
+    second = CAPTURE_COUNTERS.unpack(await call(port, 10))
     for p in range(5):
         print(f"Port {p}: {second[2+p]-first[2+p]} edges; last tick {second[7+p]}")
 
@@ -222,7 +222,7 @@ async def monitor(port, seconds, *, diagnostics=False, tx=None, on_record=None,
         raise RuntimeError(f"send not confirmed: {result!r}")
     if diagnostics:
         for p in range(5):
-            actual, valid, invalid = LAYOUTS[caps[0]].drops.unpack(await call(port, 3, bytes([p])))
+            actual, valid, invalid = PORT_DROPS.unpack(await call(port, 3, bytes([p])))
             if actual != p:
                 raise RuntimeError("wrong stats port")
             print(f"port={p} dropped_valid={valid} dropped_invalid={invalid}")

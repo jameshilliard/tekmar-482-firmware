@@ -113,10 +113,20 @@ class HelperTest(unittest.TestCase):
 
     def test_without_update_capability_no_handoff(self):
         master, proc = self.start_helper("enter-isp")
-        self.exchange(master, 1, bytes([1, 0, 5, 1]))
+        self.exchange(master, 1, bytes([2, 0, 5, 1]))
         _, err = proc.communicate(timeout=3)
         self.assertNotEqual(proc.returncode, 0, err)
         self.assertFalse(select.select([master], [], [], 0)[0])
+
+    def test_retired_custom_version_stops_before_panel_or_rom_handoff(self):
+        for action in ("panel", "enter-isp"):
+            with self.subTest(action=action):
+                master, proc = self.start_helper(action)
+                self.exchange(master, 1, bytes([1, 0, 5, 7]))
+                out, err = proc.communicate(timeout=3)
+                self.assertNotEqual(proc.returncode, 0)
+                self.assertIn(b"unsupported custom bridge wire version 1", out + err)
+                self.assertFalse(select.select([master], [], [], 0)[0])
 
     def test_probe(self):
         master, proc = self.start_helper("probe")
