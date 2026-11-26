@@ -26,12 +26,16 @@ RAW_SENDS = (SCENE, bytes.fromhex("21f00002 0401"), bytes.fromhex("31f00005 1ebf
              bytes.fromhex("01000003 000102"), bytes.fromhex("20000001 01"))
 RAW_READS = ((bytes.fromhex("6d70000b 100000 00008000 00000000"), bytes.fromhex("6e70060a 10007f 90020304050607")),
              (bytes.fromhex("6d70000b 380000 00008000 02000000"), bytes.fromhex("6e70060b 3800ff 7a 90020304050607")),
+             (bytes.fromhex("6d70000b 090000 00008000 00000000"), bytes.fromhex("6e700608 09001f 000205070a")),
              (bytes.fromhex("17f00003 11 01 1b"), bytes.fromhex("57e250c5 19 01 1b1204")),
              (bytes.fromhex("17f00004 12 02 1922"), bytes.fromhex("57e250c8 1a 02 220006 190300")))
 TELEMETRY = ((1, bytes.fromhex("7cf25fca bc07 00c0 0000 19ff f9 ca")),
              (3, bytes.fromhex("7ce25fcb bc07 00c0 0000 19ff f9 ca35")),
              (2, bytes.fromhex("76f250c8 a4 62 2a 0000 07 0080")),
              (4, bytes.fromhex("777250cd 65 88 07 00 2c06 13 ff 00c0 e4 b005")),
+             (2, bytes.fromhex("65f250c5 69 1006 0080")),
+             (2, bytes.fromhex("66f250c4 81 2a 0a06")),
+             (1, bytes.fromhex("723250ca 02 81 27 2206 29 2a2b 23 37")),
              (0, bytes.fromhex("6e7250c6 030007 07 03 05")),
              (4, bytes.fromhex("6f7250c4 65 f2 ca 35")),
              (4, bytes.fromhex("6f7250c3 68 0d ff")),
@@ -593,7 +597,8 @@ def run(path, ram, fast=False):
 
     cpu.mmio_map(0xE000C000, 0x1000, read, None, write, None)
     cpu.hook_add(UC_HOOK_CODE, rom, begin=0x7FFFFFF0, end=0x7FFFFFF0)
-    cpu.emu_start(base, 0xFFFFFFFF, count=150_000_000)
+    # The scenario runs real ARM instructions while each synthetic tN4 bit elapses.
+    cpu.emu_start(base, 0xFFFFFFFF, count=200_000_000)
     assert entered, (clock, phase, [len(x) for x in exchanges], results, actual[-10:])
     assert actual[:4] == [
         (6, bytes.fromhex(x))

@@ -123,6 +123,27 @@ neither confirms the user's mode selection. A changed operating channel
 can prompt an addressed read of block `0003`. A `2df` setting update is
 also only a request: the device's subsequent `2e7` report is the evidence.
 
+**Thermostat targets and outputs.** Blocks `0005/0006/0007/0009/A4/A5`
+have separate Wake, Unoccupied, Occupied, Sleep and Away bytes. Block 7
+adds a floor maximum, not another setback. Only supported positions are
+settings. Heat, cool and floor use degE. Block 9 is a ventilation
+requirement, not fan speed: zero means Auto. The J1196J block handler
+copies its bytes unchanged to FanPercent; [tekmar's FanPercent specification](https://www.watts.com/our-story/brands/tekmar/tha)
+uses steps of 10% for models 544/545/546 and 1% otherwise. Block 8's fan
+setup is separate: SW 11 accepts a stage assigned fan 1 or 2, or enabled
+ventilation, except that ventilation on both fans is off for a two-speed
+fan. An absent setup byte is not a disabled fan.
+
+`25F` carries two two-bit output states and duct/coil words, not a percent.
+In `26F`, J1196J at `0x6214` uses the full status octet: only 0 and 1
+carry a primary floor target. Other values are alternate targets. The
+measured floor word is independent. In `323`, the control RH, optional
+current humidify/dehumidify targets and raw sensor bytes are distinct.
+Keep the dewpoint word raw unless its unit is independently established.
+`A3` enables each actuator separately; `A4/A5` are its **stored**
+setback tables. Neither a humidity measurement nor the current targets
+establish that an actuator is configured or that a stored slot changed.
+
 The [addressed block catalog](tn4-blocks.md) covers the 166 block IDs in
 the 483 SW 11 registry, including plant, pump and heat-pump diagnostics.
 

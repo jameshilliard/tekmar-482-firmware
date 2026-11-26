@@ -361,13 +361,12 @@ impl Telemetry {
             }
             0x26f => {
                 self.slab = temperature(data, 2);
-                let target =
-                    if self.configured(Setting::Slab) && self.setback < 7 && data[0] & 7 < 2 {
-                        self.targets[2] = [self.setback, data[1]];
-                        Field::SlabTarget.mask()
-                    } else {
-                        0
-                    };
+                let target = if self.configured(Setting::Slab) && self.setback < 7 && data[0] < 2 {
+                    self.targets[2] = [self.setback, data[1]];
+                    Field::SlabTarget.mask()
+                } else {
+                    0
+                };
                 return target
                     | match self.floor {
                         Floor::Only => {

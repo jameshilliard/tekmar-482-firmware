@@ -17,6 +17,7 @@ from payloads.scenes import NativeScene, SceneReport, SceneResponse
 from payloads.schedules import DailyEvents, ScheduleBinding, ScheduleCycle, ScheduleEvent, ScheduleProfile, ScheduleStatus
 from payloads.sensors import SensorRole as R, SensorSlot, ThermostatSensors
 from payloads.snowmelt import SnowmeltAddress, SnowmeltApplication, SnowmeltOperatingState, SnowmeltPair, SnowmeltReport, WaterDetection
+from payloads.thermostat import FanDuctStatus, FanSetup, HumiditySetup, HumidityStatus, SlabStatus, TargetSlot, TargetTable, ThermostatTarget as T
 from payloads.water import HeatSource, LoopAssignment, LoopKind, LoopSetupSlot, LoopTopology
 from payloads.writes import BlockPatch, NativeField as F, WritableBlock
 
@@ -26,6 +27,44 @@ def decode(mid, hex_bytes):
 
 
 class PayloadTests(unittest.TestCase):
+    def test_thermostat_operating_samples_do_not_supply_settings(self):
+        r = Reader(bytes.fromhex("e9 0a06 00c0 ca"))
+        fan = FanDuctStatus.read(r)
+        self.assertEqual((fan.fan1, fan.fan2, fan.flags, r.remaining), (1, 2, 0xe9, b"\xca"))
+        self.assertEqual(fan.fields()["coil_temp"], "unavailable")
+        for status in range(256):
+            self.assertEqual(SlabStatus.read(Reader(bytes([status, 42, 0, 6]))).primary, status < 2)
+        r = Reader(bytes.fromhex("02 81 00 3412 22 00ff 00 39 ca35"))
+        rh = HumidityStatus.read(r)
+        self.assertEqual((rh.relative_percent, rh.sensor_bytes, rh.humidify_target_raw,
+                          rh.dehumidify_target_raw, r.remaining), (0, b"\0\xff", 0, 57, b"\xca\x35"))
+        self.assertIsNone(HumidityStatus.read(Reader(bytes.fromhex("0000ff000000"))).relative_percent)
+
+    def test_target_tables_respect_mask_units_and_floor_maximum(self):
+        for target in T:
+            fields = decode(0x2e7, f"{target:02x}00 15 02 03 ff")
+            t = TargetTable.from_report("544", target, fields)
+            self.assertEqual(t.slots, (2, None, 3, None, 255))
+            self.assertEqual(t.value(TargetSlot.WAKE), 1 if target.temperature else 20 if target is T.FAN else 2)
+            self.assertIsNone(t.value(TargetSlot.AWAY))
+        floor = TargetTable.from_report("538", T.FLOOR, decode(0x2e7, "0700 21 00 48"))
+        self.assertEqual((floor.raw(TargetSlot.WAKE), floor.value(TargetSlot.WAKE), floor.maximum_raw), (0, None, 72))
+        for model in ("544", "545", "546", "553"):
+            t = TargetTable.from_report(model, T.FAN, decode(0x2e7, "0900 07 00 09 0b"))
+            self.assertEqual((t.value(TargetSlot.WAKE), t.value(TargetSlot.UNOCCUPIED), t.value(TargetSlot.OCCUPIED)),
+                             (0, 9, 11) if model == "553" else (0, 90, None))
+
+    def test_fan_and_humidity_enable_need_the_actual_setup_bytes(self):
+        for data, enabled in (("00", None), ("01 00", None), ("01 10", True), ("02 04", True),
+                              ("03 02 0c", False), ("03 01 0c", True), ("03 ff 03", False)):
+            self.assertEqual(FanSetup.from_report(decode(0x2e7, "0800 " + data)).enabled, enabled)
+        setup = HumiditySetup.from_report(decode(0x2e7, "a300 03 ff 00"))
+        self.assertIsNone(setup.enabled(T.HUMIDIFY))
+        self.assertFalse(setup.enabled(T.DEHUMIDIFY))
+        setup = HumiditySetup.from_report(decode(0x2e7, "a300 02 02"))
+        self.assertIsNone(setup.enabled(T.HUMIDIFY))
+        self.assertTrue(setup.enabled(T.DEHUMIDIFY))
+
     def test_schedule_status_is_not_a_schedule_assignment(self):
         for previous in range(8):
             for current in range(8):

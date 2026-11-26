@@ -370,6 +370,8 @@ fn slab_requires_enabled_floor_sensor_and_preserves_maximum_in_all_slot_updates(
     );
     observe(&mut inv, 0, 0, 1, 0x26f, &[2, 70, 10, 0], 1);
     assert!(!core::iter::from_fn(|| inv.next_report(1)).any(|r| r.payload()[1] == 0x4f));
+    observe(&mut inv, 0, 0, 1, 0x26f, &[0x81, 50, 10, 0], 1);
+    assert!(!core::iter::from_fn(|| inv.next_report(1)).any(|r| r.payload()[1] == 0x4f));
 }
 
 #[test]
