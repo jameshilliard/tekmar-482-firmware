@@ -345,6 +345,37 @@ are raw; field width alone does not establish a temperature scale.
 | 16 | Staged electric: state, stages on, stages available, sensor u16. |
 | 17, 18 | On/off injection pump or variable-speed pump: state, sensor u16. |
 
+**Equipment identity.** The 483 SW 11 plant logger indexes staged boilers and
+heat pumps by subtype and device ID. Retain that pair *within* the reporting
+port, header subnet and node. Neither the device ID nor the low count nibble
+is a tN4 address, loop number or an addressed runtime register selector. A
+modulating boiler can report ID zero and total zero. Keep the report; do not
+infer that a zero or reduced total removes other equipment. An observed
+output list is not a confirmed inventory.
+
+For a staged boiler or chiller the two masks are independent and stage 1 is
+bit zero. A heat pump or staged electric output reports **counts**, not
+numbered stages. A ratio of stages on can only be derived when the available
+count is nonzero and the on count does not exceed it. It is not a modulation
+percentage. Neither a pump's two-bit status nor a six-bit mixing actuator
+field is a measured boiler firing percentage.
+
+**Demand and commands.** StageHeatDemand identifies a water subnet in the
+payload and one of two stages. Keep both alongside the source; do not use
+the header subnet as the target loop. When output-on clears the target word
+is absent, not the previous target. GeneralDemand and RelayStatusHeartbeat
+also identify a water subnet. A heartbeat is not a relay position.
+MaximumBoilerPercent is a limit, not a measured output. WaterCycleStart
+announces a cycle, not a valve or pump operation.
+
+MixingModulePresent declares capabilities and motor speed. MixingModuleReport
+is the measured status, including two separate sensor fault flags and three
+packed ten-bit words. MixingModuleUpdate is a command; its target and pump
+level must not replace those reported values. Neither 483 layout establishes
+the predicate for interpreting a fourth command byte as motor speed. Preserve
+the whole tail. There is no matching host query in the 483 for an immediate
+plant output or mixing status snapshot; MasterQuery requests topology.
+
 ### Snowmelt status keys
 
 The 483 SW 11 `snowmelt_request_for` uses application block D0 to choose

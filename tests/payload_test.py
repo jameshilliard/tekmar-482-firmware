@@ -11,6 +11,7 @@ from payloads import DECODERS, decode_payload
 from payloads.climate import AirStatus, ThermostatConfiguration, ThermostatMode as Mode
 from payloads.codec import Reader
 from payloads.line import ClockReport, GroupReport, SetpointAssignment, ZoneSyncAdjustment, ZoneTargetMode, group_command
+from payloads.plant import BoilerChillerOutput, HeatPumpOutput, MixingPresent, MixingReport, MixingUpdate, PlantKind, PlantOutput, StageBits, StageCounts
 from payloads.products import block_selectors, identify_product
 from payloads.queries import NativeStatusQuery, ReplyPart, SnowmeltRole, StatusRequest
 from payloads.scenes import NativeScene, SceneReport, SceneResponse
@@ -18,7 +19,7 @@ from payloads.schedules import DailyEvents, ScheduleBinding, ScheduleCycle, Sche
 from payloads.sensors import SensorRole as R, SensorSlot, ThermostatSensors
 from payloads.snowmelt import SnowmeltAddress, SnowmeltApplication, SnowmeltOperatingState, SnowmeltPair, SnowmeltReport, WaterDetection
 from payloads.thermostat import FanDuctStatus, FanSetup, HumiditySetup, HumidityStatus, SlabStatus, TargetSlot, TargetTable, ThermostatTarget as T
-from payloads.water import HeatSource, LoopAssignment, LoopKind, LoopSetupSlot, LoopTopology
+from payloads.water import BoilerMaximum, HeatSource, LoopAssignment, LoopKind, LoopSetupSlot, LoopTopology, StageDemand
 from payloads.writes import BlockPatch, NativeField as F, WritableBlock
 
 
@@ -27,6 +28,43 @@ def decode(mid, hex_bytes):
 
 
 class PayloadTests(unittest.TestCase):
+    def test_plant_output_keys_do_not_use_device_total_or_stage_counts_as_masks(self):
+        for header in (0, 0x20, 0x2f):
+            r = Reader(bytes([header]) + bytes.fromhex("04 c2 65 34 56 f3 ca"))
+            p = PlantOutput.read(r)
+            self.assertEqual((p.kind, p.key, p.device_total, r.remaining),
+                             (PlantKind.STAGED_BOILER, (4, header >> 4), header & 15, b"\xca"))
+            self.assertIsInstance(p.body, BoilerChillerOutput)
+            self.assertEqual((p.body.pump_status, p.body.stages), (3, StageBits(5, 6)))
+            self.assertEqual((p.body.stages.available, p.body.stages.operating), ((1, 3), (2, 3)))
+        for on, avail, pct in ((1, 4, 25), (0, 2, 0), (2, 1, None), (0, 0, None)):
+            p = PlantOutput.read(Reader(bytes([0, 8, 0x32, on, avail])))
+            self.assertIsInstance(p.body, HeatPumpOutput)
+            self.assertEqual(p.body.stages, StageCounts(on, avail))
+            self.assertEqual(p.body.stages.percent_on, pct)
+        for kind in (7, 255):
+            r = Reader(bytes([0, kind, 0xca, 0x35]))
+            p = PlantOutput.read(r)
+            self.assertEqual(p.kind, PlantKind.MODULATING_CHILLER if kind == 7 else None)
+            self.assertIsNone(p.body)
+            self.assertEqual(r.remaining, b"\xca\x35")
+
+    def test_observed_mixing_reports_and_requested_outputs_are_independent(self):
+        present = MixingPresent.read(Reader(bytes.fromhex("e7 28")))
+        self.assertEqual((present.actuator_type, present.motor_speed), (7, 40))
+        mix = MixingReport.read(Reader(bytes.fromhex("fb 33 c1 ed 12 34 56")))
+        self.assertEqual((mix.target_raw, mix.supply_raw, mix.return_raw, mix.sensor_flags), (0x112, 0x334, 0x256, 3))
+        r = Reader(bytes.fromhex("b9 44 63 aabb"))
+        update = MixingUpdate.read(r)
+        self.assertEqual((update.target_raw, update.target_pump_output, r.remaining), (0x244, 99, b"\xaa\xbb"))
+        self.assertNotIn("motor_speed", update.fields())
+        demand = StageDemand.read(Reader(bytes.fromhex("41 df 80 2206")))
+        self.assertEqual((demand.subnet, demand.stage, demand.output_on, demand.target_raw), (65, 1, True, 0x622))
+        r = Reader(bytes.fromhex("4a 00 00 2206"))
+        self.assertIsNone(StageDemand.read(r).target_raw)
+        self.assertEqual(r.remaining, b"\x22\x06")
+        self.assertEqual([BoilerMaximum(v).percent for v in (0, 100, 255)], [0, 100, None])
+
     def test_thermostat_operating_samples_do_not_supply_settings(self):
         r = Reader(bytes.fromhex("e9 0a06 00c0 ca"))
         fan = FanDuctStatus.read(r)
