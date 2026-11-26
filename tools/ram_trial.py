@@ -58,6 +58,7 @@ async def main():
                         help="leave UART idle, then read the bus activity LEDs before any capture")
     parser.add_argument("--frames", type=int, metavar="SECONDS", help="monitor live frames from SRAM")
     parser.add_argument("--diagnostics", action="store_true", help="verify receiver totals with --frames")
+    parser.add_argument("--save-capture", type=Path, help="retain raw UART records from --frames")
     parser.add_argument("--tx", nargs=2, metavar=("BUS", "HEX"), help="send one native frame during --frames")
     parser.add_argument("--from-app", action="store_true",
                         help="enter ISP from the installed dev image and return to it after the trial")
@@ -66,8 +67,8 @@ async def main():
         parser.error("--frames must be positive")
     if args.panel_after is not None and args.panel_after < 1:
         parser.error("--panel-after must be positive")
-    if (args.diagnostics or args.tx) and not args.frames:
-        parser.error("--diagnostics and --tx require --frames")
+    if (args.diagnostics or args.tx or args.save_capture) and not args.frames:
+        parser.error("--diagnostics, --tx and --save-capture require --frames")
     image = args.ram_bin.read_bytes()
     check(image, ram=True)
     async with connect(args.port) as port:
@@ -89,7 +90,8 @@ async def main():
                 await echo_test(port, range(5))
             if args.frames:
                 tx = (int(args.tx[0]), bytes.fromhex(args.tx[1])) if args.tx else None
-                await monitor(port, args.frames, diagnostics=args.diagnostics, tx=tx)
+                await monitor(port, args.frames, diagnostics=args.diagnostics, tx=tx,
+                              save_capture=args.save_capture)
         finally:
             await request(port, True)
             await asyncio.sleep(0.1)  # Let ROM enable autobaud before sending its sync byte.

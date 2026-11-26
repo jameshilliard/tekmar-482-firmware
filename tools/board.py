@@ -9,6 +9,8 @@ import asyncio
 import binascii
 import re
 import sys
+from contextlib import nullcontext
+from pathlib import Path
 from typing import NamedTuple
 
 from frames import FrameAudit, dropped_records
@@ -131,7 +133,7 @@ class Transmission(NamedTuple):
 
 
 async def capture(port, seconds: float, *, diagnostics=False, tx=None, on_record=None,
-                  stop_on_result=False) -> Transmission:
+                  stop_on_result=False, archive=None) -> Transmission:
     await identify(port)
     audit = FrameAudit(require_stats=diagnostics or tx is not None)
     command, greeting = ((b"A\nRX-DIAG\n", b"OK DIAG\r\n") if diagnostics else
@@ -152,10 +154,15 @@ async def capture(port, seconds: float, *, diagnostics=False, tx=None, on_record
             on_record(line)
     loop = asyncio.get_running_loop()
     deadline = loop.time() + seconds
+    async def read_record(deadline):
+        line = await port.readline(160, timeout=max(0, deadline - loop.time()))
+        if archive is not None:
+            archive.write(line)
+        return line
     try:
-        while (remaining := deadline - loop.time()) > 0:
+        while loop.time() < deadline:
             try:
-                line = await port.readline(160, timeout=remaining)
+                line = await read_record(deadline)
             except asyncio.TimeoutError:
                 break
             accept(line)
@@ -165,7 +172,7 @@ async def capture(port, seconds: float, *, diagnostics=False, tx=None, on_record
         await port.write(b"\n")
         deadline = loop.time() + 4
         while True:
-            line = await port.readline(160, timeout=max(0, deadline - loop.time()))
+            line = await read_record(deadline)
             if (dropped := dropped_records(line)) is not None:
                 audit.finish(dropped)
                 break
@@ -173,8 +180,11 @@ async def capture(port, seconds: float, *, diagnostics=False, tx=None, on_record
     return Transmission(audit.tx_result, echoes)
 
 
-async def monitor(port, seconds: float, *, diagnostics=False, tx=None, on_record=None) -> None:
-    evidence = await capture(port, seconds, diagnostics=diagnostics, tx=tx, on_record=on_record)
+async def monitor(port, seconds: float, *, diagnostics=False, tx=None, on_record=None,
+                  save_capture: Path | None = None) -> None:
+    with (save_capture.open("xb") if save_capture is not None else nullcontext()) as archive:
+        evidence = await capture(port, seconds, diagnostics=diagnostics, tx=tx, on_record=on_record,
+                                 archive=archive)
     if tx is not None:
         evidence.verify(tx[0])
 
@@ -199,6 +209,7 @@ async def main() -> int:
     parser.add_argument("port", help="local serial device (requires exclusive access)")
     parser.add_argument("--baud", type=int, default=9600)
     parser.add_argument("--seconds", type=int, default=30, help="frame capture duration")
+    parser.add_argument("--save-capture", type=Path, help="save the raw UART stream in a new file")
     parser.add_argument("--tx", nargs=2, metavar=("BUS", "HEX"), help="one native frame, for send only")
     parser.add_argument("--bus", type=int, choices=range(5), help="test just this physical port with echo-test")
     args = parser.parse_args()
@@ -208,14 +219,18 @@ async def main() -> int:
         parser.error("send requires --tx BUS HEX")
     if args.bus is not None and args.action != "echo-test":
         parser.error("--bus is only for echo-test")
+    if args.save_capture and args.action not in ("send", "frames", "diagnostics"):
+        parser.error("--save-capture requires send, frames or diagnostics")
     try:
         async with connect(args.port, args.baud) as port:
             if args.action == "echo-test":
                 await echo_test(port, range(5) if args.bus is None else [args.bus])
             elif args.action == "send":
-                await monitor(port, args.seconds, tx=(int(args.tx[0]), bytes.fromhex(args.tx[1])))
+                await monitor(port, args.seconds, tx=(int(args.tx[0]), bytes.fromhex(args.tx[1])),
+                              save_capture=args.save_capture)
             elif args.action in ("frames", "diagnostics"):
-                await monitor(port, args.seconds, diagnostics=args.action == "diagnostics")
+                await monitor(port, args.seconds, diagnostics=args.action == "diagnostics",
+                              save_capture=args.save_capture)
             elif args.action in ("panel", "led-test"):
                 await panel(port, args.action == "led-test")
             elif args.action == "probe":

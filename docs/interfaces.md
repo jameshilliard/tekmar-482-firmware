@@ -135,8 +135,11 @@ trailing bytes (including byte 12 of observed 0x22f reports) appear as
 `truncated`, not interpreted using missing bytes. Unknown message IDs still
 display their header and raw payload.
 
-Replay a saved stream (the raw `F` lines through the final `END`, including
-their CRLFs) using only the Python standard library:
+To save an exact UART stream, add `--save-capture capture.frames` to
+`board.py diagnostics`, `frames`, `send` or an SRAM trial with `--frames`.
+This creates a new file (never overwrites one) and retains raw records,
+including diagnostic rows and the final `END`, instead of terminal output.
+Replay it using only the Python standard library:
 
 ```sh
 python3 tools/frames.py capture.frames

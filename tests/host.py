@@ -8,6 +8,7 @@ import os
 import select
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -80,7 +81,10 @@ class HelperTest(unittest.TestCase):
         self.assertIn(b"Port 4: no edge observed", out)
 
     def test_frames(self):
-        master, proc = self.start_helper("frames", "--seconds", "1")
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        target = Path(directory.name) / "native.frames"
+        master, proc = self.start_helper("frames", "--seconds", "1", "--save-capture", str(target))
         self.expect(master, b"A\nID?\n")
         os.write(master, b"TEKMAR-482-DEV\r\n")
         self.expect(master, b"A\nRX-STREAM\n")
@@ -91,6 +95,13 @@ class HelperTest(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, err)
         self.assertIn(b"port=2 t=25000us priority=0 id=0x123", out)
         self.assertIn(b"payload=a5 crc=0x0e2f no-ack/bad-end", out)
+        raw = target.read_bytes()
+        self.assertEqual(raw, b"F 2 000061a8 0e2f A 12300001a5\r\n"
+                              b"F 0 00010000 0e2f M 12300001a5\r\nEND 00000000\r\n")
+        _, proc = self.start_helper("frames", "--save-capture", str(target))
+        _, err = proc.communicate(timeout=3)
+        self.assertNotEqual(proc.returncode, 0, err)
+        self.assertEqual(target.read_bytes(), raw)
 
     def test_corrupt_frame_records(self):
         for raw in (b"12300001", b"12300001a4", b"z", b"ff" * 68):
