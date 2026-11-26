@@ -7,7 +7,7 @@ use core::cell::RefCell;
 use embassy_futures::yield_now;
 use embassy_time::Instant;
 use tekmar_482_firmware::{
-    inventory::{Answer, GroupSend, Inventory},
+    inventory::{AddressMove, Answer, GroupSend, Inventory, Observation},
     tn4::{
         Frame, LinkAck, Receiver, Trailer,
         tx::{Outcome, Request},
@@ -69,6 +69,10 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
     static INVENTORY: static_cell::ConstStaticCell<Inventory> =
         static_cell::ConstStaticCell::new(Inventory::new());
     let inventory = INVENTORY.take();
+    #[unsafe(link_section = ".low_bss")]
+    static MOVES: static_cell::ConstStaticCell<heapless::Deque<AddressMove, 128>> =
+        static_cell::ConstStaticCell::new(heapless::Deque::new());
+    let moves = MOVES.take();
     inventory.set_reporting(panel.borrow().report()[0] & 1 != 0);
     let mut bus = Receivers::start();
     let mut decoder = tpck::Decoder::default();
@@ -98,7 +102,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                 data[6..6 + frame.bytes.len()].copy_from_slice(frame.bytes);
                 out.enqueue(Kind::Rx(p as u8), tpck::TN4, &data[..6 + frame.bytes.len()]);
             } else if !reboot
-                && let Some(body) = inventory.observe(
+                && let Some(observed) = inventory.observe(
                     p,
                     frame.bytes,
                     Instant::now().as_secs() as u32,
@@ -106,9 +110,20 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                         && !inventory.has_command(p)
                         && !inventory.has_group_send(p),
                 )
-                && let Some(req) = Request::new(p as u8, &body)
             {
-                sending[p] = Attempt::new(&req, INPUTS[p].0, now[INPUTS[p].1]);
+                match observed {
+                    Observation::Probe(body) => {
+                        if let Some(req) = Request::new(p as u8, &body) {
+                            sending[p] = Attempt::new(&req, INPUTS[p].0, now[INPUTS[p].1]);
+                        }
+                    }
+                    Observation::Moved(moved) => {
+                        if moves.is_full() {
+                            moves.pop_front();
+                        }
+                        let _ = moves.push_back(moved);
+                    }
+                }
             }
         });
         for p in 0..5 {
@@ -204,6 +219,11 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
             }
         }
         if out.can_receive()
+            && let Some(moved) = moves.pop_front()
+        {
+            out.enqueue(Kind::Control, tpck::TRPC, moved.report().payload());
+        }
+        if out.can_receive()
             && let Some(reply) = inventory.walk_next()
         {
             out.enqueue(Kind::Control, tpck::TRPC, reply.payload());
@@ -273,7 +293,8 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                                     }
                                 }
                             }
-                            let busy = inventory.walking()
+                            let busy = !moves.is_empty()
+                                || inventory.walking()
                                 || (0..5).any(|p| {
                                     inventory.has_command(p) || inventory.has_group_send(p)
                                 })

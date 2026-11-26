@@ -85,7 +85,7 @@ pub(super) struct Telemetry {
     mode: u8,
     targets: [[u8; 2]; 4],
     rh_targets: [u8; 2],
-    rh_seen: bool,
+    observed_sources: u8,
     rh_enabled: u8,
     floor: Floor,
     pub(super) dirty: u16,
@@ -108,6 +108,15 @@ fn temperature(data: &[u8], i: usize) -> u16 {
 }
 
 impl Telemetry {
+    const RH_SOURCE: u8 = 1;
+    const SETPOINT_DEVICE: u8 = 2;
+
+    pub(super) fn mark_setpoint_device(&mut self) {
+        self.observed_sources |= Self::SETPOINT_DEVICE;
+    }
+    pub(super) fn is_setpoint_device(&self) -> bool {
+        self.observed_sources & Self::SETPOINT_DEVICE != 0
+    }
     pub(super) fn setback(&self) -> u8 {
         self.setback
     }
@@ -121,7 +130,7 @@ impl Telemetry {
         mode: 0,
         targets: [[0; 2]; 4],
         rh_targets: [0; 2],
-        rh_seen: false,
+        observed_sources: 0,
         rh_enabled: 0,
         floor: Floor::Unknown,
         dirty: 0,
@@ -184,13 +193,13 @@ impl Telemetry {
         match setting {
             Setting::Slab => matches!(self.floor, Floor::Only | Floor::Mixed),
             Setting::Heat | Setting::Cool => self.floor != Floor::Only,
-            Setting::HumidityMin => self.rh_seen && self.rh_enabled & 1 != 0,
-            Setting::HumidityMax => self.rh_seen && self.rh_enabled & 2 != 0,
+            Setting::HumidityMin => self.has_rh() && self.rh_enabled & 1 != 0,
+            Setting::HumidityMax => self.has_rh() && self.rh_enabled & 2 != 0,
             _ => true,
         }
     }
     pub(super) fn has_rh(&self) -> bool {
-        self.rh_seen
+        self.observed_sources & Self::RH_SOURCE != 0
     }
     pub(super) fn setting_report(&mut self, data: &[u8]) -> u16 {
         let [block, 0, mask, values @ ..] = data else {
@@ -239,7 +248,7 @@ impl Telemetry {
             }
             0xa4 | 0xa5 => {
                 let i = usize::from(*block - 0xa4);
-                if !self.rh_seen || self.rh_enabled & (1 << i) == 0 {
+                if !self.has_rh() || self.rh_enabled & (1 << i) == 0 {
                     return 0;
                 }
                 let Some(value) = block_byte(*mask, values, 0) else {
@@ -290,7 +299,7 @@ impl Telemetry {
                 (data[0] >> 1) & 7,
             ),
             0x323 => {
-                self.rh_seen = true;
+                self.observed_sources |= Self::RH_SOURCE;
                 self.humidity = data[2];
                 return Humidity.mask();
             }

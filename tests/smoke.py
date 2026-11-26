@@ -30,9 +30,10 @@ def protected_bits(body):
         crc = ((crc << 1) & 0x7fff) ^ (0x4599 if feedback else 0)
     wire = ""
     for bit in "1" + data + f"{crc:015b}":
+        # Stuff only between protected bits; the delimiter never takes a stuff bit.
+        if wire.endswith(("00000", "11111")):
+            wire += "0" if wire[-1] == "1" else "1"
         wire += bit
-        if wire.endswith(bit * 5):
-            wire += "0" if bit == "1" else "1"
     return wire
 
 
@@ -186,9 +187,9 @@ def run(path, ram, fast=False):
     overlap = False
     phase = "capture"
 
-    def inject(body, port=0):
+    def inject(body, port=0, *, after=None):
         wire = protected_bits(body) + "0" * 18
-        start = clock + 30_000
+        start = (clock if after is None else after) + 30_000
         for i, bit in enumerate(wire):
             if i == 0 or bit != wire[i - 1]:
                 edges.append((start + i * 2500, port, bit == "1"))
@@ -223,7 +224,12 @@ def run(path, ram, fast=False):
                 assert (6,bytes.fromhex("023701000001000a06")) in actual
                 call(0x10f,b"\0",True)
             elif method == 0x10f and data[5:] == b"\0":
-                call(0x137,b"\x01\0\xff\xff",True)
+                if phase == "move":
+                    # Published example: node 24 to 23 = tHA address 1 to 2.
+                    end = inject(bytes.fromhex("7e7005c2 0018"))
+                    inject(bytes.fromhex("7e700582 0017"), after=end)
+                else:
+                    call(0x137,b"\x01\0\xff\xff",True)
             elif method == 0x137 and data[0] == 3:
                 assert data[5:] == bytes.fromhex("01000a06")
                 query = bytes.fromhex("6d700007 0300 00 00008000")
@@ -265,6 +271,22 @@ def run(path, ram, fast=False):
                     inject(bytes.fromhex("6f700603 840100"))
             elif method == 0x17f and data[0] == 2:
                 assert data[5:] == bytes.fromhex("010002")
+                phase = "move"
+                call(0x10f, b"\0", True)
+            elif method == 0x15f and phase == "move":
+                assert encode(kind, data) == bytes.fromhex(
+                    "ca0906025f010000010002007435"
+                )
+                phase = "second-move"
+            elif method == 0x15f:
+                assert phase == "second-move" and data == bytes.fromhex("025f01000002000300")
+                call(0x15f, data[5:])
+                call(0x15f, data[5:], True)
+                call(0x197, b"\x03\0")
+            elif method == 0x197 and phase == "second-move":
+                assert data[5:] == bytes.fromhex("030082830100")
+                assert not any(kind == 6 and pkt[1:5] == bytes(4)
+                               for kind, pkt in actual[-3:])
                 phase = "capture"
                 extension(2, b"\x01", True)
             elif method == 0x544BF002 and data[5:] == bytes([1]):

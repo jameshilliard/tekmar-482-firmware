@@ -13,7 +13,10 @@ fn observe(
     let h = method << 20 | u32::from(subnet) << 12 | u32::from(node) << 6 | body.len() as u32;
     frame[..4].copy_from_slice(&h.to_be_bytes());
     frame[4..4 + body.len()].copy_from_slice(body);
-    cache.observe(port, &frame[..4 + body.len()], now, true)
+    match cache.observe(port, &frame[..4 + body.len()], now, true)? {
+        Observation::Probe(body) => Some(body),
+        Observation::Moved(_) => None,
+    }
 }
 
 fn call(cache: &mut Inventory, method: u32, service: u8, body: &[u8], now: u32) -> Option<Reply> {
@@ -33,6 +36,48 @@ fn call(cache: &mut Inventory, method: u32, service: u8, body: &[u8], now: u32) 
 
 fn address(reply: Reply) -> u16 {
     u16::from_le_bytes(reply.payload()[5..].try_into().unwrap())
+}
+
+#[test]
+fn taking_address_is_report_only_and_follows_the_known_device() {
+    let mut inv = Inventory::new(); // Reporting disabled.
+    let move_to = |inv: &mut Inventory, subnet: u8, old: [u8; 2], now| {
+        let header = 0x3e7_00000 | u32::from(subnet) << 12 | 23 << 6 | 2;
+        let [a, b, c, d] = header.to_be_bytes();
+        match inv.observe(0, &[a, b, c, d, old[0], old[1]], now, false)? {
+            Observation::Moved(moved) => Some(moved.report()),
+            _ => panic!("an address change must not trigger a probe"),
+        }
+    };
+    observe(&mut inv, 0, 0, 24, 0x2e7, &[0, 0, 7, 7, 8, 9], 0);
+    observe(&mut inv, 0, 0, 23, 0x2e7, &[0, 0, 7, 1, 2, 3], 0);
+    assert!(move_to(&mut inv, 0, [8, 24], 1).is_none()); // Same display subnet, different wire subnet.
+    assert_eq!(
+        move_to(&mut inv, 0, [0, 56], 1).unwrap().payload(),
+        &[2, 0x5f, 1, 0, 0, 1, 0, 2, 0]
+    );
+    assert!(move_to(&mut inv, 0, [0, 24], 1).is_none()); // Duplicate.
+    assert_eq!(
+        move_to(&mut inv, 9, [0, 23], 2).unwrap().payload()[5..],
+        [2, 0, 102, 0]
+    );
+    assert_eq!(
+        address(call(&mut inv, INVENTORY, 1, &[2, 0], 2).unwrap()),
+        u16::MAX
+    );
+    assert_eq!(
+        call(&mut inv, PRODUCT, 1, &[102, 0], 2).unwrap().payload()[7..],
+        [7, 8, 9, 0]
+    );
+    call(&mut inv, 0x127, 1, &[102, 0], 2);
+    assert_eq!(
+        inv.command_frame(0),
+        Request::new(0, &[0x6d, 0x70, 0, 7, 3, 0, 9, 0, 0, 64, 0])
+    );
+    assert!(move_to(&mut inv, 0, [9, 23], 153).is_none()); // Expired.
+    for service in [0, 1] {
+        assert!(call(&mut inv, TAKING_ADDRESS, service, &[1, 0, 2, 0], 0).is_none());
+    }
 }
 
 #[test]

@@ -12,7 +12,7 @@ native message in Raw mode does not implement its tRPC services in Normal mode.
 | 18F ProtocolVersion | Request returns 3; this is the wire format, not a coverage flag. |
 | 167 DeviceInventory | Full walk, exact lookup, clear one, clear all. No unsolicited inventory report. |
 | 197 DeviceType, 19F DeviceVersion | Read addressed identity from block 0. Ignore writes. |
-| 15F TakingAddress | Native address changes update the cache. Serial report not yet implemented. |
+| 15F TakingAddress | Report the old and new addresses even with reporting disabled. Request and Update are ignored. |
 | 107 NetworkError | Request and Update return the current network error word. Reports follow native 3D7, including clearance. |
 | 10F ReportingState | Request and Update. Power-on default comes from the Reporting DIP. Test-button reporting notifications are not yet implemented. |
 | 117 OutdoorTemp, 11F DeviceAttributes | Not implemented. |
@@ -35,6 +35,16 @@ subnet establishes presence. Preserve the physical port when converting to
 the decimal tHA address. A master subnet change invalidates the old port
 entries. Addressed devices age out after 150 seconds without qualifying
 traffic. A link ACK, a bus master or a group broadcast is not a thermostat.
+
+Native 3E7 identifies the previous wire subnet and node in its payload
+and the new address in its header. Like J1196J, emit the serial report
+only for a known previous address. Move its identity to the new address
+and cancel pending setting operations for either affected device. A
+repeated move from an already-vacated address does not erase that identity.
+Later addressed operations use the new wire subnet, not its three-bit
+display value. Moves are queued in arrival order independently of sampled
+telemetry. The queue holds 128 moves; under sustained UART overload the
+oldest unforwarded move is dropped. An inventory walk reads the current map.
 
 Request 167 accepts a little-endian u16. At zero the gateway snapshots the
 table and streams a separate response for each address followed by exactly
