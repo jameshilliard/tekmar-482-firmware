@@ -1,0 +1,2 @@
+[alias]
+firmware = "build --locked --release --target armv4t-none-eabi -Zbuild-std=core --bin tekmar-482-firmware"
