@@ -26,6 +26,8 @@ RAW_SENDS = (SCENE, bytes.fromhex("21f00002 0401"), bytes.fromhex("31f00005 1ebf
              bytes.fromhex("01000003 000102"), bytes.fromhex("20000001 01"))
 WEEK_QUERY = bytes.fromhex("6d70000b 100000 00008000 00000000")
 WEEK_REPORT = bytes.fromhex("6e70060a 10007f 90020304050607")
+WATER = {1: bytes.fromhex("7cf25fca bc07 00c0 0000 19ff f9 ca"),
+         3: bytes.fromhex("7ce25fcb bc07 00c0 0000 19ff f9 ca35")}
 
 def protected_bits(body):
     data = "".join(f"{byte:08b}" for byte in body)
@@ -232,6 +234,7 @@ def run(path, ram, fast=False):
     invalid = set()
     results = set()
     weekly = set()
+    water_ports = set()
     overlap = False
     phase = "capture"
 
@@ -242,6 +245,13 @@ def run(path, ram, fast=False):
             if i == 0 or bit != wire[i - 1]:
                 edges.append((start + i * 2500, port, bit == "1"))
         return start + len(wire) * 2500
+
+    def water_capture():
+        nonlocal phase
+        phase = "water-capture"
+        after = None
+        for p, body in WATER.items():
+            after = inject(body, p, after=after)
 
     def reply(kind, data):
         nonlocal phase, overlap, inventory_at
@@ -450,14 +460,20 @@ def run(path, ram, fast=False):
             assert protected & 0x7FFF == 0x0E2E
             invalid.add(p)
         elif service == 0:
+            if phase == "water-capture":
+                assert p not in water_ports and data[6:] == WATER[p]
+                water_ports.add(p)
+                if water_ports == WATER.keys():
+                    extension(2, bytes(1), True)
+                    at_line_rate()
+                return
             if phase == "weekly-read":
                 assert data[6:] in (RAW_SENDS[p], WEEK_QUERY, WEEK_REPORT)
                 if data[6:] == WEEK_REPORT:
                     assert p == 0
                     weekly.add("report")
                     if "result" in weekly:
-                        extension(2, bytes(1), True)
-                        at_line_rate()
+                        water_capture()
                 return
             assert data[6:] == (BODY if phase == "capture" else RAW_SENDS[p])
             if phase == "capture":
@@ -480,8 +496,7 @@ def run(path, ram, fast=False):
                 assert p == 0 and "result" not in weekly
                 weekly.add("result")
                 if "report" in weekly:
-                    extension(2, bytes(1), True)
-                    at_line_rate()
+                    water_capture()
                 return
             assert p not in results and (p != 0 or overlap)
             results.add(p)
@@ -573,6 +588,7 @@ def run(path, ram, fast=False):
     for p in range(5):
         assert (6, bytes.fromhex("0403f04b54") + bytes([p]) + bytes(8)) in actual
     assert weekly == {"result", "report"} and actual[-1] == (6, bytes.fromhex("0305f04b54"))
+    assert water_ports == WATER.keys()
     painted = bytes(cpu.mem_read(floor, top - floor))
     free = len(painted) - len(painted.lstrip(b"\xa5"))
     assert free >= 256, free

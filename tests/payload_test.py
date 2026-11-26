@@ -14,6 +14,7 @@ from payloads.queries import NativeStatusQuery, ReplyPart, SnowmeltRole, StatusR
 from payloads.scenes import NativeScene, SceneReport, SceneResponse
 from payloads.schedules import DailyEvents, ScheduleBinding, ScheduleCycle, ScheduleEvent, ScheduleProfile
 from payloads.sensors import SensorRole as R, SensorSlot, ThermostatSensors
+from payloads.water import HeatSource, LoopAssignment, LoopKind, LoopSetupSlot, LoopTopology
 from payloads.writes import BlockPatch, NativeField as F, WritableBlock
 
 
@@ -22,6 +23,44 @@ def decode(mid, hex_bytes):
 
 
 class PayloadTests(unittest.TestCase):
+    def test_water_status_optional_word_and_extensions(self):
+        base = "bc07 00c0 0000 19ff f9"
+        for tail, dhw, extension in (("", None, None), ("ca", None, "ca"),
+                                     ("2506", 0x625, None), ("2506ca35", 0x625, "ca35")):
+            fields = decode(0x3cf, base + tail)
+            self.assertEqual(fields["supply_temp_f"], 113)
+            self.assertEqual(fields["return_temp"], "unavailable")
+            self.assertNotIn("target_temp_f", fields)
+            self.assertEqual(fields["setback_status"], 1)
+            self.assertEqual(fields["pump_output_pct"], 255)
+            self.assertEqual(fields.get("dhw_supply_temp_raw"), dhw)
+            self.assertEqual(fields.get("extension_hex"), extension)
+            plant = decode(0x3ce, base + tail)
+            self.assertNotIn("dhw_supply_temp_raw", plant)
+            self.assertEqual(plant.get("extension_hex"), tail or None)
+        self.assertIn("truncated", decode(0x3cf, "0000" * 4))
+
+    def test_water_topology_requires_local_evidence_and_complete_slots(self):
+        top = LoopTopology((0x25, 0, 0x2e))
+        self.assertEqual(top.assignment_for(0x25).kind, LoopKind.BOILER)
+        self.assertEqual(top.assignment_for(0x2e).mix_number, 2)
+        self.assertIsNone(top.assignment_for(0))
+        self.assertIsNone(LoopTopology((0x25, 0x2d)).assignment_for(0x55))
+        self.assertEqual(LoopTopology((0x25, 0x2d)).assignment_for(0x2d).mix_number, 1)
+        self.assertEqual(LoopTopology((0x25,), ()).assignment_for(0x25).kind, LoopKind.BOILER)
+        fields = decode(0x2e7, "3400 31 29 2d 95")
+        slots = LoopSetupSlot.from_block(0x34, fields)
+        self.assertEqual(slots, (LoopSetupSlot(5, 0x29, None), LoopSetupSlot(7, 0x2d, HeatSource(0x95))))
+        self.assertIsNone(LoopTopology((0x29,), None, slots).assignment_for(0x29))
+        self.assertIsNone(LoopTopology((), (LoopSetupSlot(1, 0x25, None),), slots).assignment_for(0x25))
+        self.assertEqual((fields["bus7_heat_source_kind"], fields["bus7_heat_source_loop"],
+                          fields["bus7_heat_source_mode"]), ("tank", 5, 2))
+        for raw, kind in ((0, "unlinked"), (3, "mix"), (0x24, "unknown"), (0xf2, "boiler")):
+            source = HeatSource(raw)
+            slot = LoopAssignment(2, 0x25, source)
+            self.assertEqual(slot.kind.value, kind)
+            self.assertEqual(LoopTopology((0x25,), (LoopSetupSlot(2, 0x25, source),)).assignment_for(0x25), slot)
+
     def test_clock_encodes_standard_date_even_at_day_and_year_rollover(self):
         for wall, wire in ((datetime(2007, 1, 8, 0, 30), "1e bf 10 06 07"),
                            (datetime(2024, 3, 1, 0, 1), "01 bc 11 1c 18"),
@@ -610,7 +649,7 @@ class PayloadTests(unittest.TestCase):
         for mid in DECODERS.keys() - {0x011, 0x307, 0x317, 0x327, 0x3df, 0x3ef, 0x3f7}:
             self.assertIn("truncated", decode(mid, ""))
         for mid, body in [(0x17e, "11022f0000"), (0x32f, "123456"), (0x367, "010280"),
-                          (0x3cf, "340900c003493264fe34"), (0x24f, "000601")]:
+                          (0x3cf, "340900c003493264"), (0x24f, "000601")]:
             with self.subTest(mid=hex(mid)):
                 self.assertIn("truncated", decode(mid, body))
         for body in ("0040", "0080", "00c0", "ffff"):

@@ -399,6 +399,36 @@ supports them. Fields are listed in transmitted order.
 | `0x3ef` | AddressTaken | No payload defined. |
 | `0x3ff` | MasterPresent | Boiler subnet followed by zero to seven mixing subnets, according to payload length. |
 
+**Associating water temperatures.** A MasterPresent slot is a subnet byte
+(control in bits 7:3, bus in 2:0), not a physical gateway port. Slot 0
+advertises the boiler; slots 1 through 7 advertise those numbered mixes.
+A zero byte is unassigned. SW 11 compares the bus bits of the sender and
+slot before associating the arrival port. A master can advertise remote
+subnets, and the same MasterStatus can be heard on multiple ports. Keep the
+physical port, full header subnet and sender node. Prefer an exact subnet
+match; a bus-only match must be unique. Never assign the status to every
+slot or count an unlabelled copy as a second boiler.
+
+The 483 prefers explicit BusLoopSetup blocks over positional names.
+Block `0033` describes slots 1-4, `0034` slots 5-7. Each slot is a pair
+of independently supported bytes: subnet and heat-source ID. Only interpret
+a pair present in the same report. A zero support mask supplies no map; a
+supported subnet with no corresponding ID is an unresolved assignment,
+not permission to use the positional name. In the ID, 7:6 are operating-mode bits,
+5:4 are the type (0 mixing, 1 tank, 2 unknown, 3 boiler), and 3:0 are the
+loop number; a completely zero ID explicitly unlinks the loop. Use the
+on-wire mixing number, not that number plus one. A setup slot number is not
+a mixing number. Do not equate the low nibble with the ID in TankStatus.
+
+MasterQuery solicits the topology, not a fresh measurement. Keep the
+independent MasterStatus and PlantLoopStatus samples separate. Only a
+MasterStatus of at least eleven bytes carries a complete DHW supply word;
+a tenth byte alone is an opaque tail, not an invalid base status.
+DHWStatus (`023f`) carries degE temperatures and demand flags, whose
+application depends on its sender (setpoint control or reset control).
+TankStatus (`0173`) uses separate raw temperature bytes; keep each tank
+ID and do not borrow the DHWStatus scale.
+
 For regression vectors use [tests/payload_test.py](../tests/payload_test.py).
 For electrical activity, CRC failures, trailer faults and dropped UART
 records, see [receiver diagnostics](interfaces.md#receiver-diagnostics).
