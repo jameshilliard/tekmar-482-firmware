@@ -11,6 +11,10 @@ pub(super) enum Setting {
     Mode,
     Heat,
     Cool,
+    Slab,
+    Fan,
+    HumidityMin,
+    HumidityMax,
 }
 
 impl Setting {
@@ -19,6 +23,10 @@ impl Setting {
             0x127 => Self::Mode,
             0x13f => Self::Heat,
             0x147 => Self::Cool,
+            0x14f => Self::Slab,
+            0x157 => Self::Fan,
+            0x152 => Self::HumidityMin,
+            0x151 => Self::HumidityMax,
             _ => return None,
         })
     }
@@ -27,6 +35,10 @@ impl Setting {
             Self::Mode => 0x127,
             Self::Heat => 0x13f,
             Self::Cool => 0x147,
+            Self::Slab => 0x14f,
+            Self::Fan => 0x157,
+            Self::HumidityMin => 0x152,
+            Self::HumidityMax => 0x151,
         }
     }
     fn block(self) -> u8 {
@@ -34,10 +46,28 @@ impl Setting {
             Self::Mode => 3,
             Self::Heat => 5,
             Self::Cool => 6,
+            Self::Slab => 7,
+            Self::Fan => 9,
+            Self::HumidityMin => 0xa4,
+            Self::HumidityMax => 0xa5,
         }
     }
     fn width(self) -> usize {
-        if self == Self::Mode { 3 } else { 5 }
+        match self {
+            Self::Mode => 3,
+            Self::Slab => 6,
+            _ => 5,
+        }
+    }
+    fn indexed(self) -> bool {
+        matches!(self, Self::Heat | Self::Cool | Self::Slab | Self::Fan)
+    }
+    fn setup(self) -> Option<u8> {
+        match self {
+            Self::Slab => Some(13),
+            Self::HumidityMin | Self::HumidityMax => Some(0xa3),
+            _ => None,
+        }
     }
 }
 
@@ -69,12 +99,13 @@ pub(super) struct Operation {
     pub(super) address: u16,
     pub(super) subnet: u8,
     node: u8,
-    setting: Setting,
+    pub(super) setting: Setting,
+    qualified: bool,
     selector: u8,
     write: Option<u8>,
     mask: u8,
     index: usize,
-    bytes: [u8; 5],
+    bytes: [u8; 6],
     since: u32,
     step: Step,
 }
@@ -85,11 +116,12 @@ impl Operation {
         subnet: 0,
         node: 0,
         setting: Setting::Mode,
+        qualified: false,
         selector: 0,
         write: None,
         mask: 0,
         index: 0,
-        bytes: [0; 5],
+        bytes: [0; 6],
         since: 0,
         step: Step::Idle,
     };
@@ -109,8 +141,10 @@ impl Operation {
         let (selector, write) = match (setting, call.service, tail) {
             (Setting::Mode, 1, [] | [_] | [_, 0]) => (0, None),
             (Setting::Mode, 0, [v] | [v, 0]) => (0, Some(*v)),
-            (Setting::Heat | Setting::Cool, 1, [s] | [s, _]) => (*s, None),
-            (Setting::Heat | Setting::Cool, 0, [s, v]) => (*s, Some(*v)),
+            (Setting::HumidityMin | Setting::HumidityMax, 1, [] | [_]) => (0, None),
+            (Setting::HumidityMin | Setting::HumidityMax, 0, [v]) => (0, Some(*v)),
+            (_, 1, [s] | [s, _]) if setting.indexed() => (*s, None),
+            (_, 0, [s, v]) if setting.indexed() => (*s, Some(*v)),
             _ => return None,
         };
         let selector = if selector >= 7 {
@@ -118,7 +152,7 @@ impl Operation {
         } else {
             selector
         };
-        let selection = if setting == Setting::Mode {
+        let selection = if !setting.indexed() {
             Some((0, 1))
         } else {
             slots(selector).map(|(i, mask)| (i, if setbacks { mask } else { 31 }))
@@ -126,17 +160,22 @@ impl Operation {
         let (index, mask) = selection.unwrap_or_default();
         let valid = selection.is_some()
             && write != Some(255)
+            && !(matches!(
+                setting,
+                Setting::Fan | Setting::HumidityMin | Setting::HumidityMax
+            ) && write.is_some_and(|v| v > 100))
             && (setting != Setting::Mode || !matches!(write,Some(v) if !matches!(v,0..=4|6)));
         Some(Self {
             address: u16::from_le_bytes(addr),
             subnet,
             node,
             setting,
+            qualified: setting.setup().is_none(),
             selector,
             write,
             mask,
             index,
-            bytes: [0; 5],
+            bytes: [0; 6],
             since: now,
             step: if valid { Step::Read } else { Step::Done(255) },
         })
@@ -155,7 +194,11 @@ impl Operation {
         }
     }
     pub(super) fn take_frame(&mut self, port: u8) -> Option<Request> {
-        let block = self.setting.block();
+        let block = if self.qualified {
+            self.setting.block()
+        } else {
+            self.setting.setup()?
+        };
         match self.step {
             Step::Read | Step::Verify => {
                 self.step = if self.step == Step::Read {
@@ -170,7 +213,7 @@ impl Operation {
             Step::Write => {
                 self.step = Step::Writing;
                 let n = self.setting.width();
-                let mut b = [0; 13];
+                let mut b = [0; 14];
                 b[..8].copy_from_slice(&[
                     0x6d,
                     0xf0,
@@ -198,12 +241,29 @@ impl Operation {
             _ => Step::Done(255),
         };
     }
-    pub(super) fn sample(&mut self, address: u16, subnet: u8, data: &[u8]) {
+    pub(super) fn sample(
+        &mut self,
+        address: u16,
+        subnet: u8,
+        data: &[u8],
+        live: &super::Telemetry,
+    ) {
         let [block, 0, support, values @ ..] = data else {
             return;
         };
-        if self.address != address
-            || self.subnet != subnet
+        if !self.active() || self.terminal() || self.address != address || self.subnet != subnet {
+            return;
+        }
+        if Some(*block) == self.setting.setup() {
+            if !live.configured(self.setting) {
+                self.fail();
+            } else if !self.qualified && self.step == Step::Sample {
+                self.qualified = true;
+                self.step = Step::Read;
+            }
+            return;
+        }
+        if !self.qualified
             || *block != self.setting.block()
             || !matches!(self.step, Step::Sample | Step::Readback | Step::Write)
         {
@@ -252,10 +312,10 @@ impl Operation {
             method: self.setting.method(),
             body: &[],
         };
-        Some(if self.setting == Setting::Mode {
-            call.ok(&[lo, hi, v])
-        } else {
+        Some(if self.setting.indexed() {
             call.ok(&[lo, hi, self.selector, v])
+        } else {
+            call.ok(&[lo, hi, v])
         })
     }
 }

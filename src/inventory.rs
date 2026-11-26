@@ -21,8 +21,10 @@ struct Device {
     last_seen: u32,
     product: u32,
     version: u32,
-    next_probe: u32,
-    sensor_probe: u32,
+    identity_delay: u8,
+    sensor_delay: u16,
+    fan_delay: u8,
+    rh_delay: u8,
     live: Telemetry,
 }
 
@@ -33,8 +35,10 @@ impl Device {
         last_seen: 0,
         product: 0,
         version: 0,
-        next_probe: 0,
-        sensor_probe: 0,
+        identity_delay: 0,
+        sensor_delay: 0,
+        fan_delay: 0,
+        rh_delay: 0,
         live: Telemetry::EMPTY,
     };
     fn present(&self, now: u32) -> bool {
@@ -195,11 +199,20 @@ impl Inventory {
             }
             row.product = UNKNOWN;
             row.version = UNKNOWN;
-            row.next_probe = now;
-            row.sensor_probe = now;
+            row.identity_delay = 0;
+            row.sensor_delay = 0;
+            row.fan_delay = 0;
+            row.rh_delay = 0;
             row.live = Telemetry::UNKNOWN;
             row.setpoint_device = false;
             bus.pending &= !(1 << node);
+        } else {
+            // A present row was observed within 150 seconds, including at clock wrap.
+            let elapsed = now.wrapping_sub(row.last_seen) as u8;
+            row.identity_delay = row.identity_delay.saturating_sub(elapsed);
+            row.sensor_delay = row.sensor_delay.saturating_sub(u16::from(elapsed));
+            row.fan_delay = row.fan_delay.saturating_sub(elapsed);
+            row.rh_delay = row.rh_delay.saturating_sub(elapsed);
         }
         row.address = address;
         row.last_seen = now;
@@ -208,11 +221,6 @@ impl Inventory {
                 && matches!(data, [0x26 | 0x28 | 0x2a | 0x2c | 0x2e | 0x30, 0, _, _, ..])
         {
             row.setpoint_device = true;
-        }
-        if row.setpoint_device && bus.job.active() && bus.job.address == address {
-            bus.job.fail();
-        } else if message == 0x2e7 {
-            bus.job.sample(address, subnet, data);
         }
         if message == 0x2e7
             && let [0, 0, mask, values @ ..] = data
@@ -229,13 +237,28 @@ impl Inventory {
             && let [13, 0, mask, values @ ..] = data
             && let Some(changed) = row.live.sensor_setup(*mask, values)
         {
-            row.sensor_probe = now.wrapping_add(3600);
+            row.sensor_delay = 3600;
             changed
-        } else if message == 0x2e7 && !row.setpoint_device {
+        } else if message == 0x2e7 && (!row.setpoint_device || !matches!(data, [3 | 5 | 6, 0, ..]))
+        {
             row.live.setting_report(data)
         } else {
             row.live.observe(message, data)
         };
+        if bus.job.active() && bus.job.address == address {
+            if row.setpoint_device
+                && matches!(
+                    bus.job.setting,
+                    Setting::Mode | Setting::Heat | Setting::Cool
+                )
+                || matches!(bus.job.setting, Setting::Heat | Setting::Cool)
+                    && !row.live.configured(bus.job.setting)
+            {
+                bus.job.fail();
+            } else if message == 0x2e7 {
+                bus.job.sample(address, subnet, data, &row.live);
+            }
+        }
         if !self.setbacks {
             changed &= !Field::Setback.mask();
         }
@@ -246,14 +269,29 @@ impl Inventory {
         if !can_probe {
             return None;
         }
-        let block = if (row.product == UNKNOWN || row.version == UNKNOWN)
-            && now.wrapping_sub(row.next_probe) < (1 << 31)
+        let block = if (row.product == UNKNOWN || row.version == UNKNOWN) && row.identity_delay == 0
         {
-            row.next_probe = now.wrapping_add(60);
+            row.identity_delay = 60;
             0
-        } else if message == 0x26f && now.wrapping_sub(row.sensor_probe) < (1 << 31) {
-            row.sensor_probe = now.wrapping_add(60);
+        } else if message == 0x26f && row.sensor_delay == 0 {
+            row.sensor_delay = 60;
             13
+        } else if message == 0x25f && row.fan_delay == 0 {
+            row.fan_delay = 60;
+            9
+        } else if message == 0x323 && row.rh_delay == 0 {
+            row.rh_delay = 60;
+            0xa3
+        } else if message == 0x2e7
+            && matches!(data, [0xa3, 0, ..])
+            && row.live.configured(Setting::HumidityMin)
+        {
+            0xa4
+        } else if message == 0x2e7
+            && matches!(data, [0xa3 | 0xa4, 0, ..])
+            && row.live.configured(Setting::HumidityMax)
+        {
+            0xa5
         } else {
             return None;
         };
@@ -300,11 +338,11 @@ impl Inventory {
         self.reporting = on;
         if !on {
             self.error_pending = false;
-            self.discard_fields(u8::MAX);
+            self.discard_fields(u16::MAX);
         }
     }
 
-    fn discard_fields(&mut self, mask: u8) {
+    fn discard_fields(&mut self, mask: u16) {
         for port in &mut self.ports {
             let mut pending = port.pending;
             while pending != 0 {
@@ -406,7 +444,16 @@ impl Inventory {
             ) else {
                 return Answer::Silent;
             };
-            if row.setpoint_device {
+            if row.setpoint_device
+                && matches!(setting, Setting::Mode | Setting::Heat | Setting::Cool)
+                || matches!(setting, Setting::Heat | Setting::Cool) && !row.live.configured(setting)
+                || matches!(setting, Setting::HumidityMin | Setting::HumidityMax)
+                    && !row.live.has_rh()
+                || setting == Setting::Fan
+                    && matches!(row.product, 99201..=99203)
+                    && call.service == 0
+                    && call.body.last().is_some_and(|v| *v > 10)
+            {
                 op.fail();
             }
             return settings::accept(&mut bus.job, op, call);

@@ -274,6 +274,19 @@ class PayloadTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 list(replay([packet]))
 
+    def test_sensor_and_humidity_configuration(self):
+        for block, mask, data, expected in [
+            ("0d00", "1f", "0102000000", {"onboard_sensor": 1, "sensor1": 2}),
+            ("a300", "03", "0102", {"humidity_mode_setup": 1, "dehumidity_mode_setup": 2}),
+            ("a400", "1f", "2021222324", {"wake_target_rh_percent": 32, "away_target_rh_percent": 36}),
+            ("a500", "1f", "3031323334", {"wake_target_rh_percent": 48, "away_target_rh_percent": 52}),
+        ]:
+            for result in (decode(0x2e7, block + mask + data), decode(0x2df, "0018" + block + data)):
+                self.assertEqual({k: result[k] for k in expected}, expected)
+        limited = decode(0x2e7, "a3000202")
+        self.assertNotIn("humidity_mode_setup", limited)
+        self.assertEqual(limited["dehumidity_mode_setup"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()

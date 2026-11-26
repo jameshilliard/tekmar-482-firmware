@@ -118,6 +118,19 @@ Block 0 identifies a product: bytes 1..3 form the little-endian product
 number, bytes 4..5 the J number, byte 6 the Z number and byte 7 the
 maximum tN4 version. Only complete, supported fields are interpreted.
 
+| Block | Positional bytes (in wire order) |
+| --- | --- |
+| 0003 | Operating mode, heating cycles per hour, air-group ID. |
+| 0005, 0006 | Heat or cool targets: Wake, Unoccupied, Occupied, Sleep, Away (degE). |
+| 0007 | The same five floor targets, followed by the floor maximum (degE). |
+| 0009 | Five ventilation targets in the same order; the wire scale depends on the thermostat model. |
+| 000D | Onboard sensor configuration, then external sensor configurations 1 through 4. Zero is off; 2 is floor. |
+| 00A3 | Humidification mode setup, dehumidification mode setup. |
+| 00A4, 00A5 | Five humidification or dehumidification percentage targets in setback order. tHA exposes only the first; the native blocks contain all five. |
+
+These layouts come from the 483 block types and the J1196J block-report
+and block-update handlers. Reports include a support mask; updates do not.
+
 ### Weekly schedules
 
 The 483's `ScheduleEvent` model defines a time byte in ten-minute units

@@ -71,7 +71,9 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
     let mut reboot = false;
     let mut occupied = [false; 5];
     let mut command_tx = [false; 5];
-    let mut sending: [Option<Attempt>; 5] = core::array::from_fn(|_| None);
+    #[unsafe(link_section = ".low_bss")]
+    static SENDERS: static_cell::StaticCell<[Option<Attempt>; 5]> = static_cell::StaticCell::new();
+    let sending = SENDERS.init_with(|| core::array::from_fn(|_| None));
     let mut ack: [LinkAck; 5] = core::array::from_fn(|_| LinkAck::default());
     let mut ack_pin: [Option<LineDriver>; 5] = core::array::from_fn(|_| None);
     let mut ack_mask = 0u8;

@@ -35,6 +35,148 @@ fn address(reply: Reply) -> u16 {
     u16::from_le_bytes(reply.payload()[5..].try_into().unwrap())
 }
 
+fn expect_block_read(inv: &mut Inventory, block: u8) {
+    assert_eq!(
+        inv.command_frame(0),
+        Request::new(0, &[0x6d, 0x70, 0, 7, block, 0, 0, 1, 0, 0, 0])
+    );
+    inv.command_sent(0, true);
+}
+
+#[test]
+fn slab_requires_enabled_floor_sensor_and_preserves_maximum_in_all_slot_updates() {
+    let mut inv = Inventory::new();
+    observe(&mut inv, 0, 0, 1, 0x36f, &[0; 8], 0);
+    for (setup, allowed) in [
+        (&[13, 0, 1, 1][..], false),
+        (&[13, 0, 3, 1, 2], true),
+        (&[13, 0, 1, 2], true),
+    ] {
+        assert!(call(&mut inv, 0x14f, 0, &[24, 0, 7, 42], 1).is_none());
+        expect_block_read(&mut inv, 13);
+        observe(&mut inv, 0, 0, 1, 0x2e7, setup, 1);
+        if !allowed {
+            assert!(inv.command_frame(0).is_none());
+            assert_eq!(inv.command_reply(0).unwrap().payload()[8], 255);
+            continue;
+        }
+        expect_block_read(&mut inv, 7);
+        observe(
+            &mut inv,
+            0,
+            0,
+            1,
+            0x2e7,
+            &[7, 0, 63, 10, 20, 30, 40, 50, 70],
+            1,
+        );
+        assert_eq!(
+            inv.command_frame(0),
+            Request::new(0, &[0x6d, 0xf0, 0, 10, 0, 1, 7, 0, 42, 42, 42, 42, 42, 70])
+        );
+        inv.command_sent(0, true);
+        expect_block_read(&mut inv, 7);
+        observe(
+            &mut inv,
+            0,
+            0,
+            1,
+            0x2e7,
+            &[7, 0, 63, 41, 41, 41, 41, 41, 70],
+            1,
+        );
+        assert_eq!(
+            inv.command_reply(0).unwrap().payload(),
+            &[3, 0x4f, 1, 0, 0, 24, 0, 0, 41]
+        );
+    }
+    inv.set_reporting(true);
+    observe(&mut inv, 0, 0, 1, 0x26f, &[1, 44, 10, 0], 1);
+    assert!(
+        core::iter::from_fn(|| inv.next_report(1))
+            .any(|r| r.payload() == [2, 0x4f, 1, 0, 0, 24, 0, 0, 44])
+    );
+    observe(&mut inv, 0, 0, 1, 0x26f, &[2, 70, 10, 0], 1);
+    assert!(!core::iter::from_fn(|| inv.next_report(1)).any(|r| r.payload()[1] == 0x4f));
+}
+
+#[test]
+fn fan_uses_ventilation_block_not_duct_status_or_an_unoccupied_away_alias() {
+    let mut inv = Inventory::new();
+    observe(&mut inv, 0, 0, 1, 0x36f, &[0; 8], 0);
+    let q = observe(&mut inv, 0, 0, 1, 0x25f, &[0x33, 0, 0, 0, 0], 0).unwrap();
+    assert_eq!(q[4], 9);
+    assert!(observe(&mut inv, 0, 0, 1, 0x25f, &[0; 5], 1).is_none());
+    call(&mut inv, 0x16f, 0, &[1], 1);
+    assert!(call(&mut inv, 0x157, 0, &[24, 0, 6, 60], 1).is_none());
+    expect_block_read(&mut inv, 9);
+    observe(&mut inv, 0, 0, 1, 0x2e7, &[9, 0, 31, 10, 20, 30, 40, 50], 1);
+    assert_eq!(
+        inv.command_frame(0),
+        Request::new(0, &[0x6d, 0xf0, 0, 9, 0, 1, 9, 0, 10, 20, 30, 40, 60])
+    );
+    inv.command_sent(0, true);
+    expect_block_read(&mut inv, 9);
+    observe(&mut inv, 0, 0, 1, 0x2e7, &[9, 0, 31, 10, 20, 30, 40, 55], 1);
+    assert_eq!(
+        &inv.command_reply(0).unwrap().payload()[5..],
+        &[24, 0, 6, 55]
+    );
+    let [p, q, r, _] = 99203u32.to_le_bytes();
+    observe(&mut inv, 0, 0, 1, 0x2e7, &[0, 0, 7, p, q, r], 1);
+    assert_eq!(
+        call(&mut inv, 0x157, 0, &[24, 0, 6, 11], 1)
+            .unwrap()
+            .payload()[8],
+        255
+    );
+    assert!(!inv.has_command(0));
+}
+
+#[test]
+fn humidity_limits_require_rh_report_and_the_corresponding_setup_flag() {
+    let mut inv = Inventory::new();
+    observe(&mut inv, 0, 0, 1, 0x36f, &[0; 8], 0);
+    assert_eq!(
+        call(&mut inv, 0x151, 0, &[24, 0, 40], 1).unwrap().payload()[7],
+        255
+    );
+    observe(&mut inv, 0, 0, 1, 0x323, &[0, 0, 41, 0, 0, 0], 1);
+    for (method, block, mask, enabled) in [
+        (0x151, 0xa5, 1, false),
+        (0x152, 0xa4, 2, false),
+        (0x151, 0xa5, 2, true),
+        (0x152, 0xa4, 1, true),
+    ] {
+        assert!(call(&mut inv, method, 0, &[24, 0, 40], 1).is_none());
+        expect_block_read(&mut inv, 0xa3);
+        observe(&mut inv, 0, 0, 1, 0x2e7, &[0xa3, 0, mask, 1], 1);
+        if !enabled {
+            assert!(inv.command_frame(0).is_none());
+            assert_eq!(inv.command_reply(0).unwrap().payload()[7], 255);
+            continue;
+        }
+        expect_block_read(&mut inv, block);
+        observe(
+            &mut inv,
+            0,
+            0,
+            1,
+            0x2e7,
+            &[block, 0, 31, 32, 33, 34, 35, 36],
+            1,
+        );
+        assert_eq!(
+            inv.command_frame(0),
+            Request::new(0, &[0x6d, 0xf0, 0, 9, 0, 1, block, 0, 40, 33, 34, 35, 36])
+        );
+        inv.command_sent(0, true);
+        expect_block_read(&mut inv, block);
+        observe(&mut inv, 0, 0, 1, 0x2e7, &[block, 0, 1, 38], 1);
+        assert_eq!(&inv.command_reply(0).unwrap().payload()[5..], &[24, 0, 38]);
+    }
+}
+
 #[test]
 fn mode_write_preserves_siblings_and_confirms_only_from_postwrite_read() {
     let mut inv = Inventory::new();

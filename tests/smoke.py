@@ -224,6 +224,17 @@ def run(path, ram, fast=False):
                 call(0x127, bytes.fromhex("010002"), True)
             elif method == 0x127 and data[0] == 3:
                 assert not setting_exchange and data[5:] == bytes.fromhex("010001")
+                query = bytes.fromhex("6d700007 0700 00 00008000")
+                setting_exchange.extend([
+                    (bytes.fromhex("6d700007 0d00 00 00008000"),
+                     bytes.fromhex("6e700605 0d0003 0102")),
+                    (query, bytes.fromhex("6e700609 07003f 404142434450")),
+                    (bytes.fromhex("6df0000a 0018 0700 454545454550"), None),
+                    (query, bytes.fromhex("6e700609 07003f 444444444450")),
+                ])
+                call(0x14f, bytes.fromhex("01000745"), True)
+            elif method == 0x14f and data[0] == 3:
+                assert not setting_exchange and data[5:] == bytes.fromhex("01000044")
                 extension(2, b"\x01", True)
             elif method == 0x544BF002 and data[5:] == bytes([1]):
                 plant_inputs()
@@ -328,7 +339,7 @@ def run(path, ram, fast=False):
 
     cpu.mmio_map(0xE000C000, 0x1000, read, None, write, None)
     cpu.hook_add(UC_HOOK_CODE, rom, begin=0x7FFFFFF0, end=0x7FFFFFF0)
-    cpu.emu_start(base, 0xFFFFFFFF, count=40_000_000)
+    cpu.emu_start(base, 0xFFFFFFFF, count=65_000_000)
     assert entered, (clock, phase, results, actual[-10:])
     assert actual[:4] == [
         (6, bytes.fromhex(x))

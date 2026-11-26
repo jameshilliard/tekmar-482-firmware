@@ -20,10 +20,11 @@ native message in Raw mode does not implement its tRPC services in Normal mode.
 | 12F ActiveDemand, 137 CurrentTemperature, 138 CurrentFloorTemperature | Request, read-only Update echo and Report. Source and availability rules below. |
 | 13D SetpointGroupEnable, 13E SetpointDevice | Not implemented. The documented melt/storm controls are group operations, not discovered device addresses. |
 | 13F HeatSetpoint, 147 CoolSetpoint | Addressed Request and Update by setback, using native blocks 5 and 6. Report the active slot when a block is observed and the active setback is known. |
-| 14F SlabSetpoint, 157 FanPercent | Not implemented. |
+| 14F SlabSetpoint, 157 FanPercent | Addressed Request, Update and active-slot Report. Blocks 7 and 9; see sensor requirements and fan units below. |
 | 150 RelativeHumidity | Request and Report from RHReport. Update is ignored. |
-| 151 HumidityMax, 152 HumidityMin, 17F SetbackEvents | Not implemented. |
-| 16F SetbackEnable, 177 SetbackState | Read or set the gateway enable flag; read the active setback and receive setback reports when enabled. The flag also determines which heat/cool slots an Update changes. |
+| 151 HumidityMax, 152 HumidityMin | Addressed Request, Update and Report. Require an RH source and the corresponding block A3 enable flag. Not setback-indexed in tHA. |
+| 17F SetbackEvents | Not implemented. |
+| 16F SetbackEnable, 177 SetbackState | Read or set the gateway enable flag; read the active setback and receive setback reports when enabled. The flag also determines which heat, cool, floor and fan slots an Update changes. |
 | 187 FirmwareRevision, 1A7 DateTime | Not implemented. FirmwareBuild is a separate custom extension, not a vendor revision. |
 
 ## Inventory and identity
@@ -87,6 +88,26 @@ setbacks enabled, selectors 0/2/4 read byte 0 and write bytes 0 and 2;
 1/3/5 read byte 1 and write bytes 1 and 3; Away (6) uses byte 4. With
 setbacks disabled a write changes all supported slots. CURRENT (7) uses
 the last observed active setback; an unknown active slot is not guessed.
+
+Slab and fan use the same slot aliases as heat and cool. For slab, the
+gateway first reads sensor setup (000D) and requires a configured floor
+sensor. Block 7 byte 5 is the floor maximum, not another setback slot;
+all writes preserve it. SlabStatus type 0/1 can report the active target;
+other types do not supply that value. A floor-only setup is not evidence
+for a room heating or cooling setpoint.
+
+FanDuctStatus (25F) describes fan operation, not the configured target.
+It prompts a rate-limited read of ventilation requirements (block 9).
+The tHA fan value stays in device units: 0 is Auto; full scale is 10 on
+models 544/545/546 and 100 on other documented models.
+
+RHReport (323) establishes a humidity source. For a humidity limit, the
+gateway reads setup (A3) before reading the target. Humidification must
+be enabled in byte 0 for Min (A4), dehumidification in byte 1 for Max
+(A5). Missing or unavailable setup values do not enable either control.
+tHA reads and edits only byte 0 in each five-byte target block, regardless
+of SetbackEnable. The remaining native targets are preserved. Normal mode
+also probes enabled limits on RH activity for push reports.
 
 An Update needs a complete fixed-width block: the gateway will not invent
 missing siblings or discard an extension. It preserves unsupported bytes.
