@@ -258,6 +258,24 @@ stream. A lit LED is not proof of delivery.
 The DIP state is diagnostic, not permission to drive a bus. Test at
 power-on retains the hardware ROM entry function.
 
+For a witnessed test from the installed dev firmware:
+
+```sh
+uv run --script tools/ram_trial.py "$PORT" \
+  target/ram-trial/armv4t-none-eabi/release/tekmar-482-firmware.bin \
+  --from-app --check-input test --input-timeout 90
+```
+
+Wait for the prompt before touching the control. This test only reads
+`PANEL?`: it never sends `LED-TEST`. It requires the debounced button
+to be observed pressed and released, exactly one new press, and the
+complete six-pin sweep. The person at the panel checks the actual lights.
+The corresponding `--check-input dip` test needs both switch positions
+to be observed and exactly two transitions back to the original setting.
+Use only controls accessible with the enclosure closed; skip a physical
+test if it requires opening an energized enclosure. A timeout is not a
+pass. The SRAM trial returns to the installed dev image on either outcome.
+
 ### Hardware verification
 
 | Interface | Repeatable check | What still requires a person or peer |
@@ -265,7 +283,7 @@ power-on retains the hardware ROM entry function.
 | UART0 TX/RX and software ISP entry | An SRAM trial verifies the upload byte-for-byte, executes a command, returns through ROM and identifies the installed dev image. | Observe Power and UART TX/RX lamps during the transfer to check the lamps themselves. |
 | Five tN4 lines | Use `--echo-test` and `--frames 35 --diagnostics` in separate trials. Inspect per-port results, input levels and edge counts. | End-to-end verification needs an active peer on each physical port. A permanently dominant input is never driven. |
 | Five bus LEDs and Test LED | `--panel-after 25 --panel-test` reads idle activity, then follows the six individual output pin levels. | Watch Bus 0 through 4, then Test. Pin readback alone cannot detect a failed lamp or a swapped label. |
-| Test button and Reporting DIP | `board.py panel PORT` reports raw-at-boot and debounced states plus change counters. The ARM tests simulate switch bounce and verify a single press/change. | To verify the physical controls, observe the changed counter after a press or switch change with the panel build running. |
+| Test button and Reporting DIP | On the running panel build, use `board.py panel PORT --check-input test` or `--check-input dip`. | An operator must act on the physical control. Counters alone do not pass either test. |
 
 The [482 installation manual, pp. 8-10](https://www.watts.com/dfsmedia/0533dbba17714b1ab581ab07a4cbb521/42923-source/638820695670000000/482-d-09.pdf)
 identifies DTR as programming-only, and the DIP as the stock reporting

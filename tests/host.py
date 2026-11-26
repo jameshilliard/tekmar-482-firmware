@@ -15,7 +15,7 @@ from pathlib import Path
 HELPER = Path(__file__).resolve().parents[1] / "tools/board.py"
 sys.path.insert(0, str(HELPER.parent))
 from frames import describe
-from board import Transmission
+from board import PanelState, Transmission
 
 
 class HelperTest(unittest.TestCase):
@@ -54,6 +54,43 @@ class HelperTest(unittest.TestCase):
         out, err = proc.communicate(timeout=3)
         self.assertEqual(proc.returncode, 0, err)
         self.assertEqual(out.strip(), b"TEKMAR-482-DEV")
+
+    def panel_check(self, which, states):
+        master, proc = self.start_helper("panel", "--check-input", which, "--seconds", "5")
+        self.expect(master, b"A\nID?\n")
+        os.write(master, b"TEKMAR-482-DEV\r\n")
+        for state in states:
+            self.expect(master, b"A\nPANEL?\n")
+            os.write(master, ("PANEL" + "".join(f" {v:08x}" for v in state) + "\r\n").encode())
+        out, err = proc.communicate(timeout=2)
+        return proc.returncode, out + err
+
+    def test_observed_button_must_trigger_complete_sweep(self):
+        base = PanelState(1, 1, 4, 2, 7, 7, 0)
+        sweep = [base._replace(inputs=3 if n < 3 else 1, presses=5, leds=1<<n, pins=1<<n, test=1)
+                 for n in range(6)]
+        end = base._replace(presses=5)
+        status, output = self.panel_check("test", [base, *sweep, end])
+        self.assertEqual(status, 0, output)
+        self.assertIn(b"one counted press and six LED pin states verified", output)
+        for middle in (sweep[1:], [s._replace(inputs=1) for s in sweep]):
+            status, output = self.panel_check("test", [base, *middle, end])
+            self.assertNotEqual(status, 0, output)
+            self.assertIn(b"incomplete Test evidence", output)
+
+    def test_observed_dip_must_change_and_return(self):
+        base = PanelState(0, 0, 1, 5, 2, 2, 0)
+        other = base._replace(inputs=1, changes=6)
+        restored = base._replace(changes=7)
+        status, output = self.panel_check("dip", [base, other, restored])
+        self.assertEqual(status, 0, output)
+        self.assertIn(b"return to the original level verified", output)
+        for last, message in [(restored, b"opposite level was not observed"),
+                              (other._replace(changes=5), b"disagrees with transition count"),
+                              (other._replace(leds=64, pins=64), b"invalid panel flags")]:
+            status, output = self.panel_check("dip", [base, last])
+            self.assertNotEqual(status, 0, output)
+            self.assertIn(message, output)
 
     def test_wrong_device(self):
         master, proc = self.start_helper("enter-isp")

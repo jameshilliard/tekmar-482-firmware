@@ -86,6 +86,10 @@ async def main():
     parser.add_argument("--echo-test", action="store_true",
                         help="transmit one no-target read request and verify the echo on each bus")
     parser.add_argument("--panel-test", action="store_true", help="cycle and read back each panel LED")
+    parser.add_argument("--check-input", choices=("test", "dip"),
+                        help="watch for a physical input test after the SRAM build starts")
+    parser.add_argument("--input-timeout", type=int, metavar="SECONDS",
+                        help="window for --check-input (default 60 seconds)")
     parser.add_argument("--panel-after", type=int, metavar="SECONDS",
                         help="leave UART idle, then read the bus activity LEDs before any capture")
     parser.add_argument("--frames", type=int, metavar="SECONDS", help="monitor live frames from SRAM")
@@ -101,6 +105,8 @@ async def main():
         parser.error("--frames must be positive")
     if args.panel_after is not None and args.panel_after < 1:
         parser.error("--panel-after must be positive")
+    if args.input_timeout is not None and (args.input_timeout < 1 or not args.check_input):
+        parser.error("--input-timeout must be positive and requires --check-input")
     if (args.diagnostics or args.tx or args.save_capture) and not args.frames:
         parser.error("--diagnostics, --tx and --save-capture require --frames")
     if args.ack_port is not None and (not args.frames or args.tx):
@@ -112,6 +118,8 @@ async def main():
             await panel(port)
         if args.panel_test:
             await panel(port, test=True)
+        if args.check_input:
+            await panel(port, check_input=args.check_input, seconds=args.input_timeout or 60)
         if args.probe:
             await probe(port)
         if args.echo_test:

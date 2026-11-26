@@ -33,17 +33,74 @@ async def panel_state(port):
     if not re.fullmatch(rb"PANEL(?: [0-9a-f]{8}){7}\r\n", line):
         raise ValueError(f"invalid panel state: {line!r}")
     state = PanelState(*(int(v, 16) for v in line.split()[1:]))
+    if max(state.boot, state.inputs) > 3 or max(state.pins, state.leds) > 63 or state.test > 1:
+        raise ValueError(f"invalid panel flags: {state}")
     if state.leds != state.pins:
         raise RuntimeError(f"panel GPIO readback mismatch: {state}")
     return state
 
 
-async def panel(port, test=False):
+async def check_panel_input(port, initial, which, seconds):
+    print("Use only controls accessible with the enclosure closed.", flush=True)
+    if which == "test":
+        if initial.inputs & 2 or initial.test or initial.presses == 0xffffffff:
+            raise RuntimeError("start with Test released, lamp sweep finished and press counter available")
+        print("Waiting for a Test press: hold for one second, then release. "
+              "Watch Bus 0 through 4, then Test.", flush=True)
+    elif which == "dip":
+        if initial.changes >= 0xfffffffe:
+            raise RuntimeError("DIP counter cannot record two more changes")
+        print(f"Waiting for Reporting DIP to change from {initial.inputs & 1} "
+              "and return to its starting position.", flush=True)
+    else:
+        raise ValueError(f"unknown panel input: {which}")
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + seconds
+    asserted = False
+    sweep = []
+    while loop.time() < deadline:
+        state = await panel_state(port)
+        if state.boot != initial.boot:
+            raise RuntimeError("boot input state changed during panel test")
+        if which == "test":
+            presses = state.presses - initial.presses
+            if presses not in (0, 1):
+                raise RuntimeError(f"expected one Test press; counter changed by {presses}")
+            if presses:
+                asserted |= bool(state.inputs & 2)
+                if state.test and (not sweep or sweep[-1] != state.pins):
+                    sweep.append(state.pins)
+                if not state.test and not state.inputs & 2:
+                    if asserted and sweep == [1, 2, 4, 8, 16, 32]:
+                        print("Test input: press, release, one counted press and six LED pin states verified.")
+                        return
+                    raise RuntimeError(f"incomplete Test evidence: saw pressed={asserted}, LED masks={sweep}")
+        else:
+            changes = state.changes - initial.changes
+            flipped = bool((state.inputs ^ initial.inputs) & 1)
+            if changes not in (0, 1, 2) or flipped != (changes == 1):
+                raise RuntimeError(f"DIP input disagrees with transition count: {changes}")
+            if flipped and not asserted:
+                print("Observed the opposite DIP position.", flush=True)
+                asserted = True
+            if changes == 2:
+                if not asserted:
+                    raise RuntimeError("both DIP transitions counted but the opposite level was not observed")
+                print("Reporting DIP: opposite level and return to the original level verified.")
+                return
+        await asyncio.sleep(0.06)
+    raise RuntimeError(f"no complete physical {which} input test in {seconds:g} seconds")
+
+
+async def panel(port, test=False, *, check_input=None, seconds=60):
     await identify(port)
     state = await panel_state(port)
     print(f"panel: DIP at boot={state.boot & 1} now={state.inputs & 1} "
           f"test_button={state.inputs >> 1} presses={state.presses} DIP_changes={state.changes} "
           f"LED_pin_mask=0x{state.pins:02x}")
+    if check_input is not None:
+        await check_panel_input(port, state, check_input, seconds)
+        return
     if not test:
         return
     await port.write(b"A\nLED-TEST\n")
@@ -217,7 +274,8 @@ async def main() -> int:
     parser.add_argument("action", choices=["identify", "probe", "echo-test", "frames", "diagnostics", "send", "panel", "led-test", "enter-isp"])
     parser.add_argument("port", help="local serial device (requires exclusive access)")
     parser.add_argument("--baud", type=int, default=9600)
-    parser.add_argument("--seconds", type=int, default=30, help="frame capture duration")
+    parser.add_argument("--seconds", type=int, default=30, help="capture or panel input test duration")
+    parser.add_argument("--check-input", choices=("test", "dip"), help="verify a physical change with panel")
     parser.add_argument("--save-capture", type=Path, help="save the raw UART stream in a new file")
     parser.add_argument("--ack-port", type=int, choices=range(5),
                         help="with diagnostics, acknowledge CRC-verified frames on just this bus")
@@ -234,6 +292,8 @@ async def main() -> int:
         parser.error("--save-capture requires send, frames or diagnostics")
     if args.ack_port is not None and args.action != "diagnostics":
         parser.error("--ack-port requires diagnostics")
+    if args.check_input and args.action != "panel":
+        parser.error("--check-input requires panel")
     try:
         async with connect(args.port, args.baud) as port:
             if args.action == "echo-test":
@@ -245,7 +305,7 @@ async def main() -> int:
                 await monitor(port, args.seconds, diagnostics=args.action == "diagnostics",
                               save_capture=args.save_capture, ack_port=args.ack_port)
             elif args.action in ("panel", "led-test"):
-                await panel(port, args.action == "led-test")
+                await panel(port, args.action == "led-test", check_input=args.check_input, seconds=args.seconds)
             elif args.action == "probe":
                 await probe(port)
             else:
