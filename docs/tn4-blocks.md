@@ -16,6 +16,27 @@ byte with flags. A partial word remains raw. Unknown units, reserved flag
 bits and extension bytes are retained rather than assigned meanings.
 Layout support does not mean every product answers or accepts an update.
 
+### Discovering identities
+
+Block 00 can select multiple nodes with a single read. The four-byte
+little-endian target mask has bits 0..30 for nodes 1..31, irrespective
+of the node lock bit. Bit 31 is padding. Use `ff ff ff 7f` and argument
+zero to ask for identity on one subnet. Each answering node sends its
+own ordinary block report. This also reached thermostat nodes that had
+not sent status during a short observation and a snowmelt control.
+Reports may be forwarded onto other physical lines. A receive port is
+not proof of the original wiring or of a unique device.
+
+The [product catalog](../tools/payloads/products.py) uses Tektra and J
+numbers from the 483 SW 11 product table, plus the additional models
+in the [published tHA list](https://www.watts.com/our-story/brands/tekmar/tha).
+It does not infer a model from a J number, a group ID or a master role.
+Two early thermostat variants share a product number; so do a power
+manager and a user switch. Without a distinguishing J number they
+remain unidentified. For identified models, the 40 SW 11 read tables
+suggest blocks to try; the masks in actual reports establish the
+available data, not these lists.
+
 | Block (hex) | Report contents |
 | --- | --- |
 | 00 | Product (24 bits), J number (16), Z number and maximum tN4 version. Product is not the retail model number. |

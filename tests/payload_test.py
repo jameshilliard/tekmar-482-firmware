@@ -7,6 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 from frames import encode, replay
 from payloads import DECODERS, decode_payload
+from payloads.products import identify_product
 
 
 def decode(mid, hex_bytes):
@@ -14,6 +15,24 @@ def decode(mid, hex_bytes):
 
 
 class PayloadTests(unittest.TestCase):
+    def test_catalog_uses_product_and_j_number_not_address_or_order(self):
+        for number, j, model in (
+            (101901, 1159, "346"), (101901, 1145, "481"),
+            (10599181, 1118, "541"), (10599181, 1116, "542"),
+            (103301, 1191, "402"), (104103, 1206, "402"),
+            (105801, 1226, "654"), (108402, 0, "671"), (101103, 0, "033"),
+        ):
+            with self.subTest(number=number, j=j):
+                fields = decode_payload(0x2e7, b"\0\0\x1f" + number.to_bytes(3, "little") + j.to_bytes(2, "little"))
+                self.assertEqual(fields["model"], model)
+        for number, j in ((101901, None), (10599181, 0), (101901, 123), (0x123456, 1206)):
+            self.assertIsNone(identify_product(number, j))
+        self.assertNotIn("model", decode(0x2e7, "0000 18 b604"))
+        self.assertNotIn("model", decode_payload(0x2e7, b"\0\0\x07" + (101901).to_bytes(3, "little")))
+        self.assertIn(0x22, identify_product(103301).candidate_blocks)
+        self.assertIn(0xcd, identify_product(105801).candidate_blocks)
+        self.assertEqual(identify_product(108402).candidate_blocks, (0,))
+
     def test_registered_addressed_blocks_have_named_report_fields(self):
         registered = {
             *range(0x51), 0x53, 0x54, 0x55, 0x58, 0x5a, 0x5b, 0x62,
