@@ -39,6 +39,59 @@ fn address(reply: Reply) -> u16 {
 }
 
 #[test]
+fn clock_update_admission_and_native_boundaries() {
+    let mut inv = Inventory::new();
+    inv.set_reporting(true);
+    let update = |inv: &mut Inventory, b: &[u8]| {
+        let reply = call(inv, 0x1a7, 0, b, 0).unwrap();
+        assert_eq!(&reply.payload()[..5], &[3, 0xa7, 1, 0, 0]);
+        <[u8; 7]>::try_from(&reply.payload()[5..]).unwrap()
+    };
+    let first = [0xd0, 7, 1, 1, 1, 0, 0];
+    let last = [0xcf, 8, 12, 31, 7, 23, 59];
+    assert!(call(&mut inv, 0x1a7, 1, &first, 0).is_none());
+    for (i, v) in [
+        (0, 0xcf),
+        (1, 9),
+        (2, 0),
+        (2, 13),
+        (3, 0),
+        (3, 32),
+        (4, 0),
+        (4, 8),
+        (5, 24),
+        (6, 60),
+    ] {
+        let mut bad = first;
+        bad[i] = v;
+        assert_eq!(update(&mut inv, &bad), [255; 7]);
+    }
+    assert_eq!(update(&mut inv, &first[..6]), [255; 7]);
+    assert_eq!(update(&mut inv, &[0; 8]), [255; 7]);
+    assert_eq!(update(&mut inv, &first), first);
+    let tx = inv.next_broadcast(0, 0).unwrap();
+    assert_eq!(update(&mut inv, &last), [255; 7]); // other ports still queued
+    for p in 1..PORTS {
+        assert_eq!(
+            inv.next_broadcast(p, 0).unwrap().frame(p as u8),
+            Request::new(p as u8, &[0x71, 0xf0, 0, 5, 0, 1, 0, 0, 0])
+        );
+    }
+    assert_eq!(update(&mut inv, &last), last);
+    assert!(!inv.stale_broadcast(0, tx, 0)); // new clock cannot cancel a dequeued frame
+    for p in 0..PORTS {
+        assert_eq!(
+            inv.next_broadcast(p, 0).unwrap().frame(p as u8),
+            Request::new(p as u8, &[0x71, 0xf0, 0, 5, 59, 191, 11, 30, 255])
+        );
+        assert!(!inv.has_broadcast(p));
+    }
+    assert!(!inv.has_reports());
+    call(&mut inv, 0x13d, 0, &[1, 1], 0);
+    assert_eq!(update(&mut inv, &first), [255; 7]); // non-clock traffic also counts
+}
+
+#[test]
 fn outdoor_source_precedence_expiry_and_unsent_values() {
     let mut inv = Inventory::new();
     let host = |i: &mut Inventory, value: u16, now| {

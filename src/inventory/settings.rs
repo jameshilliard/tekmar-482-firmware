@@ -146,6 +146,9 @@ impl Operation {
     pub(super) fn active(&self) -> bool {
         self.step != Step::Idle
     }
+    pub(super) fn frame_waiting(&self) -> bool {
+        matches!(self.step, Step::Read | Step::Write | Step::Verify)
+    }
     pub(super) fn begin(
         call: &Call<'_>,
         setting: Setting,

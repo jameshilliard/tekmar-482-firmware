@@ -27,7 +27,25 @@ native message in Raw mode does not implement its tRPC services in Normal mode.
 | 151 HumidityMax, 152 HumidityMin | Addressed Request, Update and Report. Require an RH source and the corresponding block A3 enable flag. Not setback-indexed in tHA. |
 | 17F SetbackEvents | Request, read-only Update echo and Report. Returns the schedule master's configuration code (0/1/2 for zero/two/four events); FF if unknown, reserved or not a master. |
 | 16F SetbackEnable, 177 SetbackState | Read or set the gateway enable flag; read the active setback and receive setback reports when enabled. The flag also determines which heat, cool, floor and fan slots an Update changes. |
-| 187 FirmwareRevision, 1A7 DateTime | Not implemented. FirmwareBuild is a separate custom extension, not a vendor revision. |
+| 187 FirmwareRevision | Not implemented. FirmwareBuild is a separate custom extension, not a vendor revision. |
+| 1A7 DateTime | Update broadcasts local wall time on all five lines. No Request response or Report. |
+
+## Clock updates
+
+DateTime accepts a little-endian year (2000..2255), month (1..12), day
+(1..31), ISO weekday (Monday=1 through Sunday=7), hour (0..23) and minute
+(0..59). Like J1196J at `0xac90`, it checks field ranges, not calendar
+consistency. An Update echoes these seven bytes when admitted. Invalid
+fields or a nonempty native transmit queue return seven FF bytes on
+Response:Update. A frame already handed to the line driver is not queued;
+waiting for a serial reply is not queued either.
+
+Each line gets class-1 native 31F with five bytes: minute, weekday OR
+(hour << 3), month minus one, day minus one, year minus 2000. There is
+no DST-mode byte. The echo acknowledges queue admission only, not delivery
+or a change to any particular thermostat. ReportingState does not gate the
+write. Normal mode neither reads back the clock nor reports observed native
+clock frames; those remain available in Raw mode.
 
 ## Inventory and identity
 

@@ -512,6 +512,20 @@ impl Inventory {
     }
 
     pub fn handle(&mut self, call: &Call<'_>, now: u32) -> Answer {
+        if call.method == 0x1a7 {
+            if call.service != 0 {
+                return Answer::Silent;
+            }
+            // J1196J checks native TX mailbox depth, not an active driver or pending serial reply.
+            if let Some(value) = broadcast::Value::clock(call.body)
+                && self.broadcasts.is_empty()
+                && !self.ports.iter().any(|p| p.job.frame_waiting())
+            {
+                self.broadcasts.push(value, now);
+                return Answer::Reply(call.ok(call.body));
+            }
+            return Answer::Reply(call.ok(&[0xff; 7]));
+        }
         if call.method == groups::METHOD {
             return self.groups.handle(call, now, &mut self.broadcasts);
         }

@@ -176,8 +176,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                         && let Some(reply) = inventory.command_reply(p)
                     {
                         out.enqueue(Kind::Control, tpck::TRPC, reply.payload());
-                    } else if !inventory.has_command(p)
-                        && let Some(tx) = inventory.next_broadcast(p, seconds)
+                    } else if let Some(tx) = inventory.next_broadcast(p, seconds)
                         && let Some(req) = tx.frame(p as u8)
                     {
                         sending[p] = Attempt::new(&req, INPUTS[p].0, t);

@@ -76,6 +76,8 @@ def run(path, ram, fast=False):
     exchanges = [deque() for _ in PORTS]
     setting_exchange = exchanges[0]
     driven = [[] for _ in PORTS]
+    clock_frame = bytes.fromhex("71f00005 1b52 05190c")
+    clock_ports = set()
 
     def level(p, high, at):
         pin, t, ch, _ = PORTS[p]
@@ -89,7 +91,7 @@ def run(path, ram, fast=False):
             timers[t][0] = timers[t].get(0, 0) | (1 << (4 + ch))
 
     def gpio_write(uc, off, size, value, data):
-        nonlocal pins
+        nonlocal pins, phase
         if off in (0x18, 0x1C, 0):
             for p, exchange in enumerate(exchanges):
                 if not exchange:
@@ -116,6 +118,19 @@ def run(path, ram, fast=False):
                         inject(bytes.fromhex("72f00604 4806 0000"), port=4)
                     if phase == "outdoor-request" and not any(exchanges):
                         inject(bytes.fromhex("6f700603 840100"))
+                    if phase == "clock-during-read":
+                        phase = "clock"
+                        for line in exchanges:
+                            line.appendleft((clock_frame, None))
+                        call(0x1a7, bytes(7))  # Request is silent.
+                        call(0x1a7, bytes(7), True)
+                        incoming.extend(bytes.fromhex("ca0c0600a7010000dc07061a020a1be435"))
+                    elif expected == clock_frame:
+                        assert p not in clock_ports
+                        clock_ports.add(p)
+                        if len(clock_ports) == 5:
+                            # Only now answer the outstanding setting read on port 0.
+                            inject(bytes.fromhex("6e700606 030007 010309"))
             if off == 0:
                 gpio[0] = value
             elif off == 0x18:
@@ -258,8 +273,9 @@ def run(path, ram, fast=False):
                 assert data[5:] == bytes.fromhex("01000a06")
                 query = bytes.fromhex("6d700007 0300 00 00008000")
                 report = bytes.fromhex("6e700606 030007 010309")
+                phase = "clock-during-read"
                 setting_exchange.extend([
-                    (query, report),
+                    (query, None),
                     (bytes.fromhex("6df00007 0018 0300 020309"), None),
                     (query, report),
                 ])
@@ -350,6 +366,11 @@ def run(path, ram, fast=False):
                 phase = "capture"
                 extension(2, b"\x01", True)
             elif method == 0x544BF002 and data[5:] == bytes([1]):
+                assert [pkt for k, pkt in actual if k == 6 and pkt[1:5] == bytes.fromhex("a7010000")] == [
+                    bytes.fromhex("03a7010000") + b"\xff" * 7,
+                    bytes.fromhex("03a7010000dc07061a020a1b"),
+                ]
+                assert len(clock_ports) == 5
                 plant_inputs()
             elif method == 0x544BF002 and data[5:] == bytes([0]):
                 for p in range(5):
