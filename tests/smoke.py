@@ -2,7 +2,7 @@
 # requires-python = ">=3.10"
 # dependencies = ["unicorn==2.1.4"]
 # ///
-"""Execute the built ARM image; model only UART status and the ROM entry boundary."""
+"""Execute the built ARM image against UART and timer capture register models."""
 
 import argparse
 import struct
@@ -22,11 +22,13 @@ def smoke(image: bytes, ram: bool) -> None:
     cpu.mem_write(base, image)
     cpu.mem_map(0x7FFFF000, 0x1000)
 
-    # Leave all tN4 GPIO and timer registers unmapped: touching them fails the test.
+    # GPIO data/direction and the VIC remain unmapped: touching them fails the test.
     cpu.mem_map(0xE01FC000, 0x1000)
     cpu.mem_map(0xE002C000, 0x1000)
     cpu.mem_write(0xE01FC088, struct.pack("<I", 1 << 10))  # PLL0 locked
-    frames = deque([b"?", b"A!", b"A\nBAD-ENTER-ISP\n", b"A\nID?\n", b"A\nENTER-ISP\r\n"])
+    frames = deque([b"?", b"A!", b"A\nBAD-ENTER-ISP\n", b"A\nID?\n",
+                    b"A\nRX-END\n", b"A\nRX-BEGIN\n", b"A\nRX-BEGIN\n",
+                    b"A\nRX-END\n", b"A\nRX-STREAM\n", b"A\nRX-BEGIN\n", b"A\nENTER-ISP\r\n"])
     incoming = deque()
     outgoing = bytearray()
     writes = []
@@ -34,6 +36,53 @@ def smoke(image: bytes, ram: bool) -> None:
     drained = False
     pending_polls = 0
     reached_rom = False
+    timers = [{}, {}]
+    wire = "0" * 10 + "10001001000110000010000010000010000110100101000111000101111" + "0100000000"
+    edges = deque((i * 2500, bit) for i, bit in enumerate(wire) if i and bit != wire[i-1])
+    streaming = False
+    clock = 0
+
+    def timer_write(uc, offset, size, value, index):
+        nonlocal streaming
+        regs = timers[index]
+        assert size == 4 and offset in (0, 4, 0x0c, 0x14, 0x28, 0x70)
+        if offset == 0:
+            regs[0] = regs.get(0, 0) & ~value
+            return
+        regs[offset] = value
+        if offset == 4 and value == 1:
+            assert regs[0x0c] == 47 and regs[0x14] == 0 and regs[0x70] == 0
+            pins = sum(2 << (2 * pin) for pin in (2, 4, 6, 10, 11))
+            assert uc.mem_read(0xE002C000, 4) == struct.pack("<I", pins | 5)
+            if regs[0x28] == (0x16d, 0x2d)[index]:
+                streaming = True
+                regs[8] = regs[0] = 0
+                return
+            assert regs[0x28] == (0x1ff, 0x3f)[index]
+            regs[8] = 1_000_000 + index
+            regs[0] = (0x60, 0x10)[index]
+            for channel in range(3):
+                regs[0x2c + channel * 4] = 1 + 16 * index + channel
+
+    def timer_read(uc, offset, size, index):
+        nonlocal clock, streaming
+        assert size == 4 and offset in (0, 8, 0x28, 0x2c, 0x30, 0x34)
+        if streaming and offset == 8:
+            if index == 0:
+                clock += 200
+                if edges and edges[0][0] <= clock:
+                    stamp, bit = edges.popleft()
+                    assert timers[0][0x28] >> 3 & 7 == (5 if bit == "1" else 6)
+                    timers[0][0x30] = stamp
+                    timers[0][0] |= 0x20
+                if clock > (len(wire) + 2) * 2500:
+                    streaming = False
+                    incoming.append(10)
+            return clock
+        return timers[index][offset]
+
+    for index, timer in enumerate((0xe0004000, 0xe0008000)):
+        cpu.mmio_map(timer, 0x1000, timer_read, index, timer_write, index)
 
     def uart_read(uc, offset, size, user_data):
         nonlocal drained, pending_polls
@@ -65,7 +114,12 @@ def smoke(image: bytes, ram: bool) -> None:
         assert drained
         assert not frames
         assert uc.mem_read(0xE01FC080, 4) == bytes(4)
-        assert outgoing == b"TEKMAR-482-DEV\r\nOK ISP\r\n"
+        assert outgoing == (b"TEKMAR-482-DEV\r\nERR RX-INACTIVE\r\nOK RX\r\nOK RX\r\n"
+                            b"RX 000f4240 000f4241 0000000d 00000002 00000000"
+                            b" 00000003 00000011 00000000\r\nOK FRAMES\r\n"
+                            b"F 0 000061a8 0e2f A 12300001a5\r\nEND 00000000\r\nOK RX\r\nOK ISP\r\n")
+        assert all(t[0] == t[4] == t[0x28] == 0 for t in timers)
+        assert uc.mem_read(0xE01FC0C4, 4) == struct.pack("<I", 8)
         assert uc.reg_read(UC_ARM_REG_CPSR) & 0xE0 == 0xE0  # Thumb, IRQ/FIQ masked
         for reg in (UC_ARM_REG_R0, UC_ARM_REG_R1):
             assert 0x40000200 <= uc.reg_read(reg) <= 0x40007EE0 - 20
@@ -76,7 +130,7 @@ def smoke(image: bytes, ram: bool) -> None:
 
     cpu.mmio_map(0xE000C000, 0x1000, uart_read, None, uart_write, None)
     cpu.hook_add(UC_HOOK_CODE, at_rom, begin=0x7FFFFFF0, end=0x7FFFFFF0)
-    cpu.emu_start(base, 0xFFFFFFFF, count=100_000)
+    cpu.emu_start(base, 0xFFFFFFFF, count=3_000_000)
     assert reached_rom, "firmware did not hand off to ROM"
     assert (0x28, 0x10) in writes  # fractional divider disabled during measurement
     assert cpu.mem_read(0xE002C000, 4) == struct.pack("<I", 5)  # UART0 pins only

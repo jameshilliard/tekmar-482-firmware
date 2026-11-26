@@ -15,8 +15,8 @@ class Link:
         self.writer.write(data)
         await asyncio.wait_for(self.writer.drain(), 3)
 
-    async def readline(self, limit=128):
-        data = await asyncio.wait_for(self.reader.readuntil(b"\n"), 3)
+    async def readline(self, limit=128, timeout=3):
+        data = await asyncio.wait_for(self.reader.readuntil(b"\n"), timeout)
         if len(data) > limit:
             raise ValueError(f"oversized serial line: {len(data)} bytes")
         return data

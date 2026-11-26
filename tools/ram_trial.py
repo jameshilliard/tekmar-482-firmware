@@ -2,7 +2,7 @@
 # requires-python = ">=3.10"
 # dependencies = ["serialx==1.8.1"]
 # ///
-"""Run the RAM-linked development image in an already synchronized LPC2146 ISP session."""
+"""Run a verified SRAM trial from a synchronized ISP session or the installed dev image."""
 
 import argparse
 import asyncio
@@ -10,7 +10,7 @@ import binascii
 from pathlib import Path
 
 from backup import check_part, expect, line, read_page, send, synchronize
-from board import request
+from board import monitor, probe, request
 from check_image import check
 from port import connect
 
@@ -50,14 +50,41 @@ async def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("port")
     parser.add_argument("ram_bin", type=Path)
+    parser.add_argument("--probe", action="store_true", help="observe receiver inputs before returning to ISP")
+    parser.add_argument("--frames", type=int, metavar="SECONDS", help="monitor live frames from SRAM")
+    parser.add_argument("--from-app", action="store_true",
+                        help="enter ISP from the installed dev image and return to it after the trial")
     args = parser.parse_args()
+    if args.frames is not None and args.frames < 1:
+        parser.error("--frames must be positive")
+    image = args.ram_bin.read_bytes()
+    check(image, ram=True)
     async with connect(args.port) as port:
-        await start_image(port, args.ram_bin.read_bytes())
+        if args.from_app:
+            await request(port, True)  # checks the dev identity before entering ROM
+            await asyncio.sleep(0.1)
+            await synchronize(port)
+        await start_image(port, image)
         await asyncio.sleep(0.1)  # The application resets the UART FIFO during startup.
-        await request(port, True)
-        await asyncio.sleep(0.1)  # Let ROM enable autobaud before sending its sync byte.
-        await synchronize(port)
-        print("ROM answered with the LPC2146 part ID after ENTER-ISP. Flash was not written.")
+        try:
+            if args.probe:
+                await probe(port)
+            if args.frames:
+                await monitor(port, args.frames)
+        finally:
+            await request(port, True)
+            await asyncio.sleep(0.1)  # Let ROM enable autobaud before sending its sync byte.
+            await synchronize(port)
+            if args.from_app:
+                await send(port, b"U 23130")
+                await expect(port, b"0")
+                await send(port, b"G 0 A")
+                # The installed app can reset the UART before ROM finishes its reply.
+                await asyncio.sleep(0.15)
+    if args.from_app:
+        async with connect(args.port) as port:
+            await request(port, False)
+    print("Trial complete. Flash was not written.")
 
 
 if __name__ == "__main__":

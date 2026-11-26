@@ -1,0 +1,101 @@
+use super::super::{LSR, THRE, UART0};
+use super::{CCR, CR0, Capture, INPUTS, IR, TC, TIMERS, read, send, write};
+use tekmar_482_firmware::tn4::{Frame, Receiver, Trailer};
+
+fn hex(dst: &mut [u8], value: u32) {
+    for (i, byte) in dst.iter_mut().rev().enumerate() {
+        *byte = b"0123456789abcdef"[((value >> (4 * i)) & 15) as usize];
+    }
+}
+
+struct Outbox {
+    buf: [u8; 1024],
+    tail: usize,
+    len: usize,
+    dropped: u32,
+}
+
+impl Outbox {
+    fn frame(&mut self, port: usize, f: Frame<'_>) {
+        let mut line = [0u8; 22 + 2 * 67];
+        line[..20].copy_from_slice(b"F 0 00000000 0000 A ");
+        line[2] += port as u8;
+        hex(&mut line[4..12], f.start_us);
+        hex(&mut line[13..17], u32::from(f.crc));
+        line[18] = match f.trailer {
+            Trailer::Ack => b'A',
+            Trailer::NoAck => b'N',
+            Trailer::BadDelimiter => b'D',
+            Trailer::BadEnd { ack: true } => b'E',
+            Trailer::BadEnd { ack: false } => b'M',
+        };
+        for (digits, &byte) in line[20..].as_chunks_mut::<2>().0.iter_mut().zip(f.bytes) {
+            hex(digits, u32::from(byte));
+        }
+        let end = 20 + f.bytes.len() * 2;
+        line[end..end + 2].copy_from_slice(b"\r\n");
+        if end + 2 > self.buf.len() - self.len {
+            self.dropped = self.dropped.saturating_add(1);
+            return;
+        }
+        for &b in &line[..end + 2] {
+            self.buf[(self.tail + self.len) % self.buf.len()] = b;
+            self.len += 1;
+        }
+    }
+
+    fn pump(&mut self) {
+        if self.len == 0 || read(LSR) & THRE == 0 {
+            return;
+        }
+        // THRE indicates the 16-byte UART0 transmit FIFO is empty.
+        for _ in 0..self.len.min(16) {
+            write(UART0, u32::from(self.buf[self.tail]));
+            self.tail = (self.tail + 1) % self.buf.len();
+            self.len -= 1;
+        }
+    }
+}
+
+pub fn stream() {
+    let mut rx: [Receiver; 5] = core::array::from_fn(|_| Receiver::default());
+    let mut rising = [true; 5];
+    let mut out = Outbox {
+        buf: [0; 1024],
+        tail: 0,
+        len: 0,
+        dropped: 0,
+    };
+    send(b"OK FRAMES\r\n");
+    let capture = Capture::arm(5); // positive edges first; idle is low
+    while read(LSR) & 1 == 0 {
+        let now = TIMERS.map(|t| read(t + TC));
+        let pending = TIMERS.map(|t| read(t + IR));
+        for (port, (_, timer, ch)) in INPUTS.into_iter().enumerate() {
+            let t = TIMERS[timer];
+            let flag = 1 << (4 + ch);
+            let mut emit = |f: Frame<'_>| out.frame(port, f);
+            if pending[timer] & flag != 0 {
+                let at = read(t + CR0 + 4 * ch);
+                write(t + IR, flag);
+                let next = if rising[port] { 6 } else { 5 };
+                write(
+                    t + CCR,
+                    (read(t + CCR) & !(7 << (3 * ch))) | (next << (3 * ch)),
+                );
+                rx[port].edge(at, rising[port], &mut emit);
+                rising[port] = !rising[port];
+            }
+            rx[port].advance(now[timer], emit);
+        }
+        out.pump();
+    }
+    read(UART0); // any byte stops capture; subsequent commands use normal training
+    drop(capture);
+    while out.len != 0 {
+        out.pump();
+    }
+    let mut end = *b"END 00000000\r\n";
+    hex(&mut end[4..12], out.dropped);
+    send(&end);
+}

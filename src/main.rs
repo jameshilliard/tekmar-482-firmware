@@ -8,6 +8,7 @@ global_asm!(include_str!("startup.S"), options(raw));
 
 mod board {
     use super::ptr;
+    pub mod probe;
 
     const MAMCR: usize = 0xe01f_c000;
     const MAMTIM: usize = 0xe01f_c004;
@@ -109,13 +110,28 @@ mod board {
 #[unsafe(no_mangle)]
 extern "C" fn firmware_main() -> ! {
     board::init();
+    let mut probe: Option<board::probe::Capture> = None;
     loop {
         board::train();
         let mut decoder = Decoder::default();
         while let Ok(byte) = board::receive() {
             match decoder.push(byte) {
                 Some(Command::Identify) => board::send(IDENTITY),
+                Some(Command::RxBegin) => {
+                    drop(probe.take());
+                    probe = Some(board::probe::Capture::start());
+                    board::send(b"OK RX\r\n");
+                }
+                Some(Command::RxEnd) => match probe.take() {
+                    Some(capture) => capture.report(),
+                    None => board::send(b"ERR RX-INACTIVE\r\n"),
+                },
+                Some(Command::RxStream) => {
+                    drop(probe.take());
+                    board::probe::stream();
+                }
                 Some(Command::EnterIsp) => {
+                    drop(probe.take());
                     board::send(ISP_ACK);
                     board::enter_isp();
                 }

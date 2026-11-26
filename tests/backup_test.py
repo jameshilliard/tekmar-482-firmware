@@ -75,11 +75,15 @@ class BackupTest(unittest.IsolatedAsyncioTestCase):
             await ram_trial.start_image(untouched, flash)
         self.assertEqual(untouched.sent, [])
 
-        rx = [b"0", str(backup.PART_ID).encode(), b"0", b"13", b"2", b"0"]
-        rx += [b"OK"] * ((len(ram) + 899) // 900)
+        ram += bytes(-len(ram) % 4)
+        rx = [b"0", str(backup.PART_ID).encode(), b"0", b"13", b"2"]
+        for start in range(0, len(ram), 4096):
+            size = min(4096, len(ram) - start)
+            rx += [b"0"] + [b"OK"] * ((size + 899) // 900)
         for readback in (ram[:-1] + bytes([ram[-1] ^ 1]), ram):
             port = Transcript(rx + [b"0", b"0"])
-            with patch.object(ram_trial, "read_page", return_value=readback):
+            pages = [readback[i:i+4096] for i in range(0, len(readback), 4096)]
+            with patch.object(ram_trial, "read_page", side_effect=pages):
                 if readback != ram:
                     with self.assertRaisesRegex(RuntimeError, "readback differs"):
                         await ram_trial.start_image(port, ram)

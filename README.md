@@ -2,8 +2,8 @@
 
 A minimal standalone Rust image for the LPC2146-based 482 with the 12 MHz
 crystal. Installing it replaces the factory firmware. The development image
-uses UART0 for identification and entry into ROM ISP; it does not implement
-tRPC or communicate on the tN4 buses.
+uses UART0 for identification, streaming passively decoded tN4 frames, and entry
+into ROM ISP. It does not transmit on tN4 or implement tRPC.
 
 ## Build and test on Linux
 
@@ -53,6 +53,9 @@ Power-cycle normally after the trial. No erase, flash copy or persistent
 installation is part of this test.
 
 ## Bench use
+
+For the receive-only bridge and the `board.py frames` and `probe` commands,
+see the [interface map and capture procedure](docs/interfaces.md).
 
 Use a **spare gateway disconnected from the tN4 buses**. Before the first
 write, retain a verified backup and the stock HEX for that unit's lot.

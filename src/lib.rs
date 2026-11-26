@@ -1,11 +1,16 @@
 #![no_std]
 
+pub mod tn4;
+
 pub const IDENTITY: &[u8] = b"TEKMAR-482-DEV\r\n";
 pub const ISP_ACK: &[u8] = b"OK ISP\r\n";
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Command {
     Identify,
+    RxBegin,
+    RxEnd,
+    RxStream,
     EnterIsp,
 }
 
@@ -24,6 +29,9 @@ impl Decoder {
             let line = line.strip_suffix(b"\r").unwrap_or(line);
             let command = match (self.discard, line) {
                 (false, b"ID?") => Some(Command::Identify),
+                (false, b"RX-BEGIN") => Some(Command::RxBegin),
+                (false, b"RX-END") => Some(Command::RxEnd),
+                (false, b"RX-STREAM") => Some(Command::RxStream),
                 (false, b"ENTER-ISP") => Some(Command::EnterIsp),
                 _ => None,
             };
@@ -59,6 +67,8 @@ mod tests {
     fn accepts_only_complete_commands() {
         let mut d = Decoder::default();
         assert_eq!(feed(&mut d, b"ID?\n"), Some(Command::Identify));
+        assert_eq!(feed(&mut d, b"RX-BEGIN\r\n"), Some(Command::RxBegin));
+        assert_eq!(feed(&mut d, b"RX-END\n"), Some(Command::RxEnd));
         assert_eq!(feed(&mut d, b"ENTER-ISP\r"), None);
         assert_eq!(feed(&mut d, b"\n"), Some(Command::EnterIsp));
         assert_eq!(feed(&mut d, b"ENTER-ISP\n"), Some(Command::EnterIsp));
