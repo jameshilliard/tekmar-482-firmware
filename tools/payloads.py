@@ -48,6 +48,18 @@ def subnet(value: int) -> Fields:
     return {"water_subnet": value, "water_bus": value & 7, "water_control": value >> 3}
 
 
+SNOW_WORDS = {
+    0x19: "water_detect_state", 0x1a: "heat_sequence_state",
+    0x1c: "warm_weather_shutdown_state", 0x1d: "cold_weather_cutoff_state",
+    0x1e: "zone_type", 0x1f: "electric_off_time_15s_ticks",
+    0x20: "zone_id", 0x21: "sensor_flags", 0x25: "melt_group_id", 0x26: "storm_group_id",
+    0x27: "boiler_output_raw", 0x28: "mix_output_raw", 0x29: "pwm_output_raw",
+    0x2a: "system_pump_contacts", 0x2b: "alert_relay_contacts",
+    0x2c: "return_temperature_raw", 0x2d: "supply_temperature_raw",
+    0x2e: "supply_target_raw", 0x2f: "keep_alive", 0x30: "melting_time_minutes",
+}
+
+
 def snowmelt(r: Reader) -> Fields:
     address, count = r.take(2)
     fields: Fields = {"source_type": address & 7, "source_id": address >> 3, "pairs": count}
@@ -58,10 +70,13 @@ def snowmelt(r: Reader) -> Fields:
         if key in (34, 35, 36):
             name = {34: "slab_temperature", 35: "slab_setpoint", 36: "edge_temperature"}[key]
             fields.update(temp(prefix + name, value))
-        elif key == 47:
-            fields[prefix + "keep_alive"] = value
+        elif key == 0x1b:
+            fields[prefix + "operating_state"] = value >> 8
+            fields[prefix + "operating_substate"] = value & 0xff
+        elif 1 <= key <= 24:
+            fields[prefix + "command_status"] = value
         else:
-            fields[prefix + "value_raw"] = value
+            fields[prefix + SNOW_WORDS.get(key, "value_raw")] = value
     return fields
 
 
@@ -119,6 +134,22 @@ def outdoor(r: Reader) -> Fields:
         # J1196J 0x3dd8 emits the word twice; 0x3e38 reads the first word only.
         second = r.word()
         fields.update(second_word_raw=second, matches_first=int(second == current))
+    return fields
+
+
+def clock_report(r: Reader) -> Fields:
+    minute, time, date, day, year = r.take(5)
+    month = date & 15
+    fields: Fields = {"minute": minute, "weekday": time & 7, "hour": time >> 3,
+                      "date_supported": int(date != 0xff), "month_raw": month,
+                      "dst": (date >> 4) & 1, "reserved": date >> 5,
+                      "day_raw": day, "year_from_2000": year}
+    # J1196J 0xac90 transmits zero-based month/day. These are the remote's
+    # fields, not a timezone-qualified timestamp or a claim its clock is set.
+    if date != 0xff and month < 12 and day < 31:
+        fields.update(year=2000 + year, month=month + 1, day=day + 1)
+    if r.remaining:
+        fields["dst_mode"] = r.byte()
     return fields
 
 
@@ -219,6 +250,7 @@ DECODERS: dict[int, tuple[str, Callable[[Reader], Fields]]] = {
     0x2d7: ("BlockRequest", block_request),
     0x2df: ("BlockUpdate", block_update),
     0x2e7: ("BlockReport", block_report),
+    0x31f: ("RealTimeClockReport", clock_report),
     0x32f: ("OutdoorTemperatureReport", outdoor),
     0x337: ("MaximumBoilerPercent", lambda r: {"max_value": r.byte()}),
     0x33f: ("CycleLengthRequest", lambda r: {"air_group_id": r.byte(), "requested_length": r.byte()}),
@@ -227,6 +259,8 @@ DECODERS: dict[int, tuple[str, Callable[[Reader], Fields]]] = {
     0x3c7: ("RelayStatusHeartbeat", lambda r: subnet(r.byte())),
     0x3cf: ("MasterStatus", master),
     0x3d7: ("NetworkError", network_error),
+    0x3df: ("NetworkInitRequest", lambda _: {}),
+    0x3f7: ("MasterQuery", lambda _: {}),
 }
 
 

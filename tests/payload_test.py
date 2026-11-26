@@ -39,6 +39,8 @@ class PayloadTests(unittest.TestCase):
             0x2df: ("012305002c202a251e", dict(block_id=5, target_node=3, target_node_flags=1,
                         wake_f=71.6, away_f=59.0)),
             0x2e7: ("0600142830", dict(block_id=6, support_mask="0x14", occupied_raw=40, away_raw=48)),
+            0x31f: ("1e631a181a03", dict(hour=12, minute=30, weekday=3, month=11, day=25,
+                      year=2026, date_supported=1, dst=1, dst_mode=3)),
             0x32f: ("32053205", dict(outdoor_temp_f=48.0, second_word_raw=1330, matches_first=1)),
             0x337: ("42", dict(max_value=66)),
             0x33f: ("0320", dict(air_group_id=3, requested_length=32)),
@@ -58,6 +60,8 @@ class PayloadTests(unittest.TestCase):
                         weather_shutdown=1, operating_on_max=1, operating_on_min=1,
                         output_limited=1, reserved=1)),
             0x3d7: ("0582", dict(code=5, instance=2, priority=2)),
+            0x3df: ("", {}),
+            0x3f7: ("", {}),
         }
         self.assertEqual(set(cases), DECODERS.keys())
         for mid, (body, expected) in cases.items():
@@ -83,9 +87,14 @@ class PayloadTests(unittest.TestCase):
         self.assertEqual(decode(0x2d7, "0500070200000078563412")["arguments"], 0x12345678)
         self.assertIn("truncated", decode(0x2e7, "05001f01"))
         self.assertIn("truncated", decode(0x2df, "0101050028202a25"))
+        fields = decode(0x31f, "002affffff")
+        self.assertEqual(fields["date_supported"], 0)
+        self.assertNotIn("year", fields)
+        self.assertNotIn("dst_mode", fields)
+        self.assertEqual(decode(0x3df, "01"), {"extension_hex": "01"})
 
     def test_truncation_and_sentinels(self):
-        for mid in DECODERS:
+        for mid in DECODERS.keys() - {0x3df, 0x3f7}:
             self.assertIn("truncated", decode(mid, ""))
         for mid, body in [(0x17e, "11022f0000"), (0x32f, "123456"), (0x367, "010280"),
                           (0x3cf, "340900c003493264fe34"), (0x24f, "000601")]:
@@ -94,6 +103,16 @@ class PayloadTests(unittest.TestCase):
         for body in ("0040", "0080", "00c0", "ffff"):
             self.assertEqual(decode(0x32f, body)["outdoor_temp"], "unavailable")
         self.assertNotIn("tank_temp_f", decode(0x23f, "000001ff"))
+
+    def test_snowmelt_status_fields(self):
+        fields = decode(0x17e, "09070102011b02011f0700210a002affff2d3412300c00")
+        self.assertEqual(fields["pair0_command_status"], 258)
+        self.assertEqual((fields["pair1_operating_state"], fields["pair1_operating_substate"]), (1, 2))
+        self.assertEqual(fields["pair2_electric_off_time_15s_ticks"], 7)
+        self.assertEqual(fields["pair3_sensor_flags"], 10)
+        self.assertEqual(fields["pair4_system_pump_contacts"], 0xffff)
+        self.assertEqual(fields["pair5_supply_temperature_raw"], 0x1234)
+        self.assertEqual(fields["pair6_melting_time_minutes"], 12)
 
     def test_replay_keeps_diagnostics_and_verifies_record_integrity(self):
         record = b"F 3 000061a8 5f14 M 7d7123420582\r\n"

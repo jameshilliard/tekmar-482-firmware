@@ -111,12 +111,13 @@ method IDs. Link trailer status is always reported separately.
 
 | ID | Decoded fields |
 | --- | --- |
-| 0x17e | Snowmelt source, ordered key/value pairs; slab temperature (0x22), slab setpoint (0x23), edge temperature (0x24), keep-alive (0x2f) |
+| 0x17e | Snowmelt source and ordered key/value pairs: command status, water detection, heat sequence, state/substate, weather cutoffs, zone and group IDs, sensor flags, slab/edge readings, outputs, contacts, supply/return fields, keep-alive and melting time. |
 | 0x1f2 | I/O report subnet, node, channel, type and 16-bit value |
 | 0x22f | Setpoint enable, setback, operating/demand/actuator/relay states, priorities, three temperatures and status excuses |
 | 0x23f | DHW enable, setback, priorities, operating/demand/actuator states, target and tank temperatures |
 | 0x24f | Plant device ID/count/type; subtype 6 (modulating boiler) state, pump, modulation levels, inlet/outlet raw values, output and return protection |
 | 0x2d7, 0x2df, 0x2e7 | Block request (target subnet and node mask), update (address and values), report (support bitmap and packed values). Setpoint blocks 5/6 decode Wake, Unoccupied, Occupied, Sleep and Away in degE. |
+| 0x31f | Real-time clock report: time, weekday, zero-based date fields, year offset, DST flag and optional DST mode. This is a remote device report, not the gateway or host clock. |
 | 0x32f | Outdoor temperature; the 482 sends a second copy of the word (J1196J 0x3dd8) and reads the first (0x3e38). Show both even if they differ. |
 | 0x337, 0x33f | Maximum boiler percent; air group and requested cycle length |
 | 0x367 | Water subnet, stage, override, priority, pump flags and delay; target temperature only when output is on |
@@ -124,6 +125,7 @@ method IDs. Link trailer status is always reported separately.
 | 0x3c7 | Relay heartbeat water subnet, split into bus and control |
 | 0x3cf | Supply, return, target and optional DHW supply temperatures, heat/cool mode, loop/pump percentages, setback and limit flags |
 | 0x3d7 | Network error code, instance and priority |
+| 0x3df, 0x3f7 | Network init request and master query. Neither has a defined payload; extra bytes are retained. |
 
 Known temperature encodings use the [tekmar degH and degE definitions](https://www.watts.com/our-story/brands/tekmar/tha).
 The wire value is retained. Missing-temperature codes are not converted to
