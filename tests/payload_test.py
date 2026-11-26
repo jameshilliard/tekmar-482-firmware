@@ -2,11 +2,13 @@
 
 import sys
 import unittest
+from datetime import datetime, time, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 from frames import encode, replay
 from payloads import DECODERS, decode_payload
+from payloads.line import ClockReport, GroupReport, SetpointAssignment, ZoneSyncAdjustment, ZoneTargetMode, group_command
 from payloads.products import block_selectors, identify_product
 from payloads.queries import NativeStatusQuery, ReplyPart, SnowmeltRole, StatusRequest
 from payloads.scenes import NativeScene, SceneReport, SceneResponse
@@ -20,6 +22,66 @@ def decode(mid, hex_bytes):
 
 
 class PayloadTests(unittest.TestCase):
+    def test_clock_encodes_standard_date_even_at_day_and_year_rollover(self):
+        for wall, wire in ((datetime(2007, 1, 8, 0, 30), "1e bf 10 06 07"),
+                           (datetime(2024, 3, 1, 0, 1), "01 bc 11 1c 18"),
+                           (datetime(2256, 1, 1, 0, 0), "00 b9 1b 1e ff")):
+            report = ClockReport.from_wall_time(wall, dst=True, dst_mode=3)
+            self.assertEqual(report.payload, bytes.fromhex(wire) + b"\x03")
+            self.assertEqual(report.wall_datetime, wall)
+            self.assertEqual(decode_payload(0x31f, report.payload)["local_datetime"], wall.isoformat(timespec="minutes"))
+        winter = datetime(2012, 6, 26, 10, 27, tzinfo=timezone.utc)
+        self.assertEqual(ClockReport.from_wall_time(winter).payload, bytes.fromhex("1b5205190c"))
+        with self.assertRaises(ValueError):
+            ClockReport.from_wall_time(datetime(2000, 1, 1), dst=True)
+        with self.assertRaises(ValueError):
+            ClockReport.from_wall_time(winter, dst_mode=256)
+
+    def test_clock_does_not_invent_a_date_dst_or_a_trustworthy_weekday(self):
+        report = ClockReport(bytes.fromhex("2d 63 ff ff ff 04 aa"))
+        self.assertEqual(report.reported_time, time(12, 45))
+        self.assertIsNone(report.daylight)
+        self.assertIsNone(report.standard_date)
+        self.assertIsNone(report.wall_datetime)
+        data = decode_payload(0x31f, report.payload)
+        self.assertNotIn("dst", data)
+        self.assertEqual((data["dst_bit_raw"], data["extension_hex"], data["dst_mode"]), (1, "aa", 4))
+        for raw in ("3c 01 00 00 18", "01 ff 00 00 18", "01 00 00 00 18", "00 01 01 1e 18", "00 02 00 00 18"):
+            self.assertNotIn("local_datetime", decode(0x31f, raw))
+        self.assertIn("truncated", decode(0x31f, "01 02 ff ff"))
+
+    def test_group_enable_is_not_an_addressed_control_or_a_link_ack(self):
+        for app in range(6):
+            for group in (None, 0, 1, 12, 13, 255):
+                setup = SetpointAssignment.from_fields({"application_mode": app, "setpoint_enable_address": group})
+                self.assertEqual(setup.remote_group, group if app not in (2, 5) and group in (1, 12) else None)
+        self.assertIsNone(SetpointAssignment.from_fields({"setpoint_enable_address": 1}).remote_group)
+        self.assertEqual(group_command(12, True), b"\x0c\x01")
+        for group in (0, 13):
+            with self.assertRaises(ValueError):
+                group_command(group, False)
+        for flags in (0, 1, 16, 17, 255):
+            report = GroupReport(17, flags)
+            self.assertEqual((report.requested, report.actual), (bool(flags & 1), bool(flags & 16)))
+            self.assertEqual(decode_payload(0x20f, bytes([17, flags]))["flags_raw"], flags)
+
+    def test_access_status_ignores_own_query_and_zone_settings_use_three_independent_bytes(self):
+        query = NativeStatusQuery.gateway_access()
+        self.assertEqual((query.kind, query.payload), (0x200, b"\x01"))
+        for payload in (b"\x00", b"\x02", b"\x03", b""):
+            with self.assertRaises(ValueError):
+                NativeStatusQuery(StatusRequest.GATEWAY_ACCESS, payload)
+        for payload in (b"", b"\x01", b"\x03"):
+            self.assertIsNone(query.match(0x200, 0, payload))
+        for payload in (b"\x00", b"\x02", b"\xf2\xff"):
+            self.assertIsNotNone(query.match(0x200, 0, payload))
+        for cycle in (0, 1):
+            for purge in (False, True):
+                for target in ZoneTargetMode:
+                    self.assertEqual(ZoneSyncAdjustment(cycle, purge, target).payload, bytes([cycle, purge, target]))
+        with self.assertRaises(ValueError):
+            ZoneSyncAdjustment(2, True, ZoneTargetMode.SETPOINT)
+
     def test_sensor_onboard_polarity_by_revision_not_external_or_setup(self):
         for number, last in ((99203, 8), (99202, 9), (99201, 9)):
             product = identify_product(number)
@@ -170,6 +232,7 @@ class PayloadTests(unittest.TestCase):
     def test_native_status_request_reply_vectors(self):
         cases = (
             (NativeStatusQuery(StatusRequest.ZONE_SYNC), 0x011, "", 0x010, "000102", 0, 1),
+            (NativeStatusQuery.gateway_access(), 0x200, "01", 0x200, "02", 0, 1),
             (NativeStatusQuery(StatusRequest.WWSD), 0x307, "", 0x30f, "0a", 0, 1),
             (NativeStatusQuery(StatusRequest.CLOCK), 0x317, "", 0x31f, "2a61070119", 0, 1),
             (NativeStatusQuery(StatusRequest.OUTDOOR), 0x327, "", 0x32f, "0004", 0, 1),
@@ -185,7 +248,7 @@ class PayloadTests(unittest.TestCase):
                 self.assertEqual(query.kind, req)
                 self.assertEqual(query.payload, bytes.fromhex(payload))
                 self.assertEqual(query.match(reply, 0x12, bytes.fromhex(body)), ReplyPart(frozenset([item]), count))
-                self.assertIsNone(query.match(req, 0x12, bytes.fromhex(body)))
+                self.assertIsNone(query.match(req, 0x12, query.payload))
                 self.assertIsNone(query.match(reply, 0x12, b""))
         self.assertIsNone(NativeStatusQuery.humidity(5, 4).match(0x323, 6, bytes(6)))
         self.assertIsNone(NativeStatusQuery.io(1, 2, 3).match(0x1f3, 0, bytes([1, 2, 4, 0, 0, 0])))

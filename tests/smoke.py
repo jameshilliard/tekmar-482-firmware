@@ -22,6 +22,8 @@ PORTS = [(4, 0, 1, 28), (11, 1, 1, 13), (6, 0, 2, 22), (10, 1, 0, 8), (2, 0, 0, 
 BITS = "10001001000110000010000010000010000110100101000111000101111"
 BODY = bytes.fromhex("12300001a5")
 SCENE = bytes.fromhex("2ff00003 07e001")  # 483 scene 8, eight hours.
+RAW_SENDS = (SCENE, bytes.fromhex("21f00002 0401"), bytes.fromhex("31f00005 1ebf100607"),
+             bytes.fromhex("01000003 000102"), bytes.fromhex("20000001 01"))
 WEEK_QUERY = bytes.fromhex("6d70000b 100000 00008000 00000000")
 WEEK_REPORT = bytes.fromhex("6e70060a 10007f 90020304050607")
 
@@ -449,7 +451,7 @@ def run(path, ram, fast=False):
             invalid.add(p)
         elif service == 0:
             if phase == "weekly-read":
-                assert data[6:] in (SCENE, WEEK_QUERY, WEEK_REPORT)
+                assert data[6:] in (RAW_SENDS[p], WEEK_QUERY, WEEK_REPORT)
                 if data[6:] == WEEK_REPORT:
                     assert p == 0
                     weekly.add("report")
@@ -457,15 +459,15 @@ def run(path, ram, fast=False):
                         extension(2, bytes(1), True)
                         at_line_rate()
                 return
-            assert data[6:] == (BODY if phase == "capture" else SCENE)
+            assert data[6:] == (BODY if phase == "capture" else RAW_SENDS[p])
             if phase == "capture":
                 assert p in invalid
                 valid.add(p)
                 if len(valid) == 5:
                     phase = "sending"
-                    for n in range(5):
-                        exchanges[n].append((SCENE, None))
-                        send(n)
+                    for n, body in enumerate(RAW_SENDS):
+                        exchanges[n].append((body, None))
+                        send(n, body)
                     send(0)
                     extension(2, b"\x00", True)
                     at_line_rate()

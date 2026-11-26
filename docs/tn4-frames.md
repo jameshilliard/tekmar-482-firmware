@@ -56,6 +56,10 @@ and payload length 2. Payload `05 82` means error 5, instance 2, priority
 2. The CRC over SOF and `7d7123420582` is `5f14`. That CRC is checked on the bus, not appended to the Rx payload.
 The timestamp is gateway uptime, not wall-clock time.
 
+For the commands the 483 application actually originates, including group
+selection, clock daylight handling and their limits, see
+[gateway-originated traffic](gateway-traffic.md).
+
 ## Payload notation
 
 Offsets below start at the first byte **after** the header. A word (`u16`)
