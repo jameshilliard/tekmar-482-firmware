@@ -76,7 +76,7 @@ timestamp is the SOF edge on that port's microsecond timer (32 bits, wraps
 at about 71 minutes; the two timers start sequentially). The check word
 and bytes are hexadecimal. The host independently checks length and CRC,
 then prints the priority, message ID, subnet, node and raw payload using the
-483 receiver's header layout. Recognized IDs also get a message name. An ACK is
+483 receiver's header layout. Recognized IDs also get decoded payload fields. An ACK is
 link-layer only, not confirmation that an application acted on a message.
 
 | Status | What the receiver observed after a matching CRC |
@@ -99,3 +99,37 @@ In a 70-second SRAM trial, the host verified 74 records: 26 acknowledged on
 port 1, 44 acknowledged on port 2, and four CRC-matching bodies on port 0
 with no ACK and a bad end. No UART queue drops occurred. Ports 3 and 4
 remained quiet; they have not been validated with an active source.
+
+### Application payloads
+
+The host decodes these native IDs without changing the firmware or sending bus
+traffic. Field layouts come from the 483 application (`message_types_in.rb`,
+`message_types.rb`, `subnet_in.rb` and `snow_pair_in.rb`), not from tRPC
+method IDs. Link trailer status is always reported separately.
+
+| ID | Decoded fields |
+| --- | --- |
+| 0x17e | Snowmelt source, ordered key/value pairs; slab temperature (0x22), slab setpoint (0x23), edge temperature (0x24), keep-alive (0x2f) |
+| 0x1f2 | I/O report subnet, node, channel, type and 16-bit value |
+| 0x22f | Setpoint enable, setback, operating/demand/actuator/relay states, priorities, three temperatures and status excuses |
+| 0x23f | DHW enable, setback, priorities, operating/demand/actuator states, target and tank temperatures |
+| 0x24f | Plant device ID/count/type; subtype 6 (modulating boiler) state, pump, modulation levels, inlet/outlet raw values, output and return protection |
+| 0x32f | Outdoor temperature; the 482 sends a second copy of the word (J1196J 0x3dd8) and reads the first (0x3e38). Show both even if they differ. |
+| 0x337, 0x33f | Maximum boiler percent; air group and requested cycle length |
+| 0x367 | Water subnet, stage, override, priority, pump flags and delay; target temperature only when output is on |
+| 0x36f | Air group, mode, demand, schedule, output states, local/remote temperatures and target |
+| 0x3c7 | Relay heartbeat water subnet, split into bus and control |
+| 0x3cf | Supply, return, target and optional DHW supply temperatures, heat/cool mode, loop/pump percentages, setback and limit flags |
+| 0x3d7 | Network error code, instance and priority |
+
+Known temperature encodings use the [tekmar degH and degE definitions](https://www.watts.com/our-story/brands/tekmar/tha).
+The wire value is retained. Missing-temperature codes are not converted to
+degrees (see J1196J 0x594c); zero is shown raw because zero-filled inactive
+fields don't establish a measured temperature. Values without a confirmed
+scale or enum keep their numeric codes.
+
+Unknown snowmelt keys retain both bytes as a little-endian value. Unrecognized
+trailing bytes (including byte 12 of observed 0x22f reports) appear as
+`extension_hex`. A known payload too short for its layout is marked
+`truncated`, not interpreted using missing bytes. Unknown message IDs still
+display their header and raw payload.

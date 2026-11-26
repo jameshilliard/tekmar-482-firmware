@@ -13,7 +13,7 @@ from pathlib import Path
 
 HELPER = Path(__file__).resolve().parents[1] / "tools/board.py"
 sys.path.insert(0, str(HELPER.parent))
-from frames import describe, details
+from frames import describe
 
 
 class HelperTest(unittest.TestCase):
@@ -95,14 +95,6 @@ class HelperTest(unittest.TestCase):
         for raw in (b"12300001", b"12300001a4", b"z", b"ff" * 68):
             with self.assertRaises(ValueError):
                 describe(b"F 2 000061a8 0e2f A " + raw + b"\r\n")
-
-    def test_payload_details(self):
-        self.assertEqual(details(0x17e, bytes.fromhex("1101000000")),
-                         "SnowmeltZoneStatus source_type=1 source_id=2 pairs=1")
-        self.assertEqual(details(0x17e, bytes.fromhex("110300")), "SnowmeltZoneStatus")
-        self.assertEqual(details(0x3d7, bytes.fromhex("0142")), "NetworkError code=1 instance=2 priority=1")
-        self.assertEqual(details(0x337, b"\x64"), "MaximumBoilerPercent max_value=100")
-
 
 if __name__ == "__main__":
     unittest.main()

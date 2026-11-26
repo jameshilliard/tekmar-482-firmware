@@ -21,6 +21,7 @@ check: image ram-trial
 	cargo test --locked --lib
 	RUSTC_BOOTSTRAP=1 cargo clippy --locked --release --target armv4t-none-eabi -Zbuild-std=core -- -D warnings
 	uv run --script tests/host.py
+	python3 tests/payload_test.py
 	uv run --script tests/backup_test.py
 	uv run --script tests/smoke.py $(ELF).bin
 	uv run --script tests/smoke.py --ram $(RAM_ELF).bin

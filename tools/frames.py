@@ -2,33 +2,13 @@
 
 import re
 
+from payloads import details
+
 
 TRAILERS = {
     b"A": "ack", b"N": "no-ack", b"D": "bad-crc-delimiter",
     b"E": "ack/bad-end", b"M": "no-ack/bad-end",
 }
-
-# Message IDs and header names from the 483 tN4 receiver; never filter on this table.
-MESSAGES = {
-    0x17e: "SnowmeltZoneStatus", 0x1f2: "IOChangeReport", 0x22f: "SetpointStatus",
-    0x23f: "DHWStatus", 0x24f: "PlantOutputStatus", 0x337: "MaximumBoilerPercent",
-    0x33f: "CycleLengthRequest", 0x367: "StageHeatDemand", 0x36f: "AirGroupMemberStatus",
-    0x3c7: "RelayStatusHeartbeat", 0x3cf: "MasterStatus", 0x3d7: "NetworkError",
-}
-
-
-def details(message: int, payload: bytes) -> str:
-    name = MESSAGES.get(message, "")
-    if message == 0x17e and len(payload) >= 2 and len(payload) == 2 + 3 * payload[1]:
-        return (f"{name} source_type={payload[0] & 7} source_id={payload[0] >> 3} "
-                f"pairs={payload[1]}")
-    if message == 0x337 and len(payload) == 1:
-        return f"{name} max_value={payload[0]}"
-    if message == 0x3d7 and len(payload) == 2:
-        return (f"{name} code={payload[0]} instance={payload[1] & 63} "
-                f"priority={payload[1] >> 6}")
-    return name
-
 
 def describe(line: bytes) -> str:
     match = re.fullmatch(
