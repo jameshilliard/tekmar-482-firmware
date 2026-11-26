@@ -7,6 +7,7 @@ use core::cell::RefCell;
 use embassy_futures::yield_now;
 use embassy_time::Instant;
 use tekmar_482_firmware::{
+    inventory::{Answer, Inventory},
     tn4::{
         Frame, LinkAck, Receiver, Trailer,
         tx::{Outcome, Request},
@@ -58,6 +59,9 @@ fn stamp() -> u32 {
 }
 
 pub async fn run(panel: &RefCell<Panel>) -> ! {
+    static INVENTORY: static_cell::ConstStaticCell<Inventory> =
+        static_cell::ConstStaticCell::new(Inventory::new());
+    let inventory = INVENTORY.take();
     let mut bus = Receivers::start();
     let mut decoder = tpck::Decoder::default();
     let mut out = Output::new();
@@ -73,12 +77,25 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
         let now = TIMERS.map(|t| read(t + TC));
         bus.poll(now, |p, frame| {
             panel.borrow_mut().observe(p);
-            if raw && matches!(frame.trailer, Trailer::Ack | Trailer::NoAck) {
+            if !matches!(frame.trailer, Trailer::Ack | Trailer::NoAck) {
+                return;
+            }
+            if raw {
                 let mut data = [0; 73];
                 data[1] = p as u8;
                 data[2..6].copy_from_slice(&stamp().to_le_bytes());
                 data[6..6 + frame.bytes.len()].copy_from_slice(frame.bytes);
                 out.enqueue(Kind::Rx(p as u8), tpck::TN4, &data[..6 + frame.bytes.len()]);
+            } else if !reboot
+                && let Some(body) = inventory.observe(
+                    p,
+                    frame.bytes,
+                    Instant::now().as_secs() as u32,
+                    sending[p].is_none(),
+                )
+                && let Some(req) = Request::new(p as u8, &body)
+            {
+                sending[p] = Attempt::new(&req, INPUTS[p].0, now[INPUTS[p].1]);
             }
         });
         for p in 0..5 {
@@ -98,6 +115,9 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
             if let Some(attempt) = sending[p].as_mut() {
                 if let Some(result) = attempt.poll(t) {
                     sending[p] = None;
+                    if !raw {
+                        continue; // internal Normal-mode read; no Raw TxResult
+                    }
                     let why = match result {
                         Outcome::Ack => 0,
                         Outcome::NoAck => 1,
@@ -124,7 +144,15 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                 }
             }
         }
-        if !reboot && out.can_receive() {
+        if out.can_receive()
+            && let Some(reply) = inventory.walk_next()
+        {
+            out.enqueue(Kind::Control, tpck::TRPC, reply.payload());
+        }
+        'receive: {
+            if reboot || !out.can_receive() {
+                break 'receive;
+            }
             baud.poll(now[0], &mut decoder);
             let byte = super::super::try_receive();
             if !baud.locked && byte != Ok(None) {
@@ -174,9 +202,25 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                                 }
                             }
                         } else if let Some(call) = Call::parse(packet) {
-                            let busy = occupied.contains(&true) || ack.iter().any(LinkAck::driving);
+                            if !raw
+                                && matches!(call.method, 0x544bf002 | 0x544bf005)
+                                && call.service == 0
+                            {
+                                for attempt in &mut sending {
+                                    if attempt.as_ref().is_some_and(|a| !a.started()) {
+                                        *attempt = None;
+                                    }
+                                }
+                            }
+                            let busy = inventory.walking()
+                                || occupied.contains(&true)
+                                || sending.iter().any(Option::is_some)
+                                || ack.iter().any(LinkAck::driving);
                             let reply = match (call.method, call.service, call.body) {
                                 (0x544bf002, 0, [m @ 0..=1]) if !busy => {
+                                    if raw != (*m == 1) {
+                                        inventory.reset();
+                                    }
                                     raw = *m == 1;
                                     if !raw {
                                         ack_mask = 0;
@@ -242,13 +286,23 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                                 (0x544bf002 | 0x544bf003 | 0x544bf007..=0x544bf00a, _, _) => {
                                     call.error(2)
                                 }
-                                _ => call.management(raw, busy).unwrap_or_else(|| {
-                                    if raw {
+                                _ => {
+                                    if let Some(reply) = call.management(raw, busy) {
+                                        reply
+                                    } else if raw {
                                         call.error(3)
                                     } else {
-                                        call.unsupported()
+                                        match inventory
+                                            .handle(&call, Instant::now().as_secs() as u32)
+                                        {
+                                            Answer::Reply(reply) => reply,
+                                            Answer::Unhandled => call.unsupported(),
+                                            Answer::Silent => {
+                                                break 'receive;
+                                            }
+                                        }
                                     }
-                                }),
+                                }
                             };
                             reboot = reply.after_drain == AfterDrain::EnterRom;
                             out.enqueue(

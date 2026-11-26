@@ -28,6 +28,11 @@ _start:
     ldrlo r3, [r0], #4
     strlo r3, [r1], #4
     blo 1b
+    /* UM10139 Table 31: power the LPC2146 auxiliary SRAM before use. */
+    ldr r0, =0xe01fc0c4
+    ldr r1, [r0]
+    orr r1, r1, #0x80000000
+    str r1, [r0]
     ldr r1, =__bss_start
     ldr r2, =__bss_end
     mov r3, #0

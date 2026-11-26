@@ -61,6 +61,10 @@ impl Drop for LineDriver {
 }
 
 impl Attempt {
+    pub(super) fn started(&self) -> bool {
+        self.pin.enabled
+    }
+
     pub(super) fn new(request: &Request, rx_pin: u32, now: u32) -> Option<Self> {
         Some(Self {
             pin: LineDriver::claim(request.port, rx_pin)?,

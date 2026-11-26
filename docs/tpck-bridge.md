@@ -2,9 +2,9 @@
 
 Both firmware images start in Normal mode. At 9600 baud, 8N1, a host
 can send a complete ordinary TPCK frame without a training command.
-Normal mode implements ProtocolVersion and the management methods below;
-the vendor device inventory, cache and device method dispatcher are not
-yet implemented. Select Raw mode to exchange native frames. The NXP ROM
+Normal mode implements gateway identification, device inventory and device
+identity. See [Normal method coverage](normal-mode.md) for supported services
+and remaining gaps. Select Raw mode to exchange native frames. The NXP ROM
 ISP uses its own handshake after an explicit handoff.
 
 ## Baud acquisition
@@ -44,7 +44,7 @@ Unless indicated, the request body is empty. All integers are little endian.
 | --- | --- | --- |
 | 0000018F ProtocolVersion (vendor) | Request, zero or two placeholder bytes | u16 vendor protocol version, currently 3 |
 | 544BF001 BridgeCapabilities | Request | Four u8 values: extension version (1), current mode (0 Normal, 1 Raw), port count (5), feature flags (bit 0 bidirectional Raw, bit 1 ROM update) |
-| 544BF002 SetBridgeMode | Update, mode u8 | Echo mode: 0 Normal, 1 Raw. Busy while a transmit or local ACK is outstanding. Returning to Normal clears the ACK mask. |
+| 544BF002 SetBridgeMode | Update, mode u8 | Echo mode: 0 Normal, 1 Raw. Busy during an inventory walk, a started transmission, an outstanding host send or a local ACK. Switching modes clears the Normal inventory; returning to Normal also clears the ACK mask. |
 | 544BF003 PortDrops | Request, port u8 | Port u8, valid records dropped u32, invalid records dropped u32. |
 | 544BF004 FirmwareBuild | Request | Build revision without a terminator: 40 lowercase hexadecimal digits or `unversioned` |
 | 544BF005 EnterFirmwareUpdate | Update | Empty positive reply. Finish transmitting it, drain the last UART stop bit, release peripherals and enter ROM ISP. No erase or application programming is performed by this call. |

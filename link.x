@@ -2,10 +2,11 @@ ENTRY(_start)
 MEMORY {
     /* Stay inside the sectors erased by the stock J1196J updater. */
     IMAGE (rx) : ORIGIN = DEFINED(__ram_trial) ? 0x40001000 : 0,
-                 LENGTH = DEFINED(__ram_trial) ? 20K : 64K
+                 LENGTH = DEFINED(__ram_trial) ? 24K : 64K
     /* Leave the bottom 0x200 and top 0x120 bytes to the bootloader. */
-    RAM (rw) : ORIGIN = DEFINED(__ram_trial) ? 0x40006000 : 0x40000200,
-               LENGTH = DEFINED(__ram_trial) ? 0x1ee0 : 0x7ce0
+    RAM (rw) : ORIGIN = DEFINED(__ram_trial) ? 0x40007000 : 0x40000200,
+               LENGTH = DEFINED(__ram_trial) ? 0xee0 : 0x7ce0
+    AUX (rw) : ORIGIN = 0x7fd00000, LENGTH = 8K
 }
 SECTIONS {
     .vectors ORIGIN(IMAGE) : { KEEP(*(.vectors)) } > IMAGE
@@ -28,9 +29,9 @@ SECTIONS {
         *(.bss .bss.* COMMON)
         . = ALIGN(4);
         __bss_end = .;
-    } > RAM
+    } > AUX
     __stack_top = ORIGIN(RAM) + LENGTH(RAM);
     ASSERT(SIZEOF(.vectors) == 64, "bad ARM7 vector table")
-    ASSERT(__bss_end + 2048 <= __stack_top, "not enough stack")
+    ASSERT(__data_end + 2048 <= __stack_top, "not enough stack")
     /DISCARD/ : { *(.ARM.extab*) *(.eh_frame*) }
 }

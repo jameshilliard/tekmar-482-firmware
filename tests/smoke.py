@@ -12,7 +12,7 @@ import sys
 from collections import deque
 from pathlib import Path
 
-from unicorn import UC_ARCH_ARM, UC_HOOK_CODE, UC_MODE_ARM, Uc
+from unicorn import UC_ARCH_ARM, UC_HOOK_CODE, UC_HOOK_MEM_WRITE, UC_MODE_ARM, Uc
 from unicorn.arm_const import UC_ARM_REG_R0
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
@@ -21,6 +21,19 @@ from frames import Decoder, encode
 PORTS = [(4, 0, 1, 28), (11, 1, 1, 13), (6, 0, 2, 22), (10, 1, 0, 8), (2, 0, 0, 29)]
 BITS = "10001001000110000010000010000010000110100101000111000101111"
 BODY = bytes.fromhex("12300001a5")
+
+def protected_bits(body):
+    data = "".join(f"{byte:08b}" for byte in body)
+    crc = 0x4599
+    for bit in data:
+        feedback = (crc >> 14) ^ int(bit)
+        crc = ((crc << 1) & 0x7fff) ^ (0x4599 if feedback else 0)
+    wire = ""
+    for bit in "1" + data + f"{crc:015b}":
+        wire += bit
+        if wire.endswith(bit * 5):
+            wire += "0" if bit == "1" else "1"
+    return wire
 
 
 def run(path, ram, fast=False):
@@ -40,7 +53,13 @@ def run(path, ram, fast=False):
         ).splitlines()
         if len(row := line.split()) == 3
     }
-    floor, top = syms["__bss_end"], syms["__stack_top"]
+    cpu.mem_map(0x7FD00000, 8192)
+    cpu.mem_write(0x7FD00000, b"\xa5" * 8192)
+    def check_power(uc, access, addr, size, value, user):
+        assert struct.unpack("<I", uc.mem_read(0xE01FC0C4, 4))[0] & (1 << 31)
+    cpu.hook_add(UC_HOOK_MEM_WRITE, check_power,
+                 begin=syms["__bss_start"], end=syms["__bss_start"])
+    floor, top = syms["__data_end"], syms["__stack_top"]
     cpu.mem_write(floor, b"\xa5" * (top - floor))
     incoming = deque()
     actual = []
@@ -49,7 +68,7 @@ def run(path, ram, fast=False):
     pins = 0
     clock = 0
     edges = deque()
-    train_at = None
+    inventory_at = None
 
     def level(p, high, at):
         pin, t, ch, _ = PORTS[p]
@@ -82,7 +101,7 @@ def run(path, ram, fast=False):
     cpu.mmio_map(0x3FFFC000, 0x1000, lambda u, o, s, d: gpio[o], None, gpio_write, None)
 
     def timer_read(uc, off, size, t):
-        nonlocal clock
+        nonlocal clock, inventory_at
         if off == 8:
             if t == 0 and timers[t].get(4) == 1:
                 clock += 40
@@ -92,6 +111,9 @@ def run(path, ram, fast=False):
                 while edges and edges[0][0] <= clock:
                     at, p, high = edges.popleft()
                     level(p, high, at)
+                if inventory_at is not None and clock >= inventory_at:
+                    inventory_at = None
+                    call(0x167, b"\0\0")
             return clock
         return timers[t].get(off, 0)
 
@@ -135,7 +157,6 @@ def run(path, ram, fast=False):
     call(0x002F35CA)
     extension(1)
     extension(4)
-    extension(2, b"\x01", True)
     decoder = Decoder()
     valid = set()
     invalid = set()
@@ -144,11 +165,28 @@ def run(path, ram, fast=False):
     phase = "capture"
 
     def reply(kind, data):
-        nonlocal phase, overlap
+        nonlocal phase, overlap, inventory_at
         actual.append((kind, data))
         if kind == 6:
             method = int.from_bytes(data[1:5], "little")
-            if method == 0x544BF002 and data[5:] == bytes([1]):
+            if method == 0x544BF004:
+                # Product block at port 0, subnet 0, node 24 (tHA address 1).
+                body = bytes.fromhex("6e700609 00003f 828301 2301 04")
+                wire = protected_bits(body) + "0" * 18
+                start = clock + 30_000
+                for i, bit in enumerate(wire):
+                    if i == 0 or bit != wire[i - 1]:
+                        edges.append((start + i * 2500, 0, bit == "1"))
+                inventory_at = start + len(wire) * 2500
+            elif method == 0x167 and data[5:] == bytes(2):
+                assert actual[-2] == (6, bytes.fromhex("04670100000100"))
+                call(0x197, bytes.fromhex("010000000000"))
+                call(0x19f, bytes.fromhex("0100"))
+            elif method == 0x19f:
+                assert actual[-2] == (6, bytes.fromhex("0497010000010082830100"))
+                assert data[5:] == struct.pack("<HI", 1, 29104)
+                extension(2, b"\x01", True)
+            elif method == 0x544BF002 and data[5:] == bytes([1]):
                 plant_inputs()
             elif method == 0x544BF002 and data[5:] == bytes([0]):
                 for p in range(5):
@@ -241,6 +279,7 @@ def run(path, ram, fast=False):
     def rom(uc, addr, size, user):
         nonlocal entered
         assert not draining and not incoming
+        assert struct.unpack("<I", uc.mem_read(0xE01FC0C4, 4))[0] & (1 << 31)
         assert uc.mem_read(uc.reg_read(UC_ARM_REG_R0), 4) == struct.pack("<I", 57)
         assert uc.mem_read(0xE01FC080, 4) == bytes(4)
         assert not gpio[0] and not gpio[0x20]
