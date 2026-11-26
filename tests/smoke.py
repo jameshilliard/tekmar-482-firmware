@@ -135,6 +135,10 @@ def run(path, ram, fast=False):
     clock_frame = bytes.fromhex("71f00005 1b52 05190c")
     clock_ports = set()
     fault_words = []
+    traces = []
+    congestion_reports = []
+    trace_resume = 0
+    trace_check_at = None
     conflicts, interrupted, lost = {}, {}, set()
     raw_winner = bytes.fromhex("3f700000")
     backoff_after = 0
@@ -325,10 +329,15 @@ def run(path, ram, fast=False):
     cpu.mmio_map(0x3FFFC000, 0x1000, lambda u, o, s, d: gpio[o], None, gpio_write, None)
 
     def timer_read(uc, off, size, t):
+        nonlocal trace_check_at
         nonlocal clock, inventory_at, next_byte, queued_send_at, phase, jump_at, uptime_offset, discovery_end, retry_isp_at, backoff_after
         if off == 8:
             if t == 0 and timers[t].get(4) == 1:
                 clock += 40
+                if trace_check_at is not None and clock >= trace_check_at:
+                    trace_check_at = None
+                    call(0x107, bytes(2))
+                    extension(11)
                 if retry_isp_at is not None and clock >= retry_isp_at:
                     retry_isp_at = None
                     if phase == "isp-after-flag":
@@ -490,7 +499,19 @@ def run(path, ram, fast=False):
             telemetry_capture()
 
     def reply(kind, data):
+        nonlocal trace_resume, trace_check_at
         nonlocal phase, overlap, raw_mode, raw_ack_mask, uptime_offset, retry_isp_at
+        if kind == 0xd0:
+            assert data[1] == 0 and int.from_bytes(data[2:6], "little") and not raw_mode
+            traces.append((data[0], data[6:]))
+            if phase == "trace-invalid":
+                assert data[0] == 4 and data[6:9] == bytes.fromhex("02 3800")
+                phase = "trace-congested"
+                end = clock + 100_000
+                for code in range(1, 6):
+                    end = inject(bytes.fromhex("7d700602") + bytes([code, 0]), after=end)
+                trace_check_at, trace_resume = end + 10_000, end + 40_000
+            return
         actual.append((kind, data))
         if kind == 6:
             method = int.from_bytes(data[1:5], "little")
@@ -503,7 +524,29 @@ def run(path, ram, fast=False):
             elif method == 0x19f:
                 assert actual[-2] == (6, bytes.fromhex("0497010000010082830100"))
                 assert data[5:] == struct.pack("<HI", 1, 29104)
-                call(0x10f, b"\x01", True)
+                extension(11)
+            elif method == 0x544bf00b:
+                if data[0] == 4 and phase == "trace-congested":
+                    assert data[5:] == b"\x01" + struct.pack("<5I", 2, 0, 0, 0, 0)
+                    assert (6, bytes.fromhex("0407010000 0500")) in actual
+                    assert [r[-2] for k, r in traces if k == 0] == [1, 2, 3]
+                    phase = "trace-reporting"
+                    send(0)
+                elif data[0] == 4:
+                    assert data[5:] == bytes(21)
+                    extension(11, b"\x01", True)
+                elif data[5:] == b"\x01":
+                    phase = "trace-invalid"
+                    inject(BODY, 0, bad_crc=True)
+                else:
+                    assert data[5:] == b"\0" and phase == "device-target"
+                    assert (0, bytes.fromhex("01 76f00608 20032a0a06000000")) in traces
+                    assert (0, bytes.fromhex("01 7d700602 8fe1")) in traces
+                    assert (1, bytes.fromhex("00 00 6d700007 0300 00 00008000")) in traces
+                    assert (1, bytes.fromhex("00 02 6df00007 0018 0300 020309")) in traces
+                    assert (1, bytes.fromhex("01 00") + clock_frame) in traces
+                    assert not any(k == 0 and record[1:] == clock_frame for k, record in traces)
+                    call(0x10f, b"\x01", True)
             elif method == 0x187 and data[0] == 4:
                 assert phase == "panel-request" and data[5:] == bytes(2)
                 # Neither version Update produced a NullMethod or Response:Update.
@@ -547,10 +590,13 @@ def run(path, ram, fast=False):
                     faults = (bytes.fromhex("7d700602 8fe1"), bytes.fromhex("7d705002 0080"))
                     widths = [len(protected_bits(body)) for body in faults]
                     for port, body in enumerate(faults):
-                        inject(body, port, after=clock + (max(widths) - widths[port]) * 2500)
+                        # Let the preceding CRC error flag and its delimiter finish.
+                        inject(body, port, after=clock + 100_000 + (max(widths) - widths[port]) * 2500)
                     ordered = sorted(edges)
                     edges.clear()
                     edges.extend(ordered)
+            elif method == 0x107 and data[0] == 2 and data[6:] == b"\0" and 1 <= data[5] <= 5:
+                congestion_reports.append(data[5])
             elif method == 0x107 and phase == "fault-burst":
                 if data[0] == 2:
                     fault_words.append(data[5:])
@@ -624,7 +670,7 @@ def run(path, ram, fast=False):
             elif method == 0x14f and data[0] == 3:
                 assert not setting_exchange and data[5:] == bytes.fromhex("01000044")
                 phase = "device-target"
-                call(0x10f,b"\x01",True)
+                extension(11, b"\0", True)
             elif method == 0x13e and data[0] == 2:
                 if phase == "device-target":
                     assert data[5:] == bytes.fromhex("0100033406")
@@ -781,6 +827,10 @@ def run(path, ram, fast=False):
             assert data == bytes([3, 0, 1])
             overlap = True
         elif service == 2:
+            if phase == "trace-reporting":
+                assert data == bytes.fromhex("02000103")  # still Normal: injection refused
+                call(0x10f, b"\x01", True)
+                return
             assert data[2:] == bytes([2, 2 if phase == "sending" and p == 1 else 1]), data
             if phase == "queued-rx":
                 assert p == 2
@@ -825,7 +875,7 @@ def run(path, ram, fast=False):
         if off == 0x14:
             draining = max(0, draining - 1)
             return (
-                (0 if draining > 1 else 0x20)
+                (0 if draining > 1 or clock < trace_resume else 0x20)
                 | (0 if draining else 0x40)
                 | bool(incoming)
             )
@@ -862,12 +912,12 @@ def run(path, ram, fast=False):
     cpu.mmio_map(0xE000C000, 0x1000, read, None, write, None)
     cpu.hook_add(UC_HOOK_CODE, rom, begin=0x7FFFFFF0, end=0x7FFFFFF0)
     # The scenario runs real ARM instructions while each synthetic tN4 bit elapses.
-    cpu.emu_start(base, 0xFFFFFFFF, count=520_000_000)
+    cpu.emu_start(base, 0xFFFFFFFF, count=600_000_000)
     assert entered, (clock, phase, [len(x) for x in exchanges], results, actual[-10:],
                      line_sends, expected_rx_acks - received_rx_acks, list(wire_log))
     assert actual[:4] == [
         (6, bytes.fromhex(x))
-        for x in ("048f0100000300", "0400000000", "0401f04b5401000503")
+        for x in ("048f0100000300", "0400000000", "0401f04b5401000507")
     ] + [
         (
             6,
@@ -882,6 +932,7 @@ def run(path, ram, fast=False):
     assert not reads and not read_events and actual[-1] == (6, bytes.fromhex("0305f04b54"))
     assert expected_flags == observed_flags, (clock, expected_flags - observed_flags, observed_flags - expected_flags)
     assert tuple(telemetry) == TELEMETRY
+    assert congestion_reports == [1, 2, 3, 4, 5], congestion_reports
     assert [b for b, _ in line_sends[2]] == [init, master]
     assert not conflicts and not interrupted and lost == {"master", "write", "raw"}
     assert (1, raw_winner) in [(b[1], b[6:]) for k, b in actual if k == 1 and b[0] == 0]

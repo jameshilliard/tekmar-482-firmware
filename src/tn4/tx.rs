@@ -138,6 +138,11 @@ pub struct Sender {
 }
 
 impl Sender {
+    /// Original intended frame, including when arbitration interrupts the attempt.
+    pub fn body(&self) -> &[u8] {
+        &self.bits.request.data[..self.bits.request.len]
+    }
+
     pub fn new(request: &Request, now: u32, mode: Mode) -> Self {
         Self {
             mode,

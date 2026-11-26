@@ -1,5 +1,6 @@
 //! UART framing shared by vendor tRPC and the binary raw bridge.
 pub mod raw;
+pub mod trace;
 
 const MAX_PAYLOAD: usize = u8::MAX as usize;
 pub const SOF: u8 = 0xca;
@@ -7,6 +8,8 @@ const EOF: u8 = 0x35;
 const ESC: u8 = 0x2f;
 pub const TN4: u8 = 1;
 pub const TRPC: u8 = 6;
+/// Custom diagnostic records; never a Send or a Normal-mode application packet.
+pub const NORMAL_TRACE: u8 = 0xd0;
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Packet<'a> {

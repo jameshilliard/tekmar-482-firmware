@@ -71,6 +71,10 @@ impl Drop for LineDriver {
 }
 
 impl Attempt {
+    pub(super) fn body(&self) -> &[u8] {
+        self.sender.body()
+    }
+
     pub(super) fn started(&self) -> bool {
         self.sender.started()
     }

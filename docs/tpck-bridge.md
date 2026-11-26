@@ -50,7 +50,7 @@ the request body is empty. All integers are little endian.
 | --- | --- | --- |
 | 00000187 FirmwareRevision | Request, zero or two placeholder bytes | u16 numeric revision, 0 for this unnumbered custom image |
 | 0000018F ProtocolVersion | Request, zero or two placeholder bytes | u16 tHA protocol version, currently 3 |
-| 544BF001 BridgeCapabilities | Request | Four u8 values: extension version (1), current mode (0 Normal, 1 Raw), port count (5), feature flags (bit 0 bidirectional Raw, bit 1 ROM update) |
+| 544BF001 BridgeCapabilities | Request | Four u8 values: extension version (1), current mode (0 Normal, 1 Raw), port count (5), feature flags (bit 0 bidirectional Raw, bit 1 ROM update, bit 2 Normal trace) |
 | 544BF002 SetBridgeMode | Update, mode u8 | Echo mode: 0 Normal, 1 Raw. Busy during an inventory walk, a started transmission, an outstanding host send or a local ACK. Switching modes clears the Normal inventory; returning to Normal also clears the ACK mask. |
 | 544BF003 PortDrops | Request, port u8 | Port u8, valid records dropped u32, invalid records dropped u32. |
 | 544BF004 FirmwareBuild | Request | Build revision without a terminator: 40 lowercase hexadecimal digits or `unversioned` |
@@ -60,6 +60,7 @@ the request body is empty. All integers are little endian.
 | 544BF008 LedTest | Update | Empty. Starts the panel lamp sweep. |
 | 544BF009 LinkAckMask | Update, mask u8 in Raw mode | Echo mask (bit N for port N). Zero disables local ACK. |
 | 544BF00A CaptureCounters | Request | Twelve u32: two timer readings in microseconds, five edge counters and five last capture ticks in port order. |
+| 544BF00B NormalTrace | Request, empty; Update, port mask u8 | Normal only. Request returns the mask and five little-endian u32 cumulative trace-drop counts in port order. Update replaces the mask and echoes it; zero stops tracing. |
 
 An ordinary capability probe must never change operating mode. Stock
 NullMethod means the extension isn't available; a timeout is not evidence
@@ -73,7 +74,7 @@ Byte-exact frames (spaces separate fields, not transmitted bytes):
 ProtocolVersion request:   CA 07 06 01 8F010000 0000 9E 35
 ProtocolVersion response:  CA 07 06 04 8F010000 0300 A4 35
 BridgeCapabilities:        CA 05 06 01 01F04B54 9C 35
-Normal, Raw and update:    CA 09 06 04 01F04B54 01000503 AC 35
+Normal, Raw/update/trace:  CA 09 06 04 01F04B54 01000507 B0 35
 EnterFirmwareUpdate:       CA 05 06 00 05F04B54 9F 35
 Drained before handoff:    CA 05 06 03 05F04B54 A2 35
 ```
@@ -99,3 +100,29 @@ progress independently. There are no implicit retries, replacements,
 flushes or send deadlines. A host read timeout does not establish whether
 a frame was sent. Even a link ACK needs an application-level report or
 readback to confirm that a setting changed.
+
+## Normal-mode trace
+
+This is a tap on Normal traffic, not a third operating mode. The gateway
+continues discovery, ACKs, reads, writes, retries and tRPC reporting.
+Enabling trace does not change reporting, reset inventory or permit raw
+Send. It is off at boot and on entry to Raw. A serial disconnect is not
+detectable; an independent host can always clear the trace mask in Normal.
+
+TPCK type D0 is gateway-to-host only. Its common prefix is event u8, port
+u8, gateway uptime in ms u32 (little endian, wraps). After the prefix:
+
+| Event | Data | Meaning |
+| --- | --- | --- |
+| 00 Rx | flags u8, complete native body | Peer frame; bit 0 means link ACK observed, bit 1 early start (not passed to the Normal inventory). Gateway TX echo is excluded. |
+| 01 Tx | origin u8, outcome u8, intended native body | One gateway attempt at completion, including an arbitration loss before a retry. Origins: 0 setting transaction, 1 broadcast, 2 line discovery, 3 background block read. Outcome 0 link ACK, 1 no ACK, 2 arbitration lost, 3 echo mismatch, 4 bad end, 5 missed timing. A failed attempt need not have put the complete body on the bus. |
+| 04 RxInvalid | reason u8, bit count u16, captured bits | Same reason and bit packing as Raw RxInvalid. Not a valid peer update. |
+
+Trace records preserve observation order with respect to each other.
+Host replies and reports may overtake unstarted trace records; use the
+gateway timestamps for native timing, not UART arrival time. Trace mask
+replies delimit the capture: queued older records precede the reply.
+Trace has three dedicated slots; a full queue drops new trace records,
+increments the affected port's counter modulo 2^32 and leaves Normal
+operations running. Counters do not include Raw-mode drops. Restrict the
+port mask or use a higher negotiated baud on busy installations.

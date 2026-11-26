@@ -39,3 +39,4 @@ pub const PANEL: u32 = 0x544b_f007;
 pub const LED_TEST: u32 = 0x544b_f008;
 pub const LINK_ACK_MASK: u32 = 0x544b_f009;
 pub const CAPTURE_COUNTERS: u32 = 0x544b_f00a;
+pub const NORMAL_TRACE: u32 = 0x544b_f00b;

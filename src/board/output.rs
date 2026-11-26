@@ -1,10 +1,12 @@
 //! Bounded binary UART records. Only an unstarted record may be displaced.
 use super::{lpc2146::uart0, read, write};
-use tekmar_482_firmware::tn4::PORT_COUNT;
+use tekmar_482_firmware::tn4::{MAX_BYTES, PORT_COUNT};
 const REPORT_WATERMARK: usize = 2;
 const RX_WATERMARK: usize = 6;
 const COMMAND_WATERMARK: usize = 8;
-const RECORD_SLOTS: usize = COMMAND_WATERMARK + PORT_COUNT;
+const TRACE_SLOTS: usize = 3;
+const RECORD_SLOTS: usize = COMMAND_WATERMARK + PORT_COUNT + TRACE_SLOTS;
+const _: () = assert!(RECORD_SLOTS <= u16::BITS as usize);
 const ENCODED_RECORD_BYTES: usize = 168; // includes TPCK escaping
 use heapless::Vec;
 use tekmar_482_firmware::tpck;
@@ -16,6 +18,8 @@ pub(super) enum Kind {
     Result(u8),
     Overlap(u8),
     Control,
+    Trace,
+    Fence,
     Reboot,
 }
 
@@ -29,8 +33,10 @@ pub(super) struct Output {
     order: [u8; RECORD_SLOTS],
     used: u16,
     len: usize,
+    traces: usize,
     offset: usize,
     pub(super) drops: [[u32; 2]; PORT_COUNT],
+    pub(super) trace_drops: [u32; PORT_COUNT],
 }
 
 impl Output {
@@ -47,16 +53,36 @@ impl Output {
                 order: [0; RECORD_SLOTS],
                 used: 0,
                 len: 0,
+                traces: 0,
                 offset: 0,
                 drops: [[0; 2]; PORT_COUNT],
+                trace_drops: [0; PORT_COUNT],
             });
         QUEUE.take()
     }
     pub(super) fn can_report(&self) -> bool {
-        self.len < REPORT_WATERMARK
+        self.len - self.traces < REPORT_WATERMARK
     }
     pub(super) fn can_receive(&self) -> bool {
-        self.len < COMMAND_WATERMARK
+        self.len - self.traces < COMMAND_WATERMARK
+    }
+    pub(super) fn trace(&mut self, event: u8, p: usize, ms: u32, detail: &[u8], body: &[u8]) {
+        if self.traces == TRACE_SLOTS {
+            self.trace_drops[p] = self.trace_drops[p].wrapping_add(1);
+            return;
+        }
+        // Invalid frames include a reason, bit count and up to two CRC bytes.
+        let mut data = [0; tpck::raw::INVALID_PREFIX + MAX_BYTES + size_of::<u16>()];
+        let (prefix, tail) = data.split_at_mut(tpck::raw::RX_PREFIX);
+        prefix[0] = event;
+        prefix[1] = p as u8;
+        prefix[2..].copy_from_slice(&ms.to_le_bytes());
+        let (meta, rest) = tail.split_at_mut(detail.len());
+        meta.copy_from_slice(detail);
+        rest[..body.len()].copy_from_slice(body);
+        let len = tpck::raw::RX_PREFIX + detail.len() + body.len();
+        self.enqueue(Kind::Trace, tpck::NORMAL_TRACE, &data[..len]);
+        self.traces += 1;
     }
     fn lost(&mut self, kind: Kind) {
         let (p, i) = match kind {
@@ -74,11 +100,16 @@ impl Output {
         for i in pos..self.len {
             self.order.swap(i, i + 1);
         }
-        self.records[usize::from(slot)].kind
+        let kind = self.records[usize::from(slot)].kind;
+        if kind == Kind::Trace {
+            self.traces -= 1;
+        }
+        kind
     }
     pub(super) fn enqueue(&mut self, kind: Kind, ty: u8, data: &[u8]) {
         let first = usize::from(self.offset != 0);
-        if matches!(kind, Kind::Rx(_) | Kind::Invalid(_)) && self.len >= RX_WATERMARK {
+        if matches!(kind, Kind::Rx(_) | Kind::Invalid(_)) && self.len - self.traces >= RX_WATERMARK
+        {
             if matches!(kind, Kind::Rx(_))
                 && let Some(i) = self.order[first..self.len]
                     .iter()
@@ -96,6 +127,15 @@ impl Output {
                 .iter()
                 .position(|&s| self.records[usize::from(s)].kind == Kind::Result(port))
                 .map(|n| first + n)
+        } else if kind == Kind::Control && self.traces != 0 {
+            // Control may overtake pending diagnostics, but never a partial
+            // frame, a trace configuration fence, or an older control record.
+            Some(
+                self.order[first..self.len]
+                    .iter()
+                    .rposition(|&s| self.records[usize::from(s)].kind != Kind::Trace)
+                    .map_or(first, |i| first + i + 1),
+            )
         } else {
             None
         };

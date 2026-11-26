@@ -25,6 +25,7 @@ const UNNUMBERED_FIRMWARE: u16 = 0;
 const BRIDGE_VERSION: u8 = 1;
 const FEATURE_BIDIRECTIONAL_RAW: u8 = 1;
 const FEATURE_ROM_UPDATE: u8 = 1 << 1;
+const FEATURE_NORMAL_TRACE: u8 = 1 << 2;
 const HEADER_BYTES: usize = 1 + size_of::<u32>();
 const REVISION_MAGIC: &[u8; 8] = b"TK48REV\0";
 const REVISION_BYTES: usize = REVISION_MAGIC.len() + 40; // hexadecimal Git object name
@@ -160,7 +161,7 @@ impl<'a> Call<'a> {
                     BRIDGE_VERSION,
                     u8::from(raw),
                     crate::tn4::PORT_COUNT as u8,
-                    FEATURE_BIDIRECTIONAL_RAW | FEATURE_ROM_UPDATE,
+                    FEATURE_BIDIRECTIONAL_RAW | FEATURE_ROM_UPDATE | FEATURE_NORMAL_TRACE,
                 ],
             ),
             (REQUEST, FIRMWARE_BUILD) if self.body.is_empty() => {
