@@ -10,7 +10,7 @@ import binascii
 from pathlib import Path
 
 from backup import check_part, expect, line, read_page, send, synchronize
-from board import monitor, probe, request
+from board import monitor, panel, probe, request
 from check_image import check
 from port import connect
 
@@ -51,6 +51,7 @@ async def main():
     parser.add_argument("port")
     parser.add_argument("ram_bin", type=Path)
     parser.add_argument("--probe", action="store_true", help="observe receiver inputs before returning to ISP")
+    parser.add_argument("--panel-test", action="store_true", help="cycle and read back each panel LED")
     parser.add_argument("--frames", type=int, metavar="SECONDS", help="monitor live frames from SRAM")
     parser.add_argument("--diagnostics", action="store_true", help="verify receiver totals with --frames")
     parser.add_argument("--from-app", action="store_true",
@@ -70,6 +71,8 @@ async def main():
         await start_image(port, image)
         await asyncio.sleep(0.1)  # The application resets the UART FIFO during startup.
         try:
+            if args.panel_test:
+                await panel(port, test=True)
             if args.probe:
                 await probe(port)
             if args.frames:

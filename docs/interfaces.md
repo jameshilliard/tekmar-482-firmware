@@ -161,3 +161,23 @@ their outcomes, and reconciles delivered frames and drops for all five ports.
 Service delay measures from the capture latch to re-arming the next edge;
 the timer has no FIFO or hardware overrun counter. A clean summary does not
 prove a pulse was never missed.
+
+### Front panel
+
+The J1196J initializer copies the port index table (flash 0xc4a4) to
+0x40000034. In port order the stock outputs at 0xc50c are P1.22, P1.21,
+P1.18, P1.23 and P1.25; Test is P1.16. All six are active low. P1.24
+(logical output 5) has a different polarity and no identified front-panel
+function; the driver leaves it alone. Power and the RS-232 TX/RX lights
+are not in this LED table; the manual describes them as power/serial
+activity indicators. GPIO readback does not test those lamps optically.
+
+`board.py panel PORT` reads the power-on and debounced Reporting DIP
+(P0.7), Test button (P0.14), change counters and LED levels. Both inputs
+are active low. A button press or `board.py led-test PORT` walks bus 0..4
+then Test, 500 ms each. The host checks all six pin readbacks and that the
+walk ends. The RAM trial accepts `--panel-test`. Outside the walk, a bus
+LED denotes a CRC-matching frame seen in the last minute during capture,
+including an intact body with a bad trailer. It is not proof of delivery.
+The DIP state is diagnostic, not permission to drive a bus. Test at
+power-on retains the hardware ROM entry function.

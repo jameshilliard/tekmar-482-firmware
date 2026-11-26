@@ -8,6 +8,7 @@ global_asm!(include_str!("startup.S"), options(raw));
 
 mod board {
     use super::ptr;
+    pub mod panel;
     pub mod probe;
 
     const MAMCR: usize = 0xe01f_c000;
@@ -61,20 +62,20 @@ mod board {
         write(UART0 + 0x30, 0x80); // enable transmitter
     }
 
-    pub fn train() {
+    pub fn train(tick: &mut impl FnMut()) {
         // Do not let the next measurement change the baud of a pending reply.
         while read(LSR) & TEMT == 0 {}
         loop {
             write(UART0 + 0x08, 3); // clear stale RX data, leave TX alone
             write(ACR, 0x305); // clear flags, start mode 0, retry on measurement timeout
             // Mode 0 measures the first two falling edges of 'A' and receives the byte.
-            if receive() == Ok(b'A') && receive() == Ok(b'\n') {
+            if receive(tick) == Ok(b'A') && receive(tick) == Ok(b'\n') {
                 return;
             }
         }
     }
 
-    pub fn receive() -> Result<u8, ()> {
+    pub fn receive(tick: &mut impl FnMut()) -> Result<u8, ()> {
         loop {
             let status = read(LSR);
             let byte = (status & 1 != 0).then(|| read(UART0) as u8);
@@ -84,6 +85,7 @@ mod board {
             if let Some(byte) = byte {
                 return Ok(byte);
             }
+            tick();
         }
     }
 
@@ -92,6 +94,14 @@ mod board {
             while read(LSR) & THRE == 0 {}
             write(UART0, u32::from(byte));
         }
+    }
+
+    fn send_word(value: u32) {
+        let mut word = *b" 00000000";
+        for (i, b) in word[1..].iter_mut().rev().enumerate() {
+            *b = b"0123456789abcdef"[((value >> (4 * i)) & 15) as usize];
+        }
+        send(&word);
     }
 
     pub fn enter_isp() -> ! {
@@ -110,13 +120,22 @@ mod board {
 #[unsafe(no_mangle)]
 extern "C" fn firmware_main() -> ! {
     board::init();
+    let mut panel = board::panel::Panel::init();
     let mut probe: Option<board::probe::Capture> = None;
     loop {
-        board::train();
+        board::train(&mut || panel.poll());
         let mut decoder = Decoder::default();
-        while let Ok(byte) = board::receive() {
+        while let Ok(byte) = board::receive(&mut || panel.poll()) {
             match decoder.push(byte) {
                 Some(Command::Identify) => board::send(IDENTITY),
+                Some(Command::Panel) => {
+                    panel.poll();
+                    panel.report();
+                }
+                Some(Command::LedTest) => {
+                    panel.start_test();
+                    board::send(b"OK LED\r\n");
+                }
                 Some(Command::RxBegin) => {
                     drop(probe.take());
                     probe = Some(board::probe::Capture::start());
@@ -128,10 +147,11 @@ extern "C" fn firmware_main() -> ! {
                 },
                 Some(cmd @ (Command::RxStream | Command::RxDiagnostics)) => {
                     drop(probe.take());
-                    board::probe::stream(cmd == Command::RxDiagnostics);
+                    board::probe::stream(cmd == Command::RxDiagnostics, &mut panel);
                 }
                 Some(Command::EnterIsp) => {
                     drop(probe.take());
+                    panel.stop();
                     board::send(ISP_ACK);
                     board::enter_isp();
                 }

@@ -22,12 +22,12 @@ def smoke(image: bytes, ram: bool) -> None:
     cpu.mem_write(base, image)
     cpu.mem_map(0x7FFFF000, 0x1000)
 
-    # GPIO data/direction and the VIC remain unmapped: touching them fails the test.
+    # Only the panel GPIO operations below are allowed. The VIC remains unmapped.
     cpu.mem_map(0xE01FC000, 0x1000)
     cpu.mem_map(0xE002C000, 0x1000)
     cpu.mem_write(0xE01FC088, struct.pack("<I", 1 << 10))  # PLL0 locked
     frames = deque([b"?", b"A!", b"A\nBAD-ENTER-ISP\n", b"A\nID?\n",
-                    b"A\nRX-END\n", b"A\nRX-BEGIN\n", b"A\nRX-BEGIN\n",
+                    b"A\nLED-TEST\n", b"A\nPANEL?\n", b"A\nRX-END\n", b"A\nRX-BEGIN\n", b"A\nRX-BEGIN\n",
                     b"A\nRX-END\n", b"A\nRX-STREAM\n", b"A\nRX-BEGIN\n", b"A\nENTER-ISP\r\n"])
     incoming = deque()
     outgoing = bytearray()
@@ -41,6 +41,27 @@ def smoke(image: bytes, ram: bool) -> None:
     edges = deque((i * 2500, bit) for i, bit in enumerate(wire) if i and bit != wire[i-1])
     streaming = False
     clock = 0
+
+    led_mask = sum(1 << pin for pin in (22, 21, 18, 23, 25, 16))
+    gpio = {0: 0, 0x10: 0, 0x14: 1 << 14, 0x20: 0, 0x30: 0, 0x34: 0}
+    def gpio_read(uc, offset, size, data):
+        assert size == 4 and offset in gpio
+        return gpio[offset]
+
+    def gpio_write(uc, offset, size, value, data):
+        assert size == 4
+        if offset in (0x38, 0x3c):
+            assert value & ~led_mask == 0
+            if offset == 0x38:
+                gpio[0x34] |= value
+            else:
+                gpio[0x34] &= ~value
+        else:
+            assert (offset, value) in ((0, 0), (0x10, 0), (0x20, led_mask), (0x20, 0), (0x30, 0))
+            gpio[offset] = value
+
+    cpu.mmio_map(0x3fffc000, 0x1000, gpio_read, None, gpio_write, None)
+    cpu.mem_map(0xe0014000, 0x1000)
 
     def timer_write(uc, offset, size, value, index):
         nonlocal streaming
@@ -114,11 +135,16 @@ def smoke(image: bytes, ram: bool) -> None:
         assert drained
         assert not frames
         assert uc.mem_read(0xE01FC080, 4) == bytes(4)
-        assert outgoing == (b"TEKMAR-482-DEV\r\nERR RX-INACTIVE\r\nOK RX\r\nOK RX\r\n"
+        assert outgoing == (b"TEKMAR-482-DEV\r\nOK LED\r\n"
+                            b"PANEL 00000001 00000001 00000000 00000000 00000001 00000001 00000001\r\n"
+                            b"ERR RX-INACTIVE\r\nOK RX\r\nOK RX\r\n"
                             b"RX 000f4240 000f4241 0000000d 00000002 00000000"
                             b" 00000003 00000011 00000000\r\nOK FRAMES\r\n"
                             b"F 0 000061a8 0e2f A 12300001a5\r\nEND 00000000\r\nOK RX\r\nOK ISP\r\n")
         assert all(t[0] == t[4] == t[0x28] == 0 for t in timers)
+        assert gpio[0x34] & led_mask == led_mask
+        assert gpio[0x20] == 0
+        assert uc.mem_read(0xE01FC1A0, 4) == bytes(4)
         assert uc.mem_read(0xE01FC0C4, 4) == struct.pack("<I", 8)
         assert uc.reg_read(UC_ARM_REG_CPSR) & 0xE0 == 0xE0  # Thumb, IRQ/FIQ masked
         for reg in (UC_ARM_REG_R0, UC_ARM_REG_R1):

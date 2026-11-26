@@ -57,7 +57,7 @@ impl Outbox {
     }
 }
 
-pub fn stream(diagnostic: bool) {
+pub fn stream(diagnostic: bool, panel: &mut super::super::panel::Panel) {
     let mut rx: [Receiver; 5] = core::array::from_fn(|_| Receiver::default());
     let mut rising = [true; 5];
     let mut out = Outbox {
@@ -79,7 +79,10 @@ pub fn stream(diagnostic: bool) {
         for (port, (_, timer, ch)) in INPUTS.into_iter().enumerate() {
             let t = TIMERS[timer];
             let flag = 1 << (4 + ch);
-            let mut emit = |f: Frame<'_>| out.frame(port, f);
+            let mut emit = |f: Frame<'_>| {
+                panel.observe(port);
+                out.frame(port, f);
+            };
             if pending[timer] & flag != 0 {
                 let at = read(t + CR0 + 4 * ch);
                 write(t + IR, flag);
@@ -97,6 +100,7 @@ pub fn stream(diagnostic: bool) {
             rx[port].advance(now[timer], emit);
         }
         out.pump();
+        panel.poll();
     }
     read(UART0); // any byte stops capture; subsequent commands use normal training
     drop(capture);

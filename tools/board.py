@@ -8,9 +8,56 @@ import argparse
 import asyncio
 import re
 import sys
+from typing import NamedTuple
 
 from frames import FrameAudit, dropped_records
 from port import connect
+
+
+class PanelState(NamedTuple):
+    boot: int
+    inputs: int
+    presses: int
+    changes: int
+    leds: int
+    pins: int
+    test: int
+
+
+async def panel_state(port):
+    await port.write(b"A\nPANEL?\n")
+    line = await port.readline(100)
+    if not re.fullmatch(rb"PANEL(?: [0-9a-f]{8}){7}\r\n", line):
+        raise ValueError(f"invalid panel state: {line!r}")
+    state = PanelState(*(int(v, 16) for v in line.split()[1:]))
+    if state.leds != state.pins:
+        raise RuntimeError(f"panel GPIO readback mismatch: {state}")
+    return state
+
+
+async def panel(port, test=False):
+    await identify(port)
+    state = await panel_state(port)
+    print(f"panel: DIP at boot={state.boot & 1} now={state.inputs & 1} "
+          f"test_button={state.inputs >> 1} presses={state.presses} DIP_changes={state.changes} "
+          f"LED_pin_mask=0x{state.pins:02x}")
+    if not test:
+        return
+    await port.write(b"A\nLED-TEST\n")
+    if await port.readline() != b"OK LED\r\n":
+        raise RuntimeError("lamp test did not start")
+    observed = []
+    deadline = asyncio.get_running_loop().time() + 5
+    while asyncio.get_running_loop().time() < deadline:
+        state = await panel_state(port)
+        if not state.test:
+            break
+        if not observed or observed[-1] != state.pins:
+            observed.append(state.pins)
+        await asyncio.sleep(0.06)
+    if state.test or observed != [1, 2, 4, 8, 16, 32]:
+        raise RuntimeError(f"incomplete LED sweep: {observed}")
+    print("LED GPIO readback passed: bus 0, 1, 2, 3, 4, Test.")
 
 
 async def identify(port) -> str:
@@ -83,7 +130,7 @@ async def monitor(port, seconds: float, *, diagnostics=False) -> None:
 
 async def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["identify", "probe", "frames", "diagnostics", "enter-isp"])
+    parser.add_argument("action", choices=["identify", "probe", "frames", "diagnostics", "panel", "led-test", "enter-isp"])
     parser.add_argument("port", help="local serial device (requires exclusive access)")
     parser.add_argument("--baud", type=int, default=9600)
     parser.add_argument("--seconds", type=int, default=30, help="frame capture duration")
@@ -94,6 +141,8 @@ async def main() -> int:
         async with connect(args.port, args.baud) as port:
             if args.action in ("frames", "diagnostics"):
                 await monitor(port, args.seconds, diagnostics=args.action == "diagnostics")
+            elif args.action in ("panel", "led-test"):
+                await panel(port, args.action == "led-test")
             elif args.action == "probe":
                 await probe(port)
             else:

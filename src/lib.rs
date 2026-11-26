@@ -8,6 +8,8 @@ pub const ISP_ACK: &[u8] = b"OK ISP\r\n";
 #[derive(Debug, PartialEq, Eq)]
 pub enum Command {
     Identify,
+    Panel,
+    LedTest,
     RxBegin,
     RxEnd,
     RxStream,
@@ -30,6 +32,8 @@ impl Decoder {
             let line = line.strip_suffix(b"\r").unwrap_or(line);
             let command = match (self.discard, line) {
                 (false, b"ID?") => Some(Command::Identify),
+                (false, b"PANEL?") => Some(Command::Panel),
+                (false, b"LED-TEST") => Some(Command::LedTest),
                 (false, b"RX-BEGIN") => Some(Command::RxBegin),
                 (false, b"RX-END") => Some(Command::RxEnd),
                 (false, b"RX-STREAM") => Some(Command::RxStream),
