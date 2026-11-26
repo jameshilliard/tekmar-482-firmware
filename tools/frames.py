@@ -3,6 +3,7 @@
 import argparse
 import re
 from collections.abc import Iterable, Iterator
+from collections import Counter
 from pathlib import Path
 
 from payloads import details
@@ -44,21 +45,64 @@ def dropped_records(line: bytes) -> int | None:
     return int(match[1], 16) if match else None
 
 
+class FrameAudit:
+    """Compare received frame records against each port's independent decoder totals."""
+
+    def __init__(self, require_stats=False):
+        self.require_stats = require_stats
+        self.seen = [Counter() for _ in range(5)]
+        self.drops = {}
+
+    def record(self, line: bytes) -> str:
+        if not line.startswith(b"D "):
+            if self.drops:
+                raise ValueError("frame received after diagnostic summaries")
+            result = describe(line)
+            _, port, _, _, status, _ = line.split()
+            self.seen[int(port)][status] += 1
+            return result
+        if not re.fullmatch(rb"D [0-4](?: [0-9a-f]{8}){12}\r\n", line):
+            raise ValueError("malformed receiver diagnostic")
+        _, p, *words = line.split()
+        port = int(p)
+        edges, starts, stuff, crc, ack, no_ack, bad, partial, drops, lag, rx, expected = (
+            int(word, 16) for word in words)
+        seen = self.seen[port]
+        observed_bad = sum(seen[k] for k in (b"D", b"E", b"M"))
+        if port in self.drops or partial > 1 or starts != stuff + crc + ack + no_ack + bad + partial:
+            raise ValueError(f"port {port}: inconsistent candidate accounting")
+        if (sum(seen.values()) + drops != ack + no_ack + bad or
+                seen[b"A"] > ack or seen[b"N"] > no_ack or observed_bad > bad):
+            raise ValueError(f"port {port}: frame records disagree with receiver totals")
+        self.drops[port] = drops
+        result = (f"port={port} edges={edges} candidates={starts} ack={ack} no_ack={no_ack} "
+                  f"bad_trailer={bad} stuffing_errors={stuff} crc_errors={crc} partial={partial} "
+                  f"uart_drops={drops} max_capture_service_us={lag}")
+        return result + (f" last_crc={rx:04x} expected={expected:04x}" if crc else "")
+
+    def finish(self, dropped):
+        if self.require_stats or self.drops:
+            if len(self.drops) != 5 or sum(self.drops.values()) != dropped:
+                raise ValueError("missing port summary or inconsistent UART drop count")
+        if dropped:
+            raise ValueError(f"gateway UART queue dropped {dropped} records")
+
+
 def replay(lines: Iterable[bytes]) -> Iterator[str]:
     dropped = None
+    audit = FrameAudit()
     for number, line in enumerate(lines, 1):
         if dropped is not None:
             raise ValueError(f"line {number}: unexpected data after END")
         dropped = dropped_records(line)
         if dropped is None:
             try:
-                yield describe(line)
+                yield audit.record(line)
             except ValueError as exc:
                 raise ValueError(f"line {number}: {exc}") from exc
     if dropped is None:
         raise ValueError("incomplete capture: missing END")
-    if dropped:
-        raise ValueError(f"gateway UART queue dropped {dropped} records")
+    audit.finish(dropped)
 
 
 if __name__ == "__main__":

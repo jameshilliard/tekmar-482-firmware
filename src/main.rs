@@ -126,9 +126,9 @@ extern "C" fn firmware_main() -> ! {
                     Some(capture) => capture.report(),
                     None => board::send(b"ERR RX-INACTIVE\r\n"),
                 },
-                Some(Command::RxStream) => {
+                Some(cmd @ (Command::RxStream | Command::RxDiagnostics)) => {
                     drop(probe.take());
-                    board::probe::stream();
+                    board::probe::stream(cmd == Command::RxDiagnostics);
                 }
                 Some(Command::EnterIsp) => {
                     drop(probe.take());

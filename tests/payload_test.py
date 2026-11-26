@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-from frames import replay
+from frames import FrameAudit, replay
 from payloads import DECODERS, decode_payload
 
 
@@ -96,6 +96,25 @@ class PayloadTests(unittest.TestCase):
                              ([record.replace(b"0582", b"0583"), end], "line 1: tN4 CRC")):
             with self.subTest(error=error), self.assertRaisesRegex(ValueError, error):
                 list(replay(lines))
+
+    def test_receiver_accounting(self):
+        record = b"F 3 000061a8 5f14 M 7d7123420582\r\n"
+        def summary(port, counters):
+            return (f"D {port}" + "".join(f" {n:08x}" for n in counters) + "\r\n").encode()
+        empty = [0] * 12
+        stats = [101, 4, 1, 1, 0, 0, 1, 1, 0, 12, 0x55, 0xaa]
+        audit = FrameAudit(True)
+        audit.record(record)
+        for port in range(5):
+            audit.record(summary(port, stats if port == 3 else empty))
+        audit.finish(0)
+        for p, counts in ((3, stats), (2, empty)):
+            with self.assertRaises(ValueError):
+                audit.record(summary(p, counts))
+        with self.assertRaises(ValueError):
+            FrameAudit(True).record(summary(3, stats))
+        with self.assertRaises(ValueError):
+            FrameAudit(True).finish(0)
 
 
 if __name__ == "__main__":

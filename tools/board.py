@@ -9,7 +9,7 @@ import asyncio
 import re
 import sys
 
-from frames import describe, dropped_records
+from frames import FrameAudit, dropped_records
 from port import connect
 
 
@@ -55,10 +55,11 @@ async def probe(port) -> None:
         print(f"Port {idx}: {status}")
 
 
-async def monitor(port, seconds: float) -> None:
+async def monitor(port, seconds: float, *, diagnostics=False) -> None:
     await identify(port)
-    await port.write(b"A\nRX-STREAM\n")
-    if await port.readline(64) != b"OK FRAMES\r\n":
+    audit = FrameAudit(require_stats=diagnostics)
+    await port.write(b"A\nRX-DIAG\n" if diagnostics else b"A\nRX-STREAM\n")
+    if await port.readline(64) != (b"OK DIAG\r\n" if diagnostics else b"OK FRAMES\r\n"):
         raise RuntimeError("frame stream did not start")
     loop = asyncio.get_running_loop()
     deadline = loop.time() + seconds
@@ -68,22 +69,21 @@ async def monitor(port, seconds: float) -> None:
                 line = await port.readline(160, timeout=remaining)
             except asyncio.TimeoutError:
                 break
-            print(describe(line), flush=True)
+            print(audit.record(line), flush=True)
     finally:
         await port.write(b"\n")
         deadline = loop.time() + 4
         while True:
             line = await port.readline(160, timeout=max(0, deadline - loop.time()))
             if (dropped := dropped_records(line)) is not None:
-                if dropped:
-                    raise RuntimeError(f"gateway UART queue dropped {dropped} records")
+                audit.finish(dropped)
                 break
-            print(describe(line), flush=True)
+            print(audit.record(line), flush=True)
 
 
 async def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["identify", "probe", "frames", "enter-isp"])
+    parser.add_argument("action", choices=["identify", "probe", "frames", "diagnostics", "enter-isp"])
     parser.add_argument("port", help="local serial device (requires exclusive access)")
     parser.add_argument("--baud", type=int, default=9600)
     parser.add_argument("--seconds", type=int, default=30, help="frame capture duration")
@@ -92,8 +92,8 @@ async def main() -> int:
         parser.error("--seconds must be positive")
     try:
         async with connect(args.port, args.baud) as port:
-            if args.action == "frames":
-                await monitor(port, args.seconds)
+            if args.action in ("frames", "diagnostics"):
+                await monitor(port, args.seconds, diagnostics=args.action == "diagnostics")
             elif args.action == "probe":
                 await probe(port)
             else:

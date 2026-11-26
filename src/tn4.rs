@@ -30,6 +30,7 @@ enum State {
 }
 
 pub struct Receiver {
+    pub stats: RxStats,
     state: State,
     bytes: [u8; MAX_BYTES],
     bits: usize,
@@ -43,9 +44,23 @@ pub struct Receiver {
     sample_us: u32,
 }
 
+#[derive(Default)]
+pub struct RxStats {
+    pub edges: u32,
+    pub starts: u32,
+    pub stuffing: u32,
+    pub crc_mismatch: u32,
+    pub ack: u32,
+    pub no_ack: u32,
+    pub bad_trailer: u32,
+    pub last_received_crc: u16,
+    pub last_expected_crc: u16,
+}
+
 impl Default for Receiver {
     fn default() -> Self {
         Self {
+            stats: RxStats::default(),
             state: State::Seek(0),
             bytes: [0; MAX_BYTES],
             bits: 0,
@@ -62,9 +77,14 @@ impl Default for Receiver {
 }
 
 impl Receiver {
+    pub fn partial(&self) -> bool {
+        !matches!(self.state, State::Seek(_) | State::Idle)
+    }
+
     /// Sample at bit centers, re-centering on each captured transition.
     /// Advance up to the edge with the *previous* level before installing it.
     pub fn edge(&mut self, time: u32, high: bool, emit: impl FnMut(Frame<'_>)) {
+        self.stats.edges = self.stats.edges.saturating_add(1);
         self.advance(time, emit);
         self.level = high;
         self.edge_us = time;
@@ -75,6 +95,12 @@ impl Receiver {
         while (time.wrapping_sub(self.sample_us) as i32) >= 0 {
             self.sample_us = self.sample_us.wrapping_add(BIT_US);
             if let Some(trailer) = self.bit(self.level) {
+                let counter = match trailer {
+                    Trailer::Ack => &mut self.stats.ack,
+                    Trailer::NoAck => &mut self.stats.no_ack,
+                    _ => &mut self.stats.bad_trailer,
+                };
+                *counter = counter.saturating_add(1);
                 emit(Frame {
                     start_us: self.start,
                     bytes: &self.bytes[..self.bits / 8],
@@ -91,6 +117,7 @@ impl Receiver {
             self.history = ((self.history << 1) | b) & 63;
             match self.history {
                 0 | 63 => {
+                    self.stats.stuffing = self.stats.stuffing.saturating_add(1);
                     self.state = State::Seek(0);
                     return None;
                 }
@@ -104,6 +131,7 @@ impl Receiver {
             State::Seek(n) => State::Seek(n + 1),
             State::Idle if !high => State::Idle,
             State::Idle => {
+                self.stats.starts = self.stats.starts.saturating_add(1);
                 self.start = self.edge_us;
                 self.bits = 0;
                 self.history = 1; // SOF participates in stuffing and CRC
@@ -133,6 +161,9 @@ impl Receiver {
                 } else if self.received == self.crc {
                     State::Delimiter
                 } else {
+                    self.stats.crc_mismatch = self.stats.crc_mismatch.saturating_add(1);
+                    self.stats.last_received_crc = self.received;
+                    self.stats.last_expected_crc = self.crc;
                     State::Seek(0)
                 }
             }
@@ -224,6 +255,33 @@ mod tests {
             assert_eq!(feed(&both).len(), 1);
         }
         assert!(feed(&BITS[..BITS.len() - 3]).is_empty());
+    }
+
+    #[test]
+    fn reports_incomplete_stuffed_and_crc_failed_candidates_separately() {
+        let mut rx = Receiver::default();
+        for &b in b"0000000111111" {
+            rx.bit(b == b'1');
+        }
+        assert_eq!(rx.stats.stuffing, 1);
+        assert!(!rx.partial());
+        for &b in b"0000000" {
+            rx.bit(b == b'1');
+        }
+        let mut bits = BITS.to_vec();
+        *bits.last_mut().unwrap() ^= 1;
+        for b in bits {
+            rx.bit(b == b'1');
+        }
+        assert_eq!(rx.stats.starts, 2);
+        assert_eq!(rx.stats.crc_mismatch, 1);
+        assert_eq!(rx.stats.last_expected_crc, 0xe2f);
+        assert_eq!(rx.stats.last_received_crc, 0xe2e);
+        for &b in b"0000000110" {
+            rx.bit(b == b'1');
+        }
+        assert!(rx.partial());
+        assert_eq!(rx.stats.starts, 3);
     }
 
     #[test]

@@ -52,11 +52,14 @@ async def main():
     parser.add_argument("ram_bin", type=Path)
     parser.add_argument("--probe", action="store_true", help="observe receiver inputs before returning to ISP")
     parser.add_argument("--frames", type=int, metavar="SECONDS", help="monitor live frames from SRAM")
+    parser.add_argument("--diagnostics", action="store_true", help="verify receiver totals with --frames")
     parser.add_argument("--from-app", action="store_true",
                         help="enter ISP from the installed dev image and return to it after the trial")
     args = parser.parse_args()
     if args.frames is not None and args.frames < 1:
         parser.error("--frames must be positive")
+    if args.diagnostics and not args.frames:
+        parser.error("--diagnostics requires --frames")
     image = args.ram_bin.read_bytes()
     check(image, ram=True)
     async with connect(args.port) as port:
@@ -70,7 +73,7 @@ async def main():
             if args.probe:
                 await probe(port)
             if args.frames:
-                await monitor(port, args.frames)
+                await monitor(port, args.frames, diagnostics=args.diagnostics)
         finally:
             await request(port, True)
             await asyncio.sleep(0.1)  # Let ROM enable autobaud before sending its sync byte.

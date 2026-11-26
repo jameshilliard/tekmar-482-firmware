@@ -11,6 +11,7 @@ pub enum Command {
     RxBegin,
     RxEnd,
     RxStream,
+    RxDiagnostics,
     EnterIsp,
 }
 
@@ -32,6 +33,7 @@ impl Decoder {
                 (false, b"RX-BEGIN") => Some(Command::RxBegin),
                 (false, b"RX-END") => Some(Command::RxEnd),
                 (false, b"RX-STREAM") => Some(Command::RxStream),
+                (false, b"RX-DIAG") => Some(Command::RxDiagnostics),
                 (false, b"ENTER-ISP") => Some(Command::EnterIsp),
                 _ => None,
             };

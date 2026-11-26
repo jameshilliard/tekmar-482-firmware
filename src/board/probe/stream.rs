@@ -12,7 +12,7 @@ struct Outbox {
     buf: [u8; 1024],
     tail: usize,
     len: usize,
-    dropped: u32,
+    dropped: [u32; 5],
 }
 
 impl Outbox {
@@ -35,7 +35,7 @@ impl Outbox {
         let end = 20 + f.bytes.len() * 2;
         line[end..end + 2].copy_from_slice(b"\r\n");
         if end + 2 > self.buf.len() - self.len {
-            self.dropped = self.dropped.saturating_add(1);
+            self.dropped[port] = self.dropped[port].saturating_add(1);
             return;
         }
         for &b in &line[..end + 2] {
@@ -57,16 +57,21 @@ impl Outbox {
     }
 }
 
-pub fn stream() {
+pub fn stream(diagnostic: bool) {
     let mut rx: [Receiver; 5] = core::array::from_fn(|_| Receiver::default());
     let mut rising = [true; 5];
     let mut out = Outbox {
         buf: [0; 1024],
         tail: 0,
         len: 0,
-        dropped: 0,
+        dropped: [0; 5],
     };
-    send(b"OK FRAMES\r\n");
+    let mut max_delay = [0; 5];
+    send(if diagnostic {
+        b"OK DIAG\r\n"
+    } else {
+        b"OK FRAMES\r\n"
+    });
     let capture = Capture::arm(5); // positive edges first; idle is low
     while read(LSR) & 1 == 0 {
         let now = TIMERS.map(|t| read(t + TC));
@@ -83,6 +88,9 @@ pub fn stream() {
                     t + CCR,
                     (read(t + CCR) & !(7 << (3 * ch))) | (next << (3 * ch)),
                 );
+                if diagnostic {
+                    max_delay[port] = max_delay[port].max(read(t + TC).wrapping_sub(at));
+                }
                 rx[port].edge(at, rising[port], &mut emit);
                 rising[port] = !rising[port];
             }
@@ -95,7 +103,35 @@ pub fn stream() {
     while out.len != 0 {
         out.pump();
     }
+    if diagnostic {
+        for (port, r) in rx.iter().enumerate() {
+            let s = &r.stats;
+            send(&[b'D', b' ', b'0' + port as u8]);
+            for n in [
+                s.edges,
+                s.starts,
+                s.stuffing,
+                s.crc_mismatch,
+                s.ack,
+                s.no_ack,
+                s.bad_trailer,
+                u32::from(r.partial()),
+                out.dropped[port],
+                max_delay[port],
+                u32::from(s.last_received_crc),
+                u32::from(s.last_expected_crc),
+            ] {
+                let mut word = *b" 00000000";
+                hex(&mut word[1..], n);
+                send(&word);
+            }
+            send(b"\r\n");
+        }
+    }
     let mut end = *b"END 00000000\r\n";
-    hex(&mut end[4..12], out.dropped);
+    hex(
+        &mut end[4..12],
+        out.dropped.into_iter().fold(0, u32::saturating_add),
+    );
     send(&end);
 }

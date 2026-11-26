@@ -144,3 +144,20 @@ python3 tools/frames.py capture.frames
 Replay uses the same decoder as the live monitor. A bad UART record, missing
 terminator or reported queue drop returns a nonzero exit status. A CRC-valid
 tN4 body with a bad bus trailer is printed as a diagnostic as in live mode.
+
+### Receiver diagnostics
+
+`board.py diagnostics PORT --seconds 60` (or `ram_trial.py --frames 60
+--diagnostics`) uses `RX-DIAG`. The wire stream is identical to `RX-STREAM`
+except for the `OK DIAG` greeting and five final `D` rows before `END`.
+Each row has a decimal port followed by twelve eight-digit hex words:
+captured edges, SOFs, stuffing failures, CRC mismatches, ACK with valid end,
+no ACK with valid end, bad trailers, in-progress candidate at stop (0/1),
+UART frame drops, maximum edge service delay in microseconds, and last
+received and calculated mismatching CRCs (zero until a mismatch).
+
+The host independently checks each body CRC, balances all candidates against
+their outcomes, and reconciles delivered frames and drops for all five ports.
+Service delay measures from the capture latch to re-arming the next edge;
+the timer has no FIFO or hardware overrun counter. A clean summary does not
+prove a pulse was never missed.
