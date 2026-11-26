@@ -86,7 +86,7 @@ Lengths describe known fields, not a reason to discard extensions.
 | `0x24f` | PlantOutputStatus | Byte 0: device count [3:0], device ID [7:4]. Byte 1: subtype. Remaining bytes use the subtype layouts below. |
 | `0x2d7` | BlockRequest | Block ID u16, destination subnet, target nodes u32 bitmap. The 483 layout optionally appends arguments u32. An empty bitmap selects no node. |
 | `0x2df` | BlockUpdate | Destination subnet, node byte (node [4:0], flags [7:5]), block ID u16, then block data. Blocks 5 (heat) and 6 (cool) carry all five E values in order: Wake, Unoccupied, Occupied, Sleep, Away. No support mask here. |
-| `0x2e7` | BlockReport | Block ID u16, one-byte support mask, then **one byte per set bit** in ascending bit order. For blocks 5/6 bits 0..4 have the names above. Absent bits consume no bytes and do not mean zero. |
+| `0x2e7` | BlockReport | Block ID u16, support mask u8, then block data. Bit 0 means logical byte 1. See the alignment rules below; do not treat every body as compact. |
 | `0x31f` | RealTimeClockReport | Minute; weekday [2:0] and hour [7:3]; zero-based month [3:0] and DST [4]; zero-based day; year since 2000. Optional sixth byte: DST mode. Date byte ff means date unsupported. This is the sender's clock. |
 | `0x32f` | OutdoorTemperatureReport | Outdoor H at offset 0. J1196J sends two copies (0x3dd8) and consumes the first (0x3e38). The host keeps the optional second word and reports whether they match. |
 | `0x337` | MaximumBoilerPercent | One maximum-value byte. |
@@ -98,6 +98,47 @@ Lengths describe known fields, not a reason to discard extensions.
 | `0x3d7` | NetworkError | Error code, then instance [5:0] and priority [7:6]. A native bus error is not a serial transport exception. |
 | `0x3df` | NetworkInitRequest | No payload defined. |
 | `0x3f7` | MasterQuery | No payload defined. |
+
+### Block reports
+
+Physical thermostat reports can retain the **positions** of unsupported
+bytes through the last supported byte. For example, with mask `80` and
+eight data bytes, the reported value is byte 8, not byte 1. This also
+agrees with J1196J's fixed offsets in its block-report handler. An
+unsupported byte is not a setting, even if its placeholder is nonzero.
+
+The decoder uses positional offsets if the data reach the highest set
+bit. It also accepts exact compact data (one byte per set bit, in
+ascending order). Shorter than the supported count is truncated. A
+length between that count and the positional span is ambiguous and
+retained without assigning values. Extra bytes beyond a positional
+layout are preserved. A zero mask conveys no supported value.
+
+Block 0 identifies a product: bytes 1..3 form the little-endian product
+number, bytes 4..5 the J number, byte 6 the Z number and byte 7 the
+maximum tN4 version. Only complete, supported fields are interpreted.
+
+### Weekly schedules
+
+The 483's `ScheduleEvent` model defines a time byte in ten-minute units
+from local midnight: 0 = 00:00, 143 = 23:50, 144 = no event. Other
+values have no established time interpretation. There is no timezone
+or absolute date. A missing day in a report is not a disabled event.
+
+| Block | Fields in logical slot order |
+| --- | --- |
+| 000F | Heating schedule ID, cooling schedule ID, cycling rate, daily event configuration, optimum start operation, RTC setback enable. Cycling rates 0..3 correspond to 24-hour, 5-2, 5-1-1 and 7-day. Event configuration 1 = two events (Wake/Sleep); 2 = four. |
+| 0010..0013 | One event per block: Wake, Unoccupied, Occupied, Sleep. Seven time bytes, Monday through Sunday. |
+| 0038..003B | The same four events for indexed schedules. First byte: schedule ID [2:0], master flag [3], cycling rate [5:4], event configuration [7:6]. Then seven day bytes. |
+
+In the 483 request queue the optional little-endian u32 BlockRequest
+argument selects the secondary schedule ID, including ID zero. A
+BlockUpdate carries destination subnet/node, block ID, and the new block
+data, **not** a report support mask. Editing one event time requires
+preserving the other days and, for indexed schedules, the whole selector
+byte. Read the same block back to verify changes; a link ACK is not a
+schedule confirmation. Single-schedule setup and all four weekday tables
+have been observed in addressed reads; indexed layouts are reference-derived.
 
 ### Plant output subtypes
 

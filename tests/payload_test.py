@@ -219,6 +219,47 @@ class PayloadTests(unittest.TestCase):
         self.assertEqual(fields["pair5_supply_temperature_raw"], 0x1234)
         self.assertEqual(fields["pair6_melting_time_minutes"], 12)
 
+    def test_support_mask_does_not_shift_positional_bytes(self):
+        setup = decode(0x2e7, "0f001103aabbcc01")
+        self.assertEqual(setup["block_layout"], "positional")
+        self.assertEqual(setup["heating_schedule_id"], 3)
+        self.assertEqual(setup["optimum_start_operation"], 1)
+        self.assertNotIn("cooling_schedule_id", setup)
+        self.assertEqual(setup["byte2_unsupported_raw"], 0xaa)
+        self.assertEqual(decode(0x2e7, "0f00110301")["optimum_start_operation"], 1)
+        partial = decode(0x2e7, "0f001103aa01")
+        self.assertEqual(partial["block_layout"], "ambiguous")
+        self.assertNotIn("optimum_start_operation", partial)
+        self.assertEqual(partial["extension_hex"], "03aa01")
+        identity = decode(0x2e7, "00007f563412ab890204")
+        self.assertEqual(identity["product_number"], 0x123456)
+        self.assertEqual(identity["j_number"], 0x89ab)
+        self.assertEqual(identity["z_number"], 2)
+        self.assertEqual(identity["max_tn4_version"], 4)
+        self.assertNotIn("product_number", decode(0x2e7, "0000061234"))
+
+    def test_schedule_event_blocks(self):
+        days = "00018f9024ff06"
+        for offset, name in enumerate(("wake", "unoccupied", "occupied", "sleep")):
+            for base, prefix, mask in [(0x10, "", "7f"), (0x38, "ae", "ff")]:
+                block = f"{base + offset:02x}00"
+                for fields in (decode(0x2e7, block + mask + prefix + days),
+                               decode(0x2df, "0231" + block + prefix + days)):
+                    self.assertEqual(fields["event"], name)
+                    self.assertEqual(fields["monday"], "00:00")
+                    self.assertEqual(fields["tuesday"], "00:10")
+                    self.assertEqual(fields["wednesday"], "23:50")
+                    self.assertEqual(fields["thursday"], "disabled")
+                    self.assertEqual(fields["friday"], "06:00")
+                    self.assertNotIn("saturday", fields)
+                    self.assertEqual(fields["saturday_raw"], 255)
+                    self.assertEqual(fields["sunday"], "01:00")
+                    if prefix:
+                        self.assertEqual(fields["schedule_id"], 6)
+                        self.assertEqual(fields["master_flag"], 1)
+                        self.assertEqual(fields["schedule_cycling_rate"], 2)
+                        self.assertEqual(fields["num_daily_events"], 2)
+
     def test_binary_replay(self):
         message = encode(1, bytes.fromhex("0003190000007d7123420582"))
         [row] = replay([message[:3], message[3:]])

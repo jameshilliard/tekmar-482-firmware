@@ -219,21 +219,78 @@ def block_request(r: Reader) -> Fields:
 
 
 SETPOINT_FIELDS = ("wake", "unoccupied", "occupied", "sleep", "away")
+DAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+EVENTS = ("wake", "unoccupied", "occupied", "sleep")
+SCHEDULE_SETUP = (
+    "heating_schedule_id", "cooling_schedule_id", "schedule_cycling_rate",
+    "num_daily_events", "optimum_start_operation", "rtc_setback_enable",
+)
+SINGLE_WEEK = range(0x10, 0x14)
+MULTI_WEEK = range(0x38, 0x3c)
+
+
+def event_time(day: str, value: int) -> Fields:
+    fields: Fields = {day + "_raw": value}
+    if value < 144:
+        fields[day] = f"{value // 6:02d}:{value % 6 * 10:02d}"
+    elif value == 144:
+        fields[day] = "disabled"
+    return fields
 
 
 def block_fields(block: int, index: int, value: int) -> Fields:
-    if block in (5, 6) and index < len(SETPOINT_FIELDS):
+    if block in (5, 6, 7) and index < len(SETPOINT_FIELDS):
         return temp(SETPOINT_FIELDS[index], value, deg_e=True)
+    if block == 7 and index == 5:
+        return temp("maximum", value, deg_e=True)
+    if block == 9 and index < len(SETPOINT_FIELDS):
+        return {SETPOINT_FIELDS[index] + "_fan_percent": value}
+    if block == 3 and index < 3:
+        return {("mode_setting", "heating_cph", "air_group_id")[index]: value}
+    if block == 15 and index < len(SCHEDULE_SETUP):
+        return {SCHEDULE_SETUP[index]: value}
+    if block in SINGLE_WEEK and index < len(DAYS):
+        return event_time(DAYS[index], value)
+    if block in MULTI_WEEK:
+        if index == 0:
+            return {"schedule_id": value & 7, "master_flag": value >> 3 & 1,
+                    "schedule_cycling_rate": value >> 4 & 3, "num_daily_events": value >> 6}
+        return event_time(DAYS[index - 1], value)
     return {f"byte{index + 1}_raw": value}
+
+
+def block_metadata(block: int) -> Fields:
+    if block in SINGLE_WEEK or block in MULTI_WEEK:
+        return {"event": EVENTS[block & 3]}
+    return {}
 
 
 def block_report(r: Reader) -> Fields:
     block, support = r.word(), r.byte()
     fields: Fields = {"block_id": block, "support_mask": f"0x{support:02x}"}
-    for index in range(8):
+    count, span = support.bit_count(), support.bit_length()
+    length = len(r.remaining)
+    if count < length < span:
+        # Neither an exact packed layout nor a complete positional layout.
+        # The remaining bytes are retained by decode_payload.
+        return fields | {"block_layout": "ambiguous"}
+    positional = count < span <= length
+    if positional:
+        fields["block_layout"] = "positional"
+    values: dict[int, int] = {}
+    for index in range(span):
         if support & (1 << index):
-            fields.update(block_fields(block, index, r.byte()))
-    return fields
+            values[index] = value = r.byte()
+            fields.update(block_fields(block, index, value))
+        elif positional:
+            fields[f"byte{index + 1}_unsupported_raw"] = r.byte()
+    if block == 0:
+        for name, start, size in (("product_number", 0, 3), ("j_number", 3, 2),
+                                  ("z_number", 5, 1), ("max_tn4_version", 6, 1)):
+            slots = range(start, start + size)
+            if all(i in values for i in slots):
+                fields[name] = int.from_bytes(bytes(values[i] for i in slots), "little")
+    return fields | block_metadata(block)
 
 
 def block_update(r: Reader) -> Fields:
@@ -241,11 +298,13 @@ def block_update(r: Reader) -> Fields:
     block = r.word()
     fields: Fields = {"target_subnet": dest, "target_node": node & 31,
                       "target_node_flags": node >> 5, "block_id": block}
-    if block in (5, 6):
-        # Unlike a report, an update carries the full ordered block without a mask.
-        for index in range(len(SETPOINT_FIELDS)):
+    # Updates have no support mask. Decode only layouts with known ordering.
+    sizes = {3: 3, 5: 5, 6: 5, 7: 6, 9: 5, 15: 6}
+    size = 7 if block in SINGLE_WEEK else 8 if block in MULTI_WEEK else sizes.get(block)
+    if size is not None:
+        for index in range(size):
             fields.update(block_fields(block, index, r.byte()))
-    return fields
+    return fields | block_metadata(block)
 
 
 def stage(r: Reader) -> Fields:
