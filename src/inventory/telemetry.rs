@@ -18,9 +18,10 @@ pub(super) enum Field {
     HumidityMin,
     HumidityMax,
     Events,
+    DeviceTarget,
 }
 impl Field {
-    const ALL: [Self; 14] = [
+    const ALL: [Self; 15] = [
         Self::Attributes,
         Self::Temperature,
         Self::Floor,
@@ -35,6 +36,7 @@ impl Field {
         Self::HumidityMin,
         Self::HumidityMax,
         Self::Events,
+        Self::DeviceTarget,
     ];
     pub(super) fn from_method(method: u32) -> Option<Self> {
         Self::ALL.into_iter().find(|f| f.method() == method)
@@ -55,12 +57,16 @@ impl Field {
             Self::HumidityMin => 0x152,
             Self::HumidityMax => 0x151,
             Self::Events => 0x17f,
+            Self::DeviceTarget => 0x13e,
         }
     }
     pub(super) fn mask(self) -> u16 {
         1 << self as u8
     }
     pub(super) fn width(self) -> usize {
+        if self == Self::DeviceTarget {
+            return 3;
+        }
         if matches!(
             self,
             Self::Attributes
@@ -89,6 +95,7 @@ pub(super) struct Telemetry {
     mode: u8,
     targets: [[u8; 2]; 4],
     rh_targets: [u8; 2],
+    device_target: [u8; 3], // selector and little-endian degH from the same status
     pub(super) attributes: u16,
     floor: Floor,
     pub(super) dirty: u16,
@@ -140,6 +147,7 @@ impl Telemetry {
         mode: 0,
         targets: [[0; 2]; 4],
         rh_targets: [0; 2],
+        device_target: [0; 3],
         attributes: 0,
         floor: Floor::Unknown,
         dirty: 0,
@@ -154,6 +162,7 @@ impl Telemetry {
         mode: 255,
         targets: [[255; 2]; 4],
         rh_targets: [255; 2],
+        device_target: [255; 3],
         ..Self::EMPTY
     };
     pub(super) fn sensor_setup(&mut self, mask: u8, values: &[u8]) -> Option<u16> {
@@ -205,6 +214,7 @@ impl Telemetry {
 
     pub(super) fn configured(&self, setting: Setting) -> bool {
         match setting {
+            Setting::DeviceTarget => self.is_setpoint_device(),
             Setting::Slab => matches!(self.floor, Floor::Only | Floor::Mixed),
             Setting::Heat | Setting::Cool => self.floor != Floor::Only,
             Setting::HumidityMin => self.attributes & Self::RH_MIN != 0,
@@ -374,7 +384,17 @@ impl Telemetry {
         self.air = temperature(data, air);
         self.demand = demand;
         self.setback = setback;
-        Temperature.mask() | Demand.mask() | Setback.mask()
+        let mut changed = Temperature.mask() | Demand.mask() | Setback.mask();
+        if message == 0x22f {
+            if setback < 7 {
+                let [lo, hi] = temperature(data, 2).to_le_bytes();
+                self.device_target = [setback, lo, hi];
+                changed |= Field::DeviceTarget.mask();
+            } else {
+                self.dirty &= !Field::DeviceTarget.mask();
+            }
+        }
+        changed
     }
 
     fn value(&self, field: Field) -> u16 {
@@ -389,6 +409,9 @@ impl Telemetry {
             Field::Events => self.events.into(),
             Field::Setback => self.setback.into(),
             Field::Mode => self.mode.into(),
+            Field::DeviceTarget => {
+                u16::from_le_bytes([self.device_target[1], self.device_target[2]])
+            }
             Field::Heat => u16::from_le_bytes(self.targets[0]),
             Field::Cool => u16::from_le_bytes(self.targets[1]),
             Field::SlabTarget => u16::from_le_bytes(self.targets[2]),
@@ -397,10 +420,14 @@ impl Telemetry {
             Field::HumidityMax => self.rh_targets[1].into(),
         }
     }
-    fn body(&self, address: u16, field: Field) -> [u8; 4] {
+    fn body(&self, address: u16, field: Field) -> [u8; 5] {
         let [a, b] = address.to_le_bytes();
         let [c, d] = self.value(field).to_le_bytes();
-        [a, b, c, d]
+        if field == Field::DeviceTarget {
+            [a, b, self.device_target[0], c, d]
+        } else {
+            [a, b, c, d, 0]
+        }
     }
     pub(super) fn reply(&self, address: u16, field: Field, call: &Call<'_>) -> Reply {
         call.ok(&self.body(address, field)[..2 + field.width()])

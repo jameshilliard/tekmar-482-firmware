@@ -61,7 +61,9 @@ def run(path, ram, fast=False):
         assert struct.unpack("<I", uc.mem_read(0xE01FC0C4, 4))[0] & (1 << 31)
     cpu.hook_add(UC_HOOK_MEM_WRITE, check_power,
                  begin=syms["__bss_start"], end=syms["__bss_start"])
-    floor, top = syms["__data_end"], syms["__stack_top"]
+    main, floor, top = syms["__main_start"], syms["__main_end"], syms["__stack_top"]
+    if floor > main:
+        cpu.mem_write(main, b"\xa5" * (floor - main))
     cpu.mem_write(floor, b"\xa5" * (top - floor))
     incoming = deque()
     actual = []
@@ -219,14 +221,16 @@ def run(path, ram, fast=False):
                 assert data[5:] == struct.pack("<HI", 1, 29104)
                 call(0x10f, b"\x01", True)
             elif method == 0x10f and data[5:] == b"\x01":
-                if phase == "group":
+                if phase == "device-target":
+                    inject(bytes.fromhex("62f0060b 0610 3406 1006 0000000000"))
+                elif phase == "group":
                     for exchange in exchanges:
                         exchange.append((bytes.fromhex("61f00002 0c01"), None))
                     call(0x13d,b"\x0c\x01",True)
                     call(0x13d,b"\x0c\0")
                 else:
                     inject(bytes.fromhex("76f00608 2003000a06000000"))
-            elif method == 0x12f and data[0] == 2:
+            elif method == 0x12f and data[0] == 2 and phase == "capture":
                 assert data[5:] == bytes.fromhex("010003")
                 assert (6,bytes.fromhex("023701000001000a06")) in actual
                 assert (6, bytes.fromhex("021f01000001000300")) in actual
@@ -273,6 +277,21 @@ def run(path, ram, fast=False):
                 call(0x14f, bytes.fromhex("01000745"), True)
             elif method == 0x14f and data[0] == 3:
                 assert not setting_exchange and data[5:] == bytes.fromhex("01000044")
+                phase = "device-target"
+                call(0x10f,b"\x01",True)
+            elif method == 0x13e and data[0] == 2:
+                assert data[5:] == bytes.fromhex("0100033406")
+                query = bytes.fromhex("6d700007 3000 00 00008000")
+                setting_exchange.extend([
+                    (bytes.fromhex("6d700007 2600 00 00008000"),
+                     bytes.fromhex("6e700604 260001 05")),
+                    (query, bytes.fromhex("6e70060b 3000ff 3406 2305 1004 2108")),
+                    (bytes.fromhex("6df0000c 0018 3000 4906 4906 4906 2108"), None),
+                    (query, bytes.fromhex("6e70060b 3000ff 4506 4606 4706 2108")),
+                ])
+                call(0x13e, bytes.fromhex("0100074906"), True)
+            elif method == 0x13e and data[0] == 3:
+                assert not setting_exchange and data[5:] == bytes.fromhex("0100034606")
                 phase = "group"
                 call(0x10f,b"\x01",True)
             elif method == 0x13d:

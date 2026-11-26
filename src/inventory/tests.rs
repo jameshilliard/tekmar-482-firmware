@@ -353,6 +353,185 @@ fn fan_uses_ventilation_block_not_duct_status_or_an_unoccupied_away_alias() {
 }
 
 #[test]
+fn device_targets_follow_application_and_setback_not_heat_setpoint_slots() {
+    let mut inv = Inventory::new();
+    let sample = |i: &mut Inventory, block: &[u8]| {
+        observe(i, 0, 0, 1, 0x2e7, block, 0);
+    };
+    observe(&mut inv, 0, 0, 1, 0x36f, &[0; 8], 0);
+    assert_eq!(
+        call(&mut inv, 0x13e, 0, &[24, 0, 0, 1, 1], 0)
+            .unwrap()
+            .payload()[7..],
+        [0, 255, 255]
+    );
+    assert!(!inv.has_command(0));
+    observe(
+        &mut inv,
+        0,
+        0,
+        1,
+        0x22f,
+        &[6, 16, 0x56, 4, 0x67, 5, 0, 0, 0, 0, 0],
+        0,
+    );
+    call(&mut inv, 0x16f, 0, &[1], 0);
+    for (mode, block, selector, index) in [
+        (0, 0x28, 0, 0),
+        (1, 0x2a, 1, 2),
+        (2, 0x2c, 2, 0),
+        (3, 0x28, 3, 2),
+        (4, 0x2e, 4, 0),
+        (5, 0x30, 5, 2),
+        (5, 0x30, 6, 4),
+        (0, 0x28, 7, 2),
+    ] {
+        // 0x00ff is a valid 16-bit target, not the byte-sized NA sentinel.
+        assert!(call(&mut inv, 0x13e, 0, &[24, 0, selector, 255, 0], 0).is_none());
+        expect_block_read(&mut inv, 0x26);
+        sample(&mut inv, &[0x26, 0, 1, mode]);
+        expect_block_read(&mut inv, block);
+        let width = if mode == 4 { 6 } else { 8 };
+        let bytes = [
+            block,
+            0,
+            if mode == 4 { 63 } else { 255 },
+            10,
+            1,
+            20,
+            2,
+            30,
+            3,
+            40,
+            4,
+        ];
+        let data = &bytes[..3 + width];
+        sample(&mut inv, data);
+        let mut frame = [
+            0x6d,
+            0xf0,
+            0,
+            4 + width as u8,
+            0,
+            1,
+            block,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ];
+        frame[8..8 + width].copy_from_slice(&data[3..]);
+        frame[8 + index..10 + index].copy_from_slice(&[255, 0]);
+        assert_eq!(inv.command_frame(0), Request::new(0, &frame[..8 + width]));
+        inv.command_sent(0, true);
+        expect_block_read(&mut inv, block);
+        sample(&mut inv, data);
+        assert_eq!(
+            &inv.command_reply(0).unwrap().payload()[7..],
+            &[
+                if selector == 7 { 3 } else { selector },
+                data[3 + index],
+                data[4 + index]
+            ]
+        );
+    }
+}
+
+#[test]
+fn device_target_reports_coalesce_with_their_own_slot_and_sentinel() {
+    let mut inv = Inventory::new();
+    inv.set_reporting(true);
+    let status = |i: &mut Inventory, slot: u8, target: u16| {
+        let [a, b] = target.to_le_bytes();
+        observe(
+            i,
+            0,
+            0,
+            1,
+            0x22f,
+            &[slot << 1, 16, a, b, 12, 5, 0, 0, 0, 0, 0],
+            0,
+        );
+    };
+    let next = |i: &mut Inventory| {
+        while let Some(reply) = i.next_report(0) {
+            if reply.payload()[1] == 0x3e {
+                return Some(reply);
+            }
+        }
+        None
+    };
+    status(&mut inv, 0, 0x543);
+    status(&mut inv, 6, 0x8000);
+    observe(&mut inv, 0, 0, 1, 0x36f, &[0, 12, 0, 0, 0, 0, 0, 0], 0);
+    assert_eq!(
+        next(&mut inv).unwrap().payload(),
+        &[2, 0x3e, 1, 0, 0, 24, 0, 6, 255, 255]
+    );
+    assert!(next(&mut inv).is_none());
+    status(&mut inv, 1, 0x540);
+    status(&mut inv, 7, 0x541);
+    assert!(next(&mut inv).is_none());
+}
+
+#[test]
+fn device_target_rejects_ambiguous_writes_and_reads_supported_word_pairs() {
+    let mut inv = Inventory::new();
+    let sample = |i: &mut Inventory, block: &[u8]| {
+        observe(i, 0, 0, 1, 0x2e7, block, 1);
+    };
+    sample(&mut inv, &[0x26, 0, 1, 0]);
+    let start = |i: &mut Inventory, service, body: &[u8]| {
+        assert!(call(i, 0x13e, service, body, 1).is_none());
+        expect_block_read(i, 0x26);
+    };
+    for body in [&[24, 0, 3, 1][..], &[24, 0, 3, 1, 2, 3]] {
+        assert!(call(&mut inv, 0x13e, 0, body, 1).is_none());
+        assert!(!inv.has_command(0));
+    }
+    assert_eq!(
+        call(&mut inv, 0x13e, 0, &[24, 0, 7, 1, 2], 1)
+            .unwrap()
+            .payload()[8..],
+        [255, 255]
+    );
+    for setup in [&[0x26, 0, 0, 0][..], &[0x26, 0, 1, 255]] {
+        start(&mut inv, 0, &[24, 0, 3, 10, 1]);
+        sample(&mut inv, setup);
+        assert!(inv.command_frame(0).is_none());
+        assert_eq!(inv.command_reply(0).unwrap().payload()[8..], [255, 255]);
+    }
+    for bad in [
+        &[0x28, 0, 255, 1, 2][..],
+        &[0x28, 0, 255, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+        &[0x28, 0, 0x37, 1, 2, 3, 4, 5, 6, 7, 8],
+        &[0x26, 0, 1, 4],
+    ] {
+        start(&mut inv, 0, &[24, 0, 0, 10, 1]);
+        sample(&mut inv, &[0x26, 0, 1, 0]);
+        expect_block_read(&mut inv, 0x28);
+        sample(&mut inv, bad);
+        assert!(inv.command_frame(0).is_none());
+        assert_eq!(inv.command_reply(0).unwrap().payload()[8..], [255, 255]);
+    }
+    start(&mut inv, 1, &[24, 0, 6, 0, 0]);
+    sample(&mut inv, &[0x26, 0, 1, 1]);
+    expect_block_read(&mut inv, 0x2a);
+    sample(&mut inv, &[0x2c, 0, 0x30, 99, 99]); // wrong application's target table
+    assert!(inv.command_reply(0).is_none());
+    sample(&mut inv, &[0x2a, 0, 0x30, 0x45, 6]);
+    assert_eq!(
+        inv.command_reply(0).unwrap().payload(),
+        &[4, 0x3e, 1, 0, 0, 24, 0, 6, 0x45, 6]
+    );
+}
+
+#[test]
 fn humidity_limits_require_rh_report_and_the_corresponding_setup_flag() {
     let mut inv = Inventory::new();
     observe(&mut inv, 0, 0, 1, 0x36f, &[0; 8], 0);

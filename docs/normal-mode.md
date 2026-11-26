@@ -20,7 +20,7 @@ native message in Raw mode does not implement its tRPC services in Normal mode.
 | 127 ModeSetting | Addressed Request and Update use heating setup (block 3). Report on observed mode. This is not ActiveDemand. |
 | 12F ActiveDemand, 137 CurrentTemperature, 138 CurrentFloorTemperature | Request, read-only Update echo and Report. Source and availability rules below. |
 | 13D SetpointGroupEnable | Request cached state for group 1..12; Update broadcasts on all five lines. Report from observed group status. |
-| 13E SetpointDevice | Not implemented. This addressed target is distinct from group enable. |
+| 13E SetpointDevice | Addressed Request and Update of a 16-bit target by setback. Reports from setpoint control status, not group enable. |
 | 13F HeatSetpoint, 147 CoolSetpoint | Addressed Request and Update by setback, using native blocks 5 and 6. Report the active slot when a block is observed and the active setback is known. |
 | 14F SlabSetpoint, 157 FanPercent | Addressed Request, Update and active-slot Report. Blocks 7 and 9; see sensor requirements and fan units below. |
 | 150 RelativeHumidity | Request and Report from RHReport. Update is ignored. |
@@ -160,6 +160,26 @@ packet and Raw mode preserve the code rather than a literal event count.
 Do not interpret the two-bit native current-state field as a tHA setback.
 
 ## Thermostat settings
+
+Setpoint controllers use a different layout from thermostat HeatSetpoint.
+In native 22F operating mode 1, bytes 2..3 are the active target, not
+the measured temperature (bytes 4..5). A Report carries the address, the
+setback from that same status, and the little-endian degH target.
+Reporting does not require SetbackEnable. With an unknown active slot
+there is no attributable target report.
+
+For an explicit 13E read or write, the gateway requires evidence of a
+setpoint controller and reads application setup (0026) from that device.
+Application codes 0 and 3 select 0028; codes 1, 2, 4 and 5 select
+002A (hot tub), 002C (DHW), 002E (floor) and 0030 (pool) respectively.
+Unknown or unsupported applications return FFFF rather than guessing.
+These blocks have four little-endian words: occupied, unoccupied, away
+and maximum. Setbacks 0/2/4, 1/3/5 and 6 select the first three words
+respectively. With setbacks disabled, update all supported target words
+but never the maximum. The six-byte floor layout without a maximum is
+also supported when its support mask agrees. Do not write an extended
+or ambiguous layout or half a word. After a change, return the target
+actually read back, not the value in the host request.
 
 Normal mode accepts one native setting operation per physical port. A
 Request sends an addressed 2D7 and waits for a matching 2E7 from the same

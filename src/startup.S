@@ -34,6 +34,11 @@ _start:
     orr r1, r1, #0x80000000
     str r1, [r0]
     mov r3, #0
+    ldr r1, =__main_start
+    ldr r2, =__main_end
+4:  cmp r1, r2
+    strlo r3, [r1], #4
+    blo 4b
     ldr r1, =__low_start
     ldr r2, =__low_end
 3:  cmp r1, r2

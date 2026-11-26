@@ -62,6 +62,7 @@ enum NormalTx {
 }
 
 pub async fn run(panel: &RefCell<Panel>) -> ! {
+    #[cfg_attr(not(feature = "ram-trial"), unsafe(link_section = ".bss.inventory"))]
     static INVENTORY: static_cell::ConstStaticCell<Inventory> =
         static_cell::ConstStaticCell::new(Inventory::new());
     let inventory = INVENTORY.take();

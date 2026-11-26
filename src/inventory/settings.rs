@@ -9,6 +9,7 @@ use crate::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Setting {
     Mode,
+    DeviceTarget,
     Heat,
     Cool,
     Slab,
@@ -21,6 +22,7 @@ impl Setting {
     pub(super) fn from_method(m: u32) -> Option<Self> {
         Some(match m {
             0x127 => Self::Mode,
+            0x13e => Self::DeviceTarget,
             0x13f => Self::Heat,
             0x147 => Self::Cool,
             0x14f => Self::Slab,
@@ -33,6 +35,7 @@ impl Setting {
     fn method(self) -> u32 {
         match self {
             Self::Mode => 0x127,
+            Self::DeviceTarget => 0x13e,
             Self::Heat => 0x13f,
             Self::Cool => 0x147,
             Self::Slab => 0x14f,
@@ -41,8 +44,16 @@ impl Setting {
             Self::HumidityMax => 0x151,
         }
     }
-    fn block(self) -> u8 {
-        match self {
+    fn block(self, app_mode: Option<u8>) -> Option<u8> {
+        Some(match self {
+            Self::DeviceTarget => match app_mode? {
+                0 | 3 => 0x28,
+                1 => 0x2a,
+                2 => 0x2c,
+                4 => 0x2e,
+                5 => 0x30,
+                _ => return None,
+            },
             Self::Mode => 3,
             Self::Heat => 5,
             Self::Cool => 6,
@@ -50,21 +61,26 @@ impl Setting {
             Self::Fan => 9,
             Self::HumidityMin => 0xa4,
             Self::HumidityMax => 0xa5,
-        }
+        })
     }
     fn width(self) -> usize {
         match self {
             Self::Mode => 3,
+            Self::DeviceTarget => 8,
             Self::Slab => 6,
             _ => 5,
         }
     }
     fn indexed(self) -> bool {
-        matches!(self, Self::Heat | Self::Cool | Self::Slab | Self::Fan)
+        matches!(
+            self,
+            Self::Heat | Self::Cool | Self::Slab | Self::Fan | Self::DeviceTarget
+        )
     }
     fn setup(self) -> Option<u8> {
         match self {
             Self::Slab => Some(13),
+            Self::DeviceTarget => Some(0x26),
             Self::HumidityMin | Self::HumidityMax => Some(0xa3),
             _ => None,
         }
@@ -91,7 +107,7 @@ enum Step {
     Verify,
     Verifying,
     Readback,
-    Done(u8),
+    Done(u16),
 }
 
 #[derive(Clone, Copy)]
@@ -100,12 +116,13 @@ pub(super) struct Operation {
     pub(super) subnet: u8,
     node: u8,
     pub(super) setting: Setting,
-    qualified: bool,
+    block: u8,
     selector: u8,
-    write: Option<u8>,
+    write: Option<u16>,
     mask: u8,
     index: usize,
-    bytes: [u8; 6],
+    bytes: [u8; 8],
+    length: usize,
     since: u32,
     step: Step,
 }
@@ -116,12 +133,13 @@ impl Operation {
         subnet: 0,
         node: 0,
         setting: Setting::Mode,
-        qualified: false,
+        block: 0,
         selector: 0,
         write: None,
         mask: 0,
         index: 0,
-        bytes: [0; 6],
+        bytes: [0; 8],
+        length: 0,
         since: 0,
         step: Step::Idle,
     };
@@ -140,11 +158,14 @@ impl Operation {
         let (&addr, tail) = call.body.split_first_chunk::<2>()?;
         let (selector, write) = match (setting, call.service, tail) {
             (Setting::Mode, 1, [] | [_] | [_, 0]) => (0, None),
-            (Setting::Mode, 0, [v] | [v, 0]) => (0, Some(*v)),
+            (Setting::Mode, 0, [v] | [v, 0]) => (0, Some(u16::from(*v))),
             (Setting::HumidityMin | Setting::HumidityMax, 1, [] | [_]) => (0, None),
-            (Setting::HumidityMin | Setting::HumidityMax, 0, [v]) => (0, Some(*v)),
+            (Setting::HumidityMin | Setting::HumidityMax, 0, [v]) => (0, Some(u16::from(*v))),
+            (Setting::DeviceTarget, 1, [s] | [s, _, _]) => (*s, None),
+            (Setting::DeviceTarget, 0, [s, a, b]) => (*s, Some(u16::from_le_bytes([*a, *b]))),
+            (Setting::DeviceTarget, _, _) => return None,
             (_, 1, [s] | [s, _]) if setting.indexed() => (*s, None),
-            (_, 0, [s, v]) if setting.indexed() => (*s, Some(*v)),
+            (_, 0, [s, v]) if setting.indexed() => (*s, Some(u16::from(*v))),
             _ => return None,
         };
         let selector = if selector >= 7 {
@@ -154,12 +175,25 @@ impl Operation {
         };
         let selection = if !setting.indexed() {
             Some((0, 1))
+        } else if setting == Setting::DeviceTarget {
+            let index = match selector {
+                0 | 2 | 4 => Some(0),
+                1 | 3 | 5 => Some(2),
+                6 => Some(4),
+                _ => None,
+            };
+            index.map(|i| (i, if setbacks { 3 << i } else { 0x3f }))
         } else {
             slots(selector).map(|(i, mask)| (i, if setbacks { mask } else { 31 }))
         };
         let (index, mask) = selection.unwrap_or_default();
         let valid = selection.is_some()
-            && write != Some(255)
+            && write
+                != Some(if setting == Setting::DeviceTarget {
+                    u16::MAX
+                } else {
+                    255
+                })
             && !(matches!(
                 setting,
                 Setting::Fan | Setting::HumidityMin | Setting::HumidityMax
@@ -170,19 +204,24 @@ impl Operation {
             subnet,
             node,
             setting,
-            qualified: setting.setup().is_none(),
+            block: setting.setup().or_else(|| setting.block(None))?,
             selector,
             write,
             mask,
             index,
-            bytes: [0; 6],
+            bytes: [0; 8],
+            length: 0,
             since: now,
-            step: if valid { Step::Read } else { Step::Done(255) },
+            step: if valid {
+                Step::Read
+            } else {
+                Step::Done(u16::MAX)
+            },
         })
     }
 
     pub(super) fn fail(&mut self) {
-        self.step = Step::Done(255);
+        self.step = Step::Done(u16::MAX);
     }
     pub(super) fn terminal(&self) -> bool {
         matches!(self.step, Step::Done(_))
@@ -194,11 +233,7 @@ impl Operation {
         }
     }
     pub(super) fn take_frame(&mut self, port: u8) -> Option<Request> {
-        let block = if self.qualified {
-            self.setting.block()
-        } else {
-            self.setting.setup()?
-        };
+        let block = self.block;
         match self.step {
             Step::Read | Step::Verify => {
                 self.step = if self.step == Step::Read {
@@ -212,8 +247,8 @@ impl Operation {
             }
             Step::Write => {
                 self.step = Step::Writing;
-                let n = self.setting.width();
-                let mut b = [0; 14];
+                let n = self.length;
+                let mut b = [0; 16];
                 b[..8].copy_from_slice(&[
                     0x6d,
                     0xf0,
@@ -238,7 +273,7 @@ impl Operation {
             (Step::Reading, true) => Step::Sample,
             (Step::Writing, true) => Step::Verify,
             (Step::Verifying, true) => Step::Readback,
-            _ => Step::Done(255),
+            _ => Step::Done(u16::MAX),
         };
     }
     pub(super) fn sample(
@@ -255,21 +290,31 @@ impl Operation {
             return;
         }
         if Some(*block) == self.setting.setup() {
-            if !live.configured(self.setting) {
+            let Some(next) = self.setting.block(block_byte(*support, values, 0)) else {
                 self.fail();
-            } else if !self.qualified && self.step == Step::Sample {
-                self.qualified = true;
+                return;
+            };
+            if !live.configured(self.setting) || self.block != *block && next != self.block {
+                self.fail(); // also cancel if the application changed during a transaction
+            } else if self.block == *block && self.step == Step::Sample {
+                self.block = next;
                 self.step = Step::Read;
             }
             return;
         }
-        if !self.qualified
-            || *block != self.setting.block()
-            || !matches!(self.step, Step::Sample | Step::Readback | Step::Write)
+        if *block != self.block || !matches!(self.step, Step::Sample | Step::Readback | Step::Write)
         {
             return;
         }
-        let Some(actual) = block_byte(*support, values, self.index) else {
+        let word = self.setting == Setting::DeviceTarget;
+        let value = block_byte(*support, values, self.index).and_then(|a| {
+            if word {
+                block_byte(*support, values, self.index + 1).map(|b| u16::from_le_bytes([a, b]))
+            } else {
+                Some(u16::from(a))
+            }
+        });
+        let Some(actual) = value else {
             self.fail();
             return;
         };
@@ -281,19 +326,35 @@ impl Operation {
             self.step = Step::Done(actual);
             return;
         }
-        let width = self.setting.width();
+        // The 483 layout allows floor controllers to omit the maximum word.
+        let width = if self.block == 0x2e && values.len() == 6 && support & 0xc0 == 0 {
+            6
+        } else {
+            self.setting.width()
+        };
         // Update carries positional bytes but no support mask. Refuse an
         // incomplete or extended layout rather than fabricating its siblings.
-        if values.len() != width || *support >> width != 0 || actual == 255 {
+        if values.len() != width
+            || u16::from(*support) >> width != 0
+            || actual == if word { u16::MAX } else { 255 }
+        {
             self.fail();
             return;
         }
         self.bytes[..width].copy_from_slice(values);
+        self.length = width;
+        let bytes = write.to_le_bytes();
+        let mask = self.mask & support;
+        if word && (mask ^ (mask >> 1)) & 0x15 != 0 {
+            self.fail(); // never write only half of a target
+            return;
+        }
         let mut needs_write = false;
         for (i, v) in self.bytes[..width].iter_mut().enumerate() {
-            if self.mask & *support & (1 << i) != 0 {
-                needs_write |= *v != write;
-                *v = write;
+            if mask & (1 << i) != 0 {
+                let new = bytes[if word { i % 2 } else { 0 }];
+                needs_write |= *v != new;
+                *v = new;
             }
         }
         self.step = if needs_write {
@@ -312,10 +373,13 @@ impl Operation {
             method: self.setting.method(),
             body: &[],
         };
-        Some(if self.setting.indexed() {
-            call.ok(&[lo, hi, self.selector, v])
+        let [a, b] = v.to_le_bytes();
+        Some(if self.setting == Setting::DeviceTarget {
+            call.ok(&[lo, hi, self.selector, a, b])
+        } else if self.setting.indexed() {
+            call.ok(&[lo, hi, self.selector, a])
         } else {
-            call.ok(&[lo, hi, v])
+            call.ok(&[lo, hi, a])
         })
     }
 }

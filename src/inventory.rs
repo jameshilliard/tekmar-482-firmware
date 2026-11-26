@@ -549,7 +549,10 @@ impl Inventory {
             };
             if row.live.is_setpoint_device()
                 && matches!(setting, Setting::Mode | Setting::Heat | Setting::Cool)
-                || matches!(setting, Setting::Heat | Setting::Cool) && !row.live.configured(setting)
+                || matches!(
+                    setting,
+                    Setting::Heat | Setting::Cool | Setting::DeviceTarget
+                ) && !row.live.configured(setting)
                 || matches!(setting, Setting::HumidityMin | Setting::HumidityMax)
                     && !row.live.has_rh()
                 || setting == Setting::Fan

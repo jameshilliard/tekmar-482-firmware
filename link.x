@@ -25,6 +25,12 @@ SECTIONS {
         __data_end = .;
     } > RAM AT > IMAGE
     __data_load = LOADADDR(.data);
+    .main_bss (NOLOAD) : ALIGN(4) {
+        __main_start = .;
+        *(.bss.inventory)
+        . = ALIGN(4);
+        __main_end = .;
+    } > RAM
     .low_bss (NOLOAD) : ALIGN(4) {
         __low_start = .;
         *(.low_bss)
@@ -39,6 +45,6 @@ SECTIONS {
     } > AUX
     __stack_top = ORIGIN(RAM) + LENGTH(RAM);
     ASSERT(SIZEOF(.vectors) == 64, "bad ARM7 vector table")
-    ASSERT(__data_end + 2048 <= __stack_top, "not enough stack")
+    ASSERT(__main_end + 2048 <= __stack_top, "not enough stack")
     /DISCARD/ : { *(.ARM.extab*) *(.eh_frame*) }
 }

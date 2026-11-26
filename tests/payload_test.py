@@ -14,6 +14,29 @@ def decode(mid, hex_bytes):
 
 
 class PayloadTests(unittest.TestCase):
+    def test_setpoint_control_tables_preserve_word_pairs_and_extensions(self):
+        self.assertEqual(decode(0x2e7, "260005 04 03")["run_mode_configuration"], 3)
+        for block, app in zip(range(0x28, 0x32, 2), ("setpoint","hot_tub","dhw","floor","pool")):
+            with self.subTest(app=app):
+                packed = decode(0x2e7, f"{block:02x}00 33 4906 4505")
+                self.assertEqual(packed["control_application"], app)
+                self.assertEqual(packed["wake_occupied_raw"], 0x649)
+                self.assertEqual(packed["away_raw"], 0x545)
+                self.assertNotIn("unoccupied_sleep_raw", packed)
+                partial = decode(0x2e7, f"{block:02x}00 01 11")
+                self.assertEqual(partial["byte1_raw"], 17)
+                self.assertNotIn("wake_occupied_raw", partial)
+                full = decode(0x2df, f"0001 {block:02x}00 4906 1206 1004 2108 de")
+                self.assertEqual(full["maximum_raw"], 0x821)
+                self.assertEqual(full["extension_hex"], "de")
+                second = decode(0x2df, f"0001 {block+1:02x}00 4906 ffff")
+                self.assertEqual(second["wake_raw"], 0x649)
+                self.assertEqual(second["sleep"], "unavailable")
+        floor = decode(0x2df, "0001 2e00 4906 1206 1004")
+        self.assertNotIn("maximum_raw", floor)
+        self.assertEqual(floor["away_raw"], 0x410)
+        self.assertIn("truncated", decode(0x2df, "0001 3000 4906 1206 1004"))
+
     def test_known_layouts(self):
         cases = {
             0x010: ("010002", dict(synch_cycle=1, purging=0, target_mode=2)),

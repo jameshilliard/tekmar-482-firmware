@@ -125,6 +125,9 @@ maximum tN4 version. Only complete, supported fields are interpreted.
 | 0007 | The same five floor targets, followed by the floor maximum (degE). |
 | 0009 | Five ventilation targets in the same order; the wire scale depends on the thermostat model. |
 | 000D | Onboard sensor configuration, then external sensor configurations 1 through 4. Zero is off; 2 is floor. |
+| 0026 | Setpoint application mode, mode configuration, run mode configuration, relay 2 sampling/start/duration, setpoint-enable address, outdoor temperature enable. |
+| 0028, 002A, 002C, 002E, 0030 | Setpoint, hot tub, DHW, floor and pool targets respectively. Four little-endian degH words: wake/occupied, unoccupied/sleep, away, maximum. Some floor controls omit the last word. Both bytes of a word must be supported to decode it. |
+| 0029, 002B, 002D, 002F, 0031 | Secondary tables for the same applications: wake and sleep as two little-endian degH words. These are not the tables used by tHA SetpointDevice. |
 | 00A3 | Humidification mode setup, dehumidification mode setup. |
 | 00A4, 00A5 | Five humidification or dehumidification percentage targets in setback order. tHA exposes only the first; the native blocks contain all five. |
 
