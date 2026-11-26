@@ -66,7 +66,9 @@ def smoke(image: bytes, ram: bool, tx_port: int) -> None:
     clock = 0
 
     led_mask = sum(1 << pin for pin in (22, 21, 18, 23, 25, 16))
-    gpio = {0: 0, 0x10: 0, 0x14: (1 << 14) | (1 << silent_pin), 0x20: 0, 0x30: 0, 0x34: 0}
+    unclaimed = 1 << 15
+    initial_dir = unclaimed | (1 << 14) | (1 << 7)
+    gpio = {0: initial_dir, 0x10: 0, 0x14: (1 << 14) | (1 << silent_pin), 0x20: 0, 0x30: 0, 0x34: 0}
     def bus_edge(which, high, stamp):
         pin, tid, ch, _ = PORTS[which]
         if high == bool(gpio[0x14] & (1 << pin)):
@@ -86,7 +88,7 @@ def smoke(image: bytes, ram: bool, tx_port: int) -> None:
         if (sending or acknowledging) and offset in (0, 0x18, 0x1c):
             previous = bool(gpio[0] & tx_latch)
             if offset == 0:
-                assert value in (0, 1 << tx_pin)
+                assert value in (unclaimed, unclaimed | (1 << tx_pin))
                 gpio[0] = value
             else:
                 assert value == 1 << tx_pin
@@ -104,7 +106,8 @@ def smoke(image: bytes, ram: bool, tx_port: int) -> None:
             else:
                 gpio[0x34] &= ~value
         else:
-            assert (offset, value) in ((0, 0), (0x10, 0), (0x20, led_mask), (0x20, 0), (0x30, 0))
+            assert (offset, value) in ((0, unclaimed), (0, initial_dir), (0x10, 0),
+                                       (0x20, led_mask), (0x20, 0), (0x30, 0))
             gpio[offset] = value
 
     cpu.mmio_map(0x3fffc000, 0x1000, gpio_read, None, gpio_write, None)
@@ -244,7 +247,7 @@ def smoke(image: bytes, ram: bool, tx_port: int) -> None:
         assert len(records) == 10 and all(row.startswith(b'D ') for row in records[2:7])
         assert records[2 + silent_port].split() == [b'D', str(silent_port).encode()] + [b'00000000'] * 12 + [b'00000003']
         assert records[-3:] == [b'END 00000000', b'OK RX', b'OK ISP']
-        assert gpio[0] == tx_latch == 0
+        assert gpio[0] == initial_dir and tx_latch == 0
         assert all(t[0] == t[4] == t[0x28] == 0 for t in timers)
         assert gpio[0x34] & led_mask == led_mask
         assert gpio[0x20] == 0

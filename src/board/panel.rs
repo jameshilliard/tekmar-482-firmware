@@ -39,6 +39,7 @@ pub struct Panel {
     saved_scs: u32,
     saved_mux: u32,
     saved_mux2: u32,
+    saved_dir0: u32,
     saved_dir1: u32,
     saved_mask0: u32,
     saved_mask1: u32,
@@ -61,10 +62,11 @@ impl Panel {
         let saved_mux2 = read(PINSEL2);
         let saved_power = read(PCONP);
         write(SCS, saved_scs | 3);
+        let saved_dir0 = read(FIO0);
         let saved_dir1 = read(FIO1);
         let saved_mask0 = read(FIO0 + MASK);
         let saved_mask1 = read(FIO1 + MASK);
-        write(FIO0, read(FIO0) & !(DIP | BUTTON));
+        write(FIO0, saved_dir0 & !(DIP | BUTTON));
         write(PINSEL0, read(PINSEL0) & !((3 << 14) | (3 << 28)));
         write(FIO0 + MASK, read(FIO0 + MASK) & !(DIP | BUTTON));
         let leds = pins(63);
@@ -85,6 +87,7 @@ impl Panel {
             saved_scs,
             saved_mux,
             saved_mux2,
+            saved_dir0,
             saved_dir1,
             saved_mask0,
             saved_mask1,
@@ -193,6 +196,10 @@ impl Panel {
         write(FIO1 + MASK, self.saved_mask1);
         write(PINSEL2, self.saved_mux2);
         write(PINSEL0, self.saved_mux);
+        write(
+            FIO0,
+            (read(FIO0) & !(DIP | BUTTON)) | (self.saved_dir0 & (DIP | BUTTON)),
+        );
         // The ROM autobaud routine must regain the GPIO interface it started with.
         write(SCS, self.saved_scs);
     }
