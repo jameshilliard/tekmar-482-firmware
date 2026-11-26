@@ -212,7 +212,41 @@ fn taking_address_is_report_only_and_follows_the_known_device() {
     );
     assert!(move_to(&mut inv, 0, [9, 23], 153).is_none()); // Expired.
     for service in [0, 1] {
-        assert!(call(&mut inv, TAKING_ADDRESS, service, &[1, 0, 2, 0], 0).is_none());
+        let call = Call {
+            method: TAKING_ADDRESS,
+            service,
+            body: &[1, 0, 2, 0],
+        };
+        assert!(matches!(inv.handle(&call, 0), Answer::Unhandled));
+        assert_eq!(call.unsupported().payload(), &[service + 3, 0, 0, 0, 0]);
+    }
+}
+
+#[test]
+fn all_stock_input_method_ids_reach_normal_handlers() {
+    // The 26 cases in J1196J's type-6 dispatcher at 0xae8c. A handled
+    // report-only service or an unknown device can legitimately be silent.
+    for method in [
+        0x107, 0x10f, 0x117, 0x11f, 0x127, 0x12f, 0x137, 0x138, 0x13d, 0x13e, 0x13f, 0x147, 0x14f,
+        0x150, 0x151, 0x152, 0x157, 0x167, 0x16f, 0x177, 0x17f, 0x187, 0x18f, 0x197, 0x19f, 0x1a7,
+    ] {
+        let mut inv = Inventory::new();
+        for service in [0, 1] {
+            assert!(
+                !matches!(
+                    inv.handle(
+                        &Call {
+                            method,
+                            service,
+                            body: &[]
+                        },
+                        0
+                    ),
+                    Answer::Unhandled
+                ),
+                "missing service {service} for {method:#x}"
+            );
+        }
     }
 }
 

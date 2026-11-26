@@ -102,9 +102,16 @@ def run(path, ram, fast=False):
     edges = deque()
     panel_edges = deque()
     inventory_at = None
+    queued_send_at = None
+    queued_events = set()
     exchanges = [deque() for _ in PORTS]
     setting_exchange = exchanges[0]
     driven = [[] for _ in PORTS]
+    external = [False] * len(PORTS)
+    drive_start = [0] * len(PORTS)
+    expected_rx_acks = set()
+    received_rx_acks = set()
+    raw_mode, raw_ack_mask = False, 0
     clock_frame = bytes.fromhex("71f00005 1b52 05190c")
     clock_ports = set()
 
@@ -123,15 +130,24 @@ def run(path, ram, fast=False):
         nonlocal pins, phase
         if off in (0x18, 0x1C, 0):
             for p, exchange in enumerate(exchanges):
-                if not exchange:
-                    continue
                 tx = 1 << PORTS[p][3]
                 drive_bits = driven[p]
                 if off == 0 and value & tx and not gpio[0] & tx:
+                    drive_start[p] = clock
                     drive_bits.append("1" if pins & tx else "0")
                 elif off in (0x18, 0x1C) and gpio[0] & tx and value & tx:
                     drive_bits.append("1" if off == 0x18 else "0")
                 elif off == 0 and not value & tx and gpio[0] & tx:
+                    if drive_bits == ["1", "0"]:
+                        # Receiver drives only the link ACK slot, never its own frame.
+                        slot, = (s for s in expected_rx_acks if s[0] == p and abs(s[1] - drive_start[p]) < 625)
+                        assert slot not in received_rx_acks and abs(clock - slot[1] - 2500) < 625
+                        received_rx_acks.add(slot)
+                        drive_bits.clear()
+                        continue
+                    if not exchange:
+                        drive_bits.clear()
+                        continue
                     expected, device_reply = exchange.popleft()
                     # Ten delimiter/ACK/EOF bits, then the driver's final release.
                     assert "".join(drive_bits) == protected_bits(expected) + "0" * 11
@@ -167,8 +183,7 @@ def run(path, ram, fast=False):
             else:
                 pins &= ~value
             for p, (_, _, _, tx) in enumerate(PORTS):
-                if gpio[0] & 1 << tx:
-                    level(p, bool(pins & 1 << tx), clock)
+                level(p, external[p] or bool(gpio[0] & pins & 1 << tx), clock)
         elif off in (0x38, 0x3C):
             gpio[0x34] = gpio[0x34] | value if off == 0x38 else gpio[0x34] & ~value
         else:
@@ -177,7 +192,7 @@ def run(path, ram, fast=False):
     cpu.mmio_map(0x3FFFC000, 0x1000, lambda u, o, s, d: gpio[o], None, gpio_write, None)
 
     def timer_read(uc, off, size, t):
-        nonlocal clock, inventory_at, next_byte
+        nonlocal clock, inventory_at, next_byte, queued_send_at
         if off == 8:
             if t == 0 and timers[t].get(4) == 1:
                 clock += 40
@@ -190,13 +205,18 @@ def run(path, ram, fast=False):
                 )
                 while edges and edges[0][0] <= clock:
                     at, p, high = edges.popleft()
-                    level(p, high, at)
+                    external[p] = high
+                    level(p, high or bool(gpio[0] & pins & 1 << PORTS[p][3]), at)
                 while panel_edges and panel_edges[0][0] <= clock:
                     _, down = panel_edges.popleft()
                     gpio[0x14] = gpio[0x14] & ~button if down else gpio[0x14] | button
                 if inventory_at is not None and clock >= inventory_at:
                     inventory_at = None
                     call(0x167, b"\0\0")
+                if queued_send_at is not None and clock >= queued_send_at:
+                    queued_send_at = None
+                    exchanges[2].append((SCENE, None))
+                    send(2, SCENE)
             return clock
         return timers[t].get(off, 0)
 
@@ -235,6 +255,9 @@ def run(path, ram, fast=False):
             for i, bit in enumerate(wire):
                 if i == 0 or bit != wire[i - 1]:
                     all_edges.append((start + i * 2500, p, bit == "1"))
+            if raw_ack_mask & (1 << p):
+                # First frame has bad CRC. Only its valid successor may be ACKed.
+                expected_rx_acks.add((p, start + (2 * len(BITS) + 19) * 2500))
         edges.extend(sorted(all_edges))
 
     def send(p, body=SCENE):
@@ -258,8 +281,11 @@ def run(path, ram, fast=False):
     phase = "capture"
 
     def inject(body, port=0, *, after=None):
-        wire = protected_bits(body) + "0" * 18
+        protected = protected_bits(body)
+        wire = protected + "0" * 18
         start = (clock if after is None else after) + 30_000
+        if not raw_mode or raw_ack_mask & (1 << port):
+            expected_rx_acks.add((port, start + (len(protected) + 1) * 2500))
         for i, bit in enumerate(wire):
             if i == 0 or bit != wire[i - 1]:
                 edges.append((start + i * 2500, port, bit == "1"))
@@ -280,6 +306,7 @@ def run(path, ram, fast=False):
         at_line_rate()
 
     def read_event(event):
+        nonlocal phase, queued_send_at
         assert event not in read_events
         read_events.add(event)
         if read_events == {"result", "report"}:
@@ -288,10 +315,19 @@ def run(path, ram, fast=False):
             if reads:
                 start_read()
             else:
-                telemetry_capture()
+                phase = "queued-rx"
+                inject(BODY, 2)
+                # Admit our send while the remote peer is transmitting its header.
+                queued_send_at = clock + 30_000 + 12 * 2500
+
+    def queued_event(event):
+        assert event not in queued_events
+        queued_events.add(event)
+        if queued_events == {BODY, SCENE, "no-peer-ack"}:
+            telemetry_capture()
 
     def reply(kind, data):
-        nonlocal phase, overlap, inventory_at
+        nonlocal phase, overlap, inventory_at, raw_mode, raw_ack_mask
         actual.append((kind, data))
         if kind == 6:
             method = int.from_bytes(data[1:5], "little")
@@ -458,13 +494,13 @@ def run(path, ram, fast=False):
                 call(0x197, b"\x03\0")
             elif method == 0x197 and phase == "second-move":
                 assert data[5:] == bytes.fromhex("030082830100")
-                assert not any(kind == 6 and pkt[1:5] == bytes(4)
-                               for kind, pkt in actual[-3:])
+                assert actual[-3:-1] == [(6, bytes([service]) + bytes(4)) for service in (4, 3)]
                 phase = "panel-request"
                 call(0x187, bytes(2), True)
                 call(0x18f, bytes(2), True)
                 call(0x187, b"\xff\xff")
             elif method == 0x544BF002 and data[5:] == bytes([1]):
+                raw_mode = True
                 assert [pkt for k, pkt in actual if k == 6 and pkt[1:5] == bytes.fromhex("a7010000")] == [
                     bytes.fromhex("03a7010000") + b"\xff" * 7,
                     bytes.fromhex("03a7010000dc07061a020a1b"),
@@ -472,8 +508,13 @@ def run(path, ram, fast=False):
                 assert len(clock_ports) == 5
                 call(0x187, bytes(2))
                 panel_edges.extend([(clock + 200_000, True), (clock + 300_000, False)])
+                extension(9, bytes([1 << 2]), True)
+            elif method == 0x544BF009:
+                assert raw_mode and data[0] == 3 and data[5:] == bytes([1 << 2])
+                raw_ack_mask = data[5]
                 plant_inputs()
             elif method == 0x544BF002 and data[5:] == bytes([0]):
+                raw_mode, raw_ack_mask = False, 0
                 extension(7)
             elif method == 0x544BF007:
                 _, inputs, presses, _, _, _, sweep = struct.unpack("<7I", data[5:])
@@ -497,6 +538,10 @@ def run(path, ram, fast=False):
             assert protected & 0x7FFF == 0x0E2E
             invalid.add(p)
         elif service == 0:
+            if phase == "queued-rx":
+                assert p == 2 and data[6:] in (BODY, SCENE)
+                queued_event(data[6:])
+                return
             if phase == "telemetry":
                 assert (p, data[6:]) == TELEMETRY[len(telemetry)]
                 telemetry.append((p, data[6:]))
@@ -527,6 +572,10 @@ def run(path, ram, fast=False):
             overlap = True
         elif service == 2:
             assert data[2:] == bytes([2, 1]), data
+            if phase == "queued-rx":
+                assert p == 2
+                queued_event("no-peer-ack")
+                return
             if phase == "raw-read":
                 assert p == 0
                 read_event("result")
@@ -620,6 +669,7 @@ def run(path, ram, fast=False):
         assert (6, bytes.fromhex("0403f04b54") + bytes([p]) + bytes(8)) in actual
     assert not reads and not read_events and actual[-1] == (6, bytes.fromhex("0305f04b54"))
     assert tuple(telemetry) == TELEMETRY
+    assert expected_rx_acks and received_rx_acks == expected_rx_acks, expected_rx_acks - received_rx_acks
     painted = bytes(cpu.mem_read(floor, top - floor))
     free = len(painted) - len(painted.lstrip(b"\xa5"))
     assert free >= 256, free

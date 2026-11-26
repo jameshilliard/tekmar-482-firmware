@@ -60,7 +60,8 @@ reason, bit count and the captured bits, so a host can inspect a bad
 frame without interpreting it as an application message.
 
 The optional `diagnostics --ack-port N` enables link ACK on just that
-port. The gateway asserts the ACK slot only after a matching CRC and a
+port in Raw mode. Normal mode already acknowledges peers on each line.
+The gateway asserts the ACK slot only after a matching CRC and a
 valid CRC delimiter. This is useful on a two-device line. A link ACK does
 not confirm that a device applied a setting.
 

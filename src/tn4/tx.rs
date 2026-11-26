@@ -127,6 +127,10 @@ impl Sender {
         Action::Finish(outcome)
     }
 
+    pub fn started(&self) -> bool {
+        !matches!(self.phase, Phase::Idle)
+    }
+
     pub fn poll(&mut self, now: u32, high: bool) -> Action {
         match self.phase {
             Phase::Done => return Action::None,

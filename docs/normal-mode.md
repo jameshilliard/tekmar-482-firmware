@@ -6,13 +6,18 @@ field layouts; the 482 SW 06 J1196J handlers and the native
 [frame catalog](tn4-frames.md) connect them to bus behavior. Recognizing a
 native message in Raw mode does not implement its tRPC services in Normal mode.
 
+The J1196J input dispatcher at `0xae8c` has **26** named cases. All 26
+are handled here. NullMethod is the fallback, and TakingAddress is an
+additional output-only ID. Method coverage does not imply identical bus
+behavior or compatibility with every serial client's timeout.
+
 | Method IDs (hex) | Normal-mode behavior in this firmware |
 | --- | --- |
 | 000 NullMethod | Reply to an unknown method on the matching response service. |
 | 187 FirmwareRevision, 18F ProtocolVersion | Request returns a little-endian u16; Update is silent. The physical Test button reports both. |
 | 167 DeviceInventory | Full walk, exact lookup, clear one, clear all. No unsolicited inventory report. |
 | 197 DeviceType, 19F DeviceVersion | Read addressed identity from block 0. Ignore writes. |
-| 15F TakingAddress | Report the old and new addresses even with reporting disabled. Request and Update are ignored. |
+| 15F TakingAddress | Report the old and new addresses even with reporting disabled. The stock input dispatcher has no case for this report ID: host Request and Update get an empty NullMethod on the corresponding response service. |
 | 107 NetworkError | Request and Update return the current network error word. Reports follow native 3D7, including clearance. |
 | 10F ReportingState | Request and Update read back the active reporting flag. A Test-mode Report carries the physical DIP position instead. |
 | 117 OutdoorTemp | Read the selected network temperature, supply a four-minute local sample, and report changes. Respond to native outdoor requests on all five ports. |
@@ -28,6 +33,31 @@ native message in Raw mode does not implement its tRPC services in Normal mode.
 | 17F SetbackEvents | Request, read-only Update echo and Report. Returns the schedule master's configuration code (0/1/2 for zero/two/four events); FF if unknown, reserved or not a master. |
 | 16F SetbackEnable, 177 SetbackState | Read or set the gateway enable flag; read the active setback and receive setback reports when enabled. The flag also determines which heat, cool, floor and fan slots an Update changes. |
 | 1A7 DateTime | Update broadcasts local wall time on all five lines. No Request response or Report. |
+
+## Bus compatibility
+
+Normal mode acts as a tN4 receiver on all five lines. After a valid CRC
+and delimiter it drives the one-bit link ACK, including while its own
+transmission is waiting for the line to become idle. It does not ACK its
+own frame. A link ACK is independent of serial reporting, application
+support for the message, and whether the device applied a setting.
+Raw mode is passive unless the host explicitly selects ports for RX ACK.
+
+There are still differences from J1196J:
+
+- The stock application sends a class-1 MasterQuery (`3F7`) when a line
+  comes up, and sends NetworkInitRequest (`3DF`) after 30 seconds unless
+  it has seen that probe. Normal mode currently identifies devices from
+  observed traffic and requests missing identity, but does not run this
+  automatic line bring-up sequence. A Raw host can send either frame.
+- The stock link driver has error-dependent retries and backoff
+  (`0x4354`). The custom transmitter makes one attempt. An unacknowledged
+  setting write is not blindly replayed; settings use device readback.
+- Stock settings often reply from cache. This implementation reads the
+  device for supported setting operations, so a response can take longer,
+  report the value the device actually retained, or indicate a busy port.
+  It does not reproduce the stock two-minute deferral of background
+  queries on native WaterCycleStart (`37F`, handler `0x68e4`).
 
 ## Gateway diagnostics
 

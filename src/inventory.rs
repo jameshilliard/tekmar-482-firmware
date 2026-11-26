@@ -586,7 +586,6 @@ impl Inventory {
             return settings::accept(&mut bus.job, op, call);
         }
         match call.method {
-            TAKING_ADDRESS => return Answer::Silent,
             0x10f | 0x16f => {
                 match (call.service, call.body) {
                     (0, [v]) if call.method == 0x10f => self.set_reporting(*v != 0),

@@ -45,14 +45,18 @@ impl LineDriver {
             self.enabled = true;
         }
     }
+    fn release(&mut self) {
+        if self.enabled {
+            write(CLR, self.tx);
+            write(FIO, read(FIO) & !self.tx);
+            self.enabled = false;
+        }
+    }
 }
 
 impl Drop for LineDriver {
     fn drop(&mut self) {
-        if self.enabled {
-            write(CLR, self.tx);
-            write(FIO, read(FIO) & !self.tx);
-        }
+        self.release();
         write(
             MASK,
             (read(MASK) & !(self.tx | self.rx)) | (self.mask & (self.tx | self.rx)),
@@ -62,7 +66,16 @@ impl Drop for LineDriver {
 
 impl Attempt {
     pub(super) fn started(&self) -> bool {
-        self.pin.enabled
+        self.sender.started()
+    }
+
+    pub(super) fn receive_ack(&mut self, dominant: bool) {
+        debug_assert!(!self.started());
+        if dominant {
+            self.pin.drive(true);
+        } else {
+            self.pin.release();
+        }
     }
 
     pub(super) fn new(request: &Request, rx_pin: u32, now: u32) -> Option<Self> {

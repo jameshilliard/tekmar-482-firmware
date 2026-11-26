@@ -115,7 +115,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                     p,
                     frame.bytes,
                     seconds,
-                    sending[p].is_none()
+                    sending[p].is_none() && !ack[p].driving()
                         && !inventory.has_command(p)
                         && !inventory.has_broadcast(p),
                 )
@@ -160,11 +160,12 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                     NormalTx::Setting => inventory.command_finished(p),
                     NormalTx::Broadcast(tx) => inventory.stale_broadcast(p, tx, seconds),
                 };
-                if cancel && sending[p].as_ref().is_some_and(|a| !a.started()) {
+                if cancel && !ack[p].driving() && sending[p].as_ref().is_some_and(|a| !a.started())
+                {
                     sending[p] = None;
                     owner[p] = NormalTx::Probe;
                 }
-                if sending[p].is_none() {
+                if sending[p].is_none() && !ack[p].driving() {
                     if let Some(req) = inventory.command_frame(p) {
                         sending[p] = Attempt::new(&req, INPUTS[p].0, t);
                         if sending[p].is_some() {
@@ -186,43 +187,52 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                     }
                 }
             }
-            if let Some(attempt) = sending[p].as_mut() {
-                if let Some(result) = attempt.poll(t) {
-                    sending[p] = None;
-                    if !raw {
-                        if matches!(
-                            core::mem::replace(&mut owner[p], NormalTx::Probe),
-                            NormalTx::Setting
-                        ) {
-                            inventory
-                                .command_sent(p, matches!(result, Outcome::Ack | Outcome::NoAck));
-                        }
-                        continue;
-                    }
-                    let why = match result {
-                        Outcome::Ack => 0,
-                        Outcome::NoAck => 1,
-                        Outcome::ArbitrationLost => 2,
-                        Outcome::EchoMismatch => 3,
-                        Outcome::BadEnd => 4,
-                        Outcome::Late => 5,
-                    };
-                    let body = [2, p as u8, if why == 0 { 0 } else { 2 }, why];
-                    out.enqueue(
-                        Kind::Result(p as u8),
-                        tpck::TN4,
-                        if why == 0 { &body[..3] } else { &body },
-                    );
-                }
-            } else if !reboot && raw && ack_mask & (1 << p) != 0 {
-                if ack_pin[p].is_none() {
+            // A queued send is still a receiver until it actually drives SOF.
+            // Never acknowledge our own transmission. Raw RX ACK is opt-in.
+            if !reboot
+                && (!raw || ack_mask & (1 << p) != 0)
+                && !sending[p].as_ref().is_some_and(Attempt::started)
+                && let Some(high) = ack[p].poll(t, bus.rx[p].ack_slot())
+            {
+                if let Some(waiting) = sending[p].as_mut() {
+                    waiting.receive_ack(high);
+                } else if high {
                     ack_pin[p] = LineDriver::claim(p as u8, INPUTS[p].0);
+                    if let Some(pin) = ack_pin[p].as_mut() {
+                        pin.drive(true);
+                    }
+                } else {
+                    ack_pin[p] = None;
                 }
-                if let Some(driver) = ack_pin[p].as_mut()
-                    && let Some(level) = ack[p].poll(t, bus.rx[p].ack_slot())
-                {
-                    driver.drive(level);
+            }
+            if !ack[p].driving()
+                && let Some(attempt) = sending[p].as_mut()
+                && let Some(result) = attempt.poll(t)
+            {
+                sending[p] = None;
+                if !raw {
+                    if matches!(
+                        core::mem::replace(&mut owner[p], NormalTx::Probe),
+                        NormalTx::Setting
+                    ) {
+                        inventory.command_sent(p, matches!(result, Outcome::Ack | Outcome::NoAck));
+                    }
+                    continue;
                 }
+                let why = match result {
+                    Outcome::Ack => 0,
+                    Outcome::NoAck => 1,
+                    Outcome::ArbitrationLost => 2,
+                    Outcome::EchoMismatch => 3,
+                    Outcome::BadEnd => 4,
+                    Outcome::Late => 5,
+                };
+                let body = [2, p as u8, if why == 0 { 0 } else { 2 }, why];
+                out.enqueue(
+                    Kind::Result(p as u8),
+                    tpck::TN4,
+                    if why == 0 { &body[..3] } else { &body },
+                );
             }
         }
         if out.can_receive()
@@ -296,7 +306,8 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                                 && call.service == 0
                             {
                                 for (p, attempt) in sending.iter_mut().enumerate() {
-                                    if matches!(owner[p], NormalTx::Probe)
+                                    if !ack[p].driving()
+                                        && matches!(owner[p], NormalTx::Probe)
                                         && attempt.as_ref().is_some_and(|a| !a.started())
                                     {
                                         *attempt = None;
