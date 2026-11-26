@@ -18,6 +18,7 @@ pub struct Frame<'a> {
     pub bytes: &'a [u8],
     pub crc: u16,
     pub trailer: Trailer,
+    pub early_start: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -25,6 +26,7 @@ enum State {
     Seek(u8),
     Dominant(u8),
     Idle,
+    Gap(u8),
     Data,
     Check(u8),
     Delimiter,
@@ -43,6 +45,8 @@ pub struct Receiver {
     capture: [u8; MAX_BYTES + 2],
     captured: usize,
     failure: Option<u8>,
+    gap_fault: bool,
+    early_start: bool,
     ack: bool,
     start: u32,
     level: bool,
@@ -76,6 +80,8 @@ impl Default for Receiver {
             capture: [0; MAX_BYTES + 2],
             captured: 0,
             failure: None,
+            gap_fault: false,
+            early_start: false,
             ack: false,
             start: 0,
             level: false,
@@ -112,8 +118,20 @@ impl Receiver {
     pub fn partial(&self) -> bool {
         !matches!(
             self.state,
-            State::Seek(_) | State::Dominant(_) | State::Idle
+            State::Seek(_) | State::Dominant(_) | State::Idle | State::Gap(_)
         )
+    }
+
+    pub fn idle(&self) -> bool {
+        matches!(self.state, State::Idle) && !self.level
+    }
+
+    pub fn take_gap_fault(&mut self) -> bool {
+        core::mem::take(&mut self.gap_fault)
+    }
+
+    pub fn early_start(&self) -> bool {
+        self.early_start
     }
 
     pub fn stuck_dominant(&self) -> bool {
@@ -145,6 +163,7 @@ impl Receiver {
                     bytes: &self.bytes[..self.bits / 8],
                     crc: self.received,
                     trailer,
+                    early_start: self.early_start,
                 });
             }
         }
@@ -178,8 +197,11 @@ impl Receiver {
             State::Dominant(_) => State::Seek(1),
             State::Seek(6) => State::Idle,
             State::Seek(n) => State::Seek(n + 1),
-            State::Idle if !high => State::Idle,
-            State::Idle => {
+            State::Gap(1) | State::Idle if !high => State::Idle,
+            State::Gap(n) if !high => State::Gap(n - 1),
+            State::Gap(_) | State::Idle => {
+                self.early_start = matches!(self.state, State::Gap(3));
+                self.gap_fault |= self.early_start;
                 self.capture[0] = 0x80;
                 self.captured = 1;
                 self.stats.starts = self.stats.starts.saturating_add(1);
@@ -235,7 +257,7 @@ impl Receiver {
                 return Some(Trailer::BadEnd { ack: self.ack });
             }
             State::End(1) => {
-                self.state = State::Idle;
+                self.state = State::Gap(3);
                 return Some(if self.ack {
                     Trailer::Ack
                 } else {
@@ -362,6 +384,26 @@ mod tests {
         }
         rx.bit(true);
         assert!(rx.partial());
+    }
+
+    #[test]
+    fn intermission_is_not_idle_and_only_the_first_gap_bit_flags_backoff() {
+        for quiet in 0..=3 {
+            let mut rx = Receiver::default();
+            for &b in b"0000000".iter().chain(BITS).chain(b"0100000000") {
+                rx.bit(b == b'1');
+            }
+            for _ in 0..quiet {
+                assert!(!rx.idle());
+                rx.bit(false);
+            }
+            assert_eq!(rx.idle(), quiet == 3);
+            rx.bit(true);
+            assert!(rx.partial());
+            assert_eq!(rx.early_start(), quiet == 0);
+            assert_eq!(rx.take_gap_fault(), quiet == 0);
+            assert!(!rx.take_gap_fault());
+        }
     }
 
     #[test]

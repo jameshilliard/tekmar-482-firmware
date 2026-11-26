@@ -1,14 +1,14 @@
 //! Normal-mode inventory. Bus addresses, not product numbers, identify entries.
 use crate::trpc::{Call, GatewayVersion, Reply};
 mod broadcast;
-mod discovery;
 mod groups;
+mod line;
 mod outdoor;
 pub use broadcast::Broadcast;
-pub use discovery::{LineDiscovery, LineProbe};
+pub use line::{LineProbe, NormalLine};
 mod settings;
 mod telemetry;
-use crate::tn4::tx::Request;
+use crate::tn4::tx::{Outcome, Request};
 use settings::{Operation, Setting};
 use telemetry::{Field, Telemetry};
 
@@ -55,7 +55,7 @@ impl Device {
 
 #[derive(Default)]
 struct Port {
-    link: LineDiscovery,
+    link: NormalLine,
     subnet: Option<u8>,
     devices: [Device; NODES],
     pending: u32,
@@ -91,7 +91,7 @@ impl Inventory {
             outdoor: outdoor::Outdoor::EMPTY,
             ports: [const {
                 Port {
-                    link: LineDiscovery::COLD,
+                    link: NormalLine::COLD,
                     subnet: None,
                     devices: [Device::EMPTY; NODES],
                     pending: 0,
@@ -377,7 +377,7 @@ impl Inventory {
         self.broadcasts = broadcast::Broadcasts::EMPTY;
         self.outdoor = outdoor::Outdoor::EMPTY;
         for port in &mut self.ports {
-            port.link = LineDiscovery::COLD;
+            port.link = NormalLine::COLD;
             port.subnet = None;
             port.devices.fill(Device::default());
             port.pending = 0;
@@ -397,7 +397,7 @@ impl Inventory {
         }
         self.outdoor.tick(now, self.reporting, &mut self.broadcasts);
     }
-    pub fn line(&mut self, p: usize) -> &mut LineDiscovery {
+    pub fn line(&mut self, p: usize) -> &mut NormalLine {
         &mut self.ports[p].link
     }
     pub fn has_broadcast(&self, p: usize) -> bool {
@@ -423,8 +423,11 @@ impl Inventory {
     pub fn command_frame(&mut self, p: usize) -> Option<Request> {
         self.ports[p].job.take_frame(p as u8)
     }
-    pub fn command_sent(&mut self, p: usize, complete: bool) {
-        self.ports[p].job.sent(complete);
+    pub fn command_sent(&mut self, p: usize, outcome: Outcome) {
+        self.ports[p].job.sent(outcome);
+    }
+    pub fn command_unavailable(&mut self, p: usize) {
+        self.ports[p].job.fail();
     }
     pub fn command_reply(&mut self, p: usize) -> Option<Reply> {
         let slot = &mut self.ports[p].job;

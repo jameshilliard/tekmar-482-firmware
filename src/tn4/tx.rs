@@ -1,7 +1,7 @@
 //! One bus attempt. No automatic retransmission or active error flags.
 use super::BIT_US;
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Request {
     pub port: u8,
     data: [u8; 67],
@@ -27,8 +27,7 @@ impl Request {
 /// Cursor after SOF. A Send can be admitted without first computing all
 /// the protected bits while back-to-back host frames fill the UART FIFO.
 struct Protected {
-    data: [u8; 67],
-    data_bits: usize,
+    request: Request,
     index: usize,
     crc: u16,
     run: u8,
@@ -38,8 +37,7 @@ struct Protected {
 impl Protected {
     fn new(request: &Request) -> Self {
         Self {
-            data: request.data,
-            data_bits: request.len * 8,
+            request: request.clone(),
             index: 0,
             crc: 0x4599,
             run: 1,
@@ -48,7 +46,8 @@ impl Protected {
     }
     fn next(&mut self) -> Option<bool> {
         let i = self.index;
-        if i == self.data_bits + 15 {
+        let data_bits = self.request.len * 8;
+        if i == data_bits + 15 {
             return None; // No stuffing between the final CRC bit and delimiter.
         }
         if self.run == 5 {
@@ -56,13 +55,13 @@ impl Protected {
             self.run = 1;
             return Some(self.last);
         }
-        let bit = if i < self.data_bits {
-            let bit = self.data[i / 8] & (0x80 >> (i % 8)) != 0;
+        let bit = if i < data_bits {
+            let bit = self.request.data[i / 8] & (0x80 >> (i % 8)) != 0;
             let feedback = (self.crc & 0x4000 != 0) ^ bit;
             self.crc = ((self.crc << 1) & 0x7fff) ^ if feedback { 0x4599 } else { 0 };
             bit
         } else {
-            self.crc & (1 << (14 - (i - self.data_bits))) != 0
+            self.crc & (1 << (14 - (i - data_bits))) != 0
         };
         self.index += 1;
         self.run = if bit == self.last { self.run + 1 } else { 1 };
@@ -92,6 +91,7 @@ enum Phase {
     Idle,
     Sample,
     Boundary,
+    Lost,
     Done,
 }
 
@@ -123,7 +123,11 @@ impl Sender {
     }
 
     fn finish(&mut self, outcome: Outcome) -> Action {
-        self.phase = Phase::Done;
+        self.phase = if outcome == Outcome::ArbitrationLost {
+            Phase::Lost
+        } else {
+            Phase::Done
+        };
         Action::Finish(outcome)
     }
 
@@ -131,9 +135,26 @@ impl Sender {
         !matches!(self.phase, Phase::Idle)
     }
 
+    /// Only a lost protected-bit arbitration proves that our frame did not finish.
+    pub fn retry_arbitration(&mut self, now: u32) -> bool {
+        if !matches!(self.phase, Phase::Lost) {
+            return false;
+        }
+        *self = Self::new(&self.bits.request, now);
+        true
+    }
+
+    pub fn hold_if_waiting(&mut self, now: u32) -> bool {
+        if self.started() {
+            return false;
+        }
+        self.quiet_since = now;
+        true
+    }
+
     pub fn poll(&mut self, now: u32, high: bool) -> Action {
         match self.phase {
-            Phase::Done => return Action::None,
+            Phase::Done | Phase::Lost => return Action::None,
             Phase::Idle => {
                 if high {
                     self.quiet_since = now;
@@ -266,6 +287,7 @@ mod tests {
                 Action::Finish(if ack { Outcome::Ack } else { Outcome::NoAck })
             );
             assert_eq!(s.poll(now + 10_000, false), Action::None);
+            assert!(!s.retry_arbitration(now + 10_000));
         }
     }
 
@@ -287,6 +309,18 @@ mod tests {
             s.poll(43_750, true),
             Action::Finish(Outcome::ArbitrationLost)
         );
+        assert!(s.started());
+        assert_eq!(s.poll(100_000, false), Action::None); // Raw stays terminal.
+        assert!(s.retry_arbitration(100_000));
+        assert!(!s.started() && !s.retry_arbitration(110_000));
+        assert!(s.hold_if_waiting(200_000));
+        assert_eq!(s.poll(230_000, false), Action::None);
+        for (i, &b) in GOLDEN.iter().enumerate() {
+            let at = 240_000 + (i as u32) * BIT_US;
+            assert_eq!(s.poll(at, false), Action::Drive(b == b'1'));
+            assert!(!s.hold_if_waiting(at));
+            assert_eq!(s.poll(at + BIT_US / 2, b == b'1'), Action::None);
+        }
         let mut s = Sender::new(&request(), 0);
         assert_eq!(s.poll(5_000_000, true), Action::None);
     }

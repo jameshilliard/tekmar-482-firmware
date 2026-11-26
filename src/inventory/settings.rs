@@ -2,7 +2,7 @@
 //! All writes start from a fresh block, never from the temperature target.
 use super::{Answer, block_byte};
 use crate::{
-    tn4::tx::Request,
+    tn4::tx::{Outcome, Request},
     trpc::{Call, Reply},
 };
 
@@ -117,6 +117,7 @@ pub(super) struct Operation {
     node: u8,
     pub(super) setting: Setting,
     block: u8,
+    recheck_target: Option<u8>,
     selector: u8,
     write: Option<u16>,
     mask: u8,
@@ -134,6 +135,7 @@ impl Operation {
         node: 0,
         setting: Setting::Mode,
         block: 0,
+        recheck_target: None,
         selector: 0,
         write: None,
         mask: 0,
@@ -208,6 +210,7 @@ impl Operation {
             node,
             setting,
             block: setting.setup().or_else(|| setting.block(None))?,
+            recheck_target: None,
             selector,
             write,
             mask,
@@ -268,14 +271,25 @@ impl Operation {
             _ => None,
         }
     }
-    pub(super) fn sent(&mut self, complete: bool) {
+    pub(super) fn sent(&mut self, outcome: Outcome) {
         if !self.active() || self.terminal() {
             return;
         }
-        self.step = match (self.step, complete) {
-            (Step::Reading, true) => Step::Sample,
-            (Step::Writing, true) => Step::Verify,
-            (Step::Verifying, true) => Step::Readback,
+        self.step = match (self.step, outcome) {
+            (Step::Reading, Outcome::ArbitrationLost) => Step::Read,
+            (Step::Verifying, Outcome::ArbitrationLost) => Step::Verify,
+            (Step::Writing, Outcome::ArbitrationLost) => {
+                // The winner may have changed a sibling byte or reassigned the
+                // application. Rebuild from fresh evidence, within the same deadline.
+                if let Some(setup) = self.setting.setup() {
+                    self.recheck_target = Some(self.block);
+                    self.block = setup;
+                }
+                Step::Read
+            }
+            (Step::Reading, Outcome::Ack | Outcome::NoAck) => Step::Sample,
+            (Step::Verifying, Outcome::Ack | Outcome::NoAck) => Step::Readback,
+            (Step::Writing, _) => Step::Verify, // possibly delivered; only retry the read
             _ => Step::Done(u16::MAX),
         };
     }
@@ -297,7 +311,10 @@ impl Operation {
                 self.fail();
                 return;
             };
-            if !live.configured(self.setting) || self.block != *block && next != self.block {
+            if !live.configured(self.setting)
+                || self.recheck_target.is_some_and(|wanted| wanted != next)
+                || self.block != *block && next != self.block
+            {
                 self.fail(); // also cancel if the application changed during a transaction
             } else if self.block == *block && self.step == Step::Sample {
                 self.block = next;

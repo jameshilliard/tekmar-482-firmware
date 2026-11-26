@@ -65,11 +65,29 @@ Host setting operations and broadcasts take precedence over a discovery
 frame that has not started. Switching to Raw cancels pending probes;
 returning to Normal starts fresh. Raw never initiates line discovery.
 
+**Arbitration is not a missing ACK.** In J1196J, if a peer drives a
+dominant bit over a recessive data or CRC bit, the gateway switches to
+receive (`0x4668`). The send stays pending at the winner's interframe
+gap and can contend again. If instead the gateway finished the frame
+but got no ACK, recovery clears the pending send on a quiet gap
+(`0x4838`, `0x4cb8`, `0x42d4`). It does not send a second copy.
+Normal mode likewise yields to the winner, receives and ACKs its valid
+frame, then checks whether the pending operation is still needed.
+Raw returns one terminal result per host send, including arbitration loss.
+
+The per-line error score is shared (`0x4354`): a missing ACK adds 16,
+and a second missing ACK marks the link down. A framing error adds one;
+if the resulting score is at least ten, new sends on that line wait for
+about one second of **idle time** (1,603 idle timer matches at 624 us).
+A dominant first interframe bit also starts this backoff. Valid traffic
+can still be received and ACKed; it does not pay down or cancel the wait.
+Other lines continue to operate.
+
 There are still differences from J1196J:
 
-- The stock link driver has error-dependent retries and backoff
-  (`0x4354`). The custom transmitter makes one attempt. An unacknowledged
-  setting write is not blindly replayed; settings use device readback.
+- Stock actively drives six dominant recovery bits after certain link
+  faults. The custom gateway releases its transmitter and resynchronizes
+  on idle; it does not generate those active error flags.
 - Stock settings often reply from cache. This implementation reads the
   device for supported setting operations, so a response can take longer,
   report the value the device actually retained, or indicate a busy port.
@@ -182,7 +200,8 @@ melt and group 12 for storm; those are configurable, not model identifiers.
 An Update with value 0 or 1 queues native 21F on each of the five lines.
 Newer updates to the same group replace a copy that has not started on
 that line. An already-started copy finishes before the next. Unstarted
-copies expire after ten seconds; there is no automatic retransmission.
+copies expire after ten seconds. A copy that lost arbitration may contend
+again if still current; a completed frame is never replayed for a missing ACK.
 Invalid group IDs or enable bytes never cause a bus write.
 
 As in J1196J, the gateway does not echo success for a valid Update.
@@ -302,10 +321,16 @@ also probes enabled limits on RH activity for push reports.
 An Update needs a complete fixed-width block: the gateway will not invent
 missing siblings or discard an extension. It preserves unsupported bytes.
 If the selected bytes already match, it replies from that fresh read.
-Otherwise it sends one native 2DF Update, then requests the block again.
+Otherwise it sends a native 2DF Update, then requests the block again.
 Response:Update contains the value actually read back, including when the
 device kept the old value. A link ACK is not application confirmation.
-There is no automatic write retry or atomic lock against another bus writer.
+If the update loses arbitration it has not been delivered: reread the
+device, recheck its application or sensor setup where applicable, and
+rebuild the update with the latest sibling values. Changing the underlying
+target ends the transaction; contention does not restart its deadline.
+A missed ACK, echo mismatch, bad end or missed timing has uncertain delivery.
+Only readback follows, never a second write. There is no atomic lock
+against another bus writer.
 
 An unsupported field, incomplete write layout, lost transaction or expiry
 returns FF for the value, not the requested setting. After a failed update

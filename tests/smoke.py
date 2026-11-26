@@ -126,12 +126,41 @@ def run(path, ram, fast=False):
     wire_log = deque(maxlen=12)
     clock_frame = bytes.fromhex("71f00005 1b52 05190c")
     clock_ports = set()
+    conflicts, interrupted, lost = {}, {}, set()
+    raw_winner = bytes.fromhex("3f700000")
+    backoff_after = 0
+
+    def contend(p, loser, winner, tag):
+        a, b = protected_bits(loser), protected_bits(winner)
+        index = next(i for i, pair in enumerate(zip(a, b)) if pair[0] != pair[1])
+        assert index >= 2 and a[index] == "0" and b[index] == "1" and p not in conflicts
+        conflicts[p] = (a[:index + 1], b, tag)
+
+    def compete(p, drive_bits):
+        conflict = conflicts.get(p)
+        if not conflict or len(drive_bits) != len(conflict[0]) or "".join(drive_bits) != conflict[0]:
+            return
+        prefix, bits, tag = conflicts.pop(p)
+        at = drive_start[p]
+        # Both peers drove the common prefix. The first different bit is
+        # dominant at the physical input, and the gateway must relinquish TX.
+        external[p] = True
+        wire = bits + "0" * 18
+        combined = list(edges)
+        combined.extend((at + i * 2500, p, wire[i] == "1") for i in range(len(prefix), len(wire))
+                        if wire[i] != wire[i - 1])
+        edges.clear()
+        edges.extend(sorted(combined))
+        if not raw_mode or raw_ack_mask & (1 << p):
+            expected_rx_acks.add((p, at + (len(bits) + 1) * 2500))
+        interrupted[p] = (prefix + "0", tag)
 
     def line_progress():
-        nonlocal phase, jump_at, discovery_end
+        nonlocal phase, jump_at, discovery_end, inventory_at
         if phase == "line-cold" and len(actual) >= 4 and all(line_sends):
             assert all([b for b, _ in tx] == [init] for tx in line_sends)
             phase = "line-up"
+            contend(1, master, bytes.fromhex("7ff05001 00"), "master")
             end = inject(bytes.fromhex("7ff00001 00"))
             inject(bytes.fromhex("7ff05000"), port=1, after=end)
         elif phase == "line-up" and all(any(b == master for b, _ in tx) for tx in line_sends[:2]):
@@ -143,6 +172,13 @@ def run(path, ram, fast=False):
             assert abs(init_at - query_at - 30_000_000) < 250_000
             phase = "line-check"
             discovery_end = clock + 1_200_000
+        elif phase == "line-backoff" and len(line_sends[2]) == 2:
+            body, started = line_sends[2][-1]
+            assert body == master
+            idle_delay = started - uptime_offset - backoff_after
+            assert 800_000 < idle_delay < 1_100_000, (idle_delay, tuple(wire_log))
+            phase = "capture"
+            inventory_at = inject(bytes.fromhex("6e700609 00003f 828301 2301 04"))
 
     def level(p, high, at):
         pin, t, ch, _ = PORTS[p]
@@ -172,7 +208,16 @@ def run(path, ram, fast=False):
                 elif off in (0x18, 0x1C) and gpio[0] & tx and value & tx:
                     drive_bits.append("1" if off == 0x18 else "0")
                     peer_ack[p] = bool(ack_prefixes[p]) and "".join(drive_bits) in ack_prefixes[p]
+                    compete(p, drive_bits)
                 elif off == 0 and not value & tx and gpio[0] & tx:
+                    if p in interrupted:
+                        expected, tag = interrupted.pop(p)
+                        assert "".join(drive_bits) == expected and tag not in lost
+                        lost.add(tag)
+                        drive_bits.clear()
+                        if tag != "master":
+                            exchange.popleft()  # Raw ends here; the setting write is rebuilt.
+                        continue
                     if drive_bits == ["1", "0"]:
                         # Receiver drives only the link ACK slot, never its own frame.
                         slot, = (s for s in expected_rx_acks if s[0] == p and abs(s[1] - drive_start[p]) < 625)
@@ -219,6 +264,7 @@ def run(path, ram, fast=False):
                         clock_ports.add(p)
                         if len(clock_ports) == 5:
                             # Only now answer the outstanding setting read on port 0.
+                            contend(0, setting_exchange[0][0], bytes.fromhex("6e700606 030007 01040a"), "write")
                             inject(bytes.fromhex("6e700606 030007 010309"))
             if off == 0:
                 gpio[0] = value
@@ -236,7 +282,7 @@ def run(path, ram, fast=False):
     cpu.mmio_map(0x3FFFC000, 0x1000, lambda u, o, s, d: gpio[o], None, gpio_write, None)
 
     def timer_read(uc, off, size, t):
-        nonlocal clock, inventory_at, next_byte, queued_send_at, phase, jump_at, uptime_offset, discovery_end, retry_isp_at
+        nonlocal clock, inventory_at, next_byte, queued_send_at, phase, jump_at, uptime_offset, discovery_end, retry_isp_at, backoff_after
         if off == 8:
             if t == 0 and timers[t].get(4) == 1:
                 clock += 40
@@ -252,8 +298,13 @@ def run(path, ram, fast=False):
                     assert [[b for b, _ in tx] for tx in line_sends] == [
                         [init, master, init], [init, master], [init], [init], [init],
                     ]
-                    phase = "capture"
-                    inventory_at = inject(bytes.fromhex("6e700609 00003f 828301 2301 04"))
+                    phase = "line-backoff"
+                    # The cold init already missed its ACK (+16). One framing
+                    # error now crosses the shared threshold and starts backoff.
+                    end = inject(BODY, 2, bad_crc=True)
+                    end = inject(bytes.fromhex("7ff00001 00"), 2, after=end)
+                    # More than a second of valid traffic: not backoff time.
+                    backoff_after = inject(bytes.fromhex("7ff0003f") + bytes(63), 2, after=end)
                 while burst and next_byte <= clock:
                     assert len(incoming) < 16, "LPC2146 UART RX FIFO overrun during command burst"
                     incoming.append(burst.popleft())
@@ -338,14 +389,16 @@ def run(path, ram, fast=False):
     overlap = False
     phase = "line-cold"
 
-    def inject(body, port=0, *, after=None):
+    def inject(body, port=0, *, after=None, bad_crc=False):
         if not raw_mode:
             peers.add(port)
         protected = protected_bits(body)
+        if bad_crc:
+            protected = protected[:-1] + ("0" if protected[-1] == "1" else "1")
         wire = protected + "0" * 18
         start = (clock if after is None else after) + 30_000
         wire_log.append((start, "rx", port, body.hex()))
-        if not raw_mode or raw_ack_mask & (1 << port):
+        if not bad_crc and (not raw_mode or raw_ack_mask & (1 << port)):
             expected_rx_acks.add((port, start + (len(protected) + 1) * 2500))
         for i, bit in enumerate(wire):
             if i == 0 or bit != wire[i - 1]:
@@ -470,6 +523,8 @@ def run(path, ram, fast=False):
                 setting_exchange.extend([
                     (query, None),
                     (bytes.fromhex("6df00007 0018 0300 020309"), None),
+                    (query, bytes.fromhex("6e700606 030007 01040a")),
+                    (bytes.fromhex("6df00007 0018 0300 02040a"), None),
                     (query, report),
                 ])
                 call(0x127, bytes.fromhex("010002"), True)
@@ -624,12 +679,13 @@ def run(path, ram, fast=False):
                     assert p == 0
                     read_event("report")
                 return
-            assert data[6:] == (BODY if phase == "capture" else RAW_SENDS[p])
+            assert data[6:] == (BODY if phase == "capture" else raw_winner if p == 1 else RAW_SENDS[p])
             if phase == "capture":
                 assert p in invalid
                 valid.add(p)
                 if len(valid) == 5:
                     phase = "sending"
+                    contend(1, RAW_SENDS[1], raw_winner, "raw")
                     for n, body in enumerate(RAW_SENDS):
                         exchanges[n].append((body, None))
                         send(n, body)
@@ -640,7 +696,7 @@ def run(path, ram, fast=False):
             assert data == bytes([3, 0, 1])
             overlap = True
         elif service == 2:
-            assert data[2:] == bytes([2, 1]), data
+            assert data[2:] == bytes([2, 2 if phase == "sending" and p == 1 else 1]), data
             if phase == "queued-rx":
                 assert p == 2
                 queued_event("no-peer-ack")
@@ -721,7 +777,7 @@ def run(path, ram, fast=False):
     cpu.mmio_map(0xE000C000, 0x1000, read, None, write, None)
     cpu.hook_add(UC_HOOK_CODE, rom, begin=0x7FFFFFF0, end=0x7FFFFFF0)
     # The scenario runs real ARM instructions while each synthetic tN4 bit elapses.
-    cpu.emu_start(base, 0xFFFFFFFF, count=400_000_000)
+    cpu.emu_start(base, 0xFFFFFFFF, count=520_000_000)
     assert entered, (clock, phase, [len(x) for x in exchanges], results, actual[-10:],
                      line_sends, expected_rx_acks - received_rx_acks, list(wire_log))
     assert actual[:4] == [
@@ -739,13 +795,15 @@ def run(path, ram, fast=False):
         assert (6, bytes.fromhex("0403f04b54") + bytes([p]) + bytes(8)) in actual
     assert not reads and not read_events and actual[-1] == (6, bytes.fromhex("0305f04b54"))
     assert tuple(telemetry) == TELEMETRY
-    assert [b for b, _ in line_sends[2]] == [init]
+    assert [b for b, _ in line_sends[2]] == [init, master]
+    assert not conflicts and not interrupted and lost == {"master", "write", "raw"}
+    assert (1, raw_winner) in [(b[1], b[6:]) for k, b in actual if k == 1 and b[0] == 0]
     assert expected_rx_acks and received_rx_acks == expected_rx_acks, expected_rx_acks - received_rx_acks
     painted = bytes(cpu.mem_read(floor, top - floor))
     free = len(painted) - len(painted.lstrip(b"\xa5"))
     assert free >= 256, free
     print(
-        f"ARM TPCK: five-port discovery, RX/ACK, invalid CRCs, independent TX/overlap, ISP; untouched stack {free} bytes"
+        f"ARM TPCK: five-port discovery, arbitration/backoff, RX/ACK, TX/overlap, ISP; untouched stack {free} bytes"
     )
 
 

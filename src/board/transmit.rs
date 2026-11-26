@@ -85,7 +85,16 @@ impl Attempt {
         })
     }
 
-    pub(super) fn poll(&mut self, now: u32) -> Option<Outcome> {
+    pub(super) fn yield_arbitration(&mut self, now: u32) {
+        self.pin.release();
+        let reset = self.sender.retry_arbitration(now);
+        debug_assert!(reset);
+    }
+
+    pub(super) fn poll(&mut self, now: u32, may_start: bool) -> Option<Outcome> {
+        if !may_start && self.sender.hold_if_waiting(now) {
+            return None;
+        }
         match self.sender.poll(now, read(PIN) & self.pin.rx != 0) {
             Action::Drive(high) => {
                 self.pin.drive(high);

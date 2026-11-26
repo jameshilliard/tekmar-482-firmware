@@ -51,7 +51,7 @@ fn line_discovery_is_per_port_one_shot_and_not_device_presence() {
             NetworkInit.frame(p as u8),
             Request::new(p as u8, &[0x7d, 0xf0, 0, 0])
         );
-        inv.line(p).started(NetworkInit);
+        inv.line(p).finished(NetworkInit);
         inv.line(p).sent(Outcome::NoAck);
     }
     let up = start + 1;
@@ -65,7 +65,7 @@ fn line_discovery_is_per_port_one_shot_and_not_device_presence() {
                 MasterQuery.frame(p as u8),
                 Request::new(p as u8, &[0x7f, 0x70, 0, 0])
             );
-            inv.line(p).started(MasterQuery);
+            inv.line(p).finished(MasterQuery);
             inv.line(p).sent(Outcome::Ack);
         }
     }
@@ -109,14 +109,14 @@ fn master_routes_from_its_header_without_a_hydronic_payload() {
 fn discovery_rearms_only_after_a_sampled_loss_and_recovery() {
     use crate::tn4::tx::Outcome;
     use LineProbe::{MasterQuery, NetworkInit};
-    let mut link = LineDiscovery::COLD;
+    let mut link = NormalLine::COLD;
     link.peer(0x3df); // link-up service clears the earlier seen flag
     link.tick(1);
     assert_eq!(link.pending(), Some(MasterQuery));
     link.tick(40); // a held-off master query stays first
-    link.started(MasterQuery);
+    link.finished(MasterQuery);
     assert_eq!(link.pending(), Some(NetworkInit));
-    link.started(NetworkInit);
+    link.finished(NetworkInit);
     for result in [
         Outcome::NoAck,
         Outcome::ArbitrationLost,
@@ -133,7 +133,7 @@ fn discovery_rearms_only_after_a_sampled_loss_and_recovery() {
     link.peer(0x3ff);
     link.tick(43);
     assert_eq!(link.pending(), Some(MasterQuery));
-    link.started(MasterQuery);
+    link.finished(MasterQuery);
     for _ in 0..9 {
         link.frame_error();
     }
@@ -148,7 +148,7 @@ fn discovery_rearms_only_after_a_sampled_loss_and_recovery() {
     link.sent(Outcome::Ack);
     link.tick(47);
     assert_eq!(link.pending(), Some(MasterQuery));
-    link.started(MasterQuery);
+    link.finished(MasterQuery);
     link.sent(Outcome::EchoMismatch);
     link.peer(0x3ff); // recovered before the service sampled down
     link.tick(48);
@@ -469,7 +469,94 @@ fn expect_block_read(inv: &mut Inventory, block: u8) {
         inv.command_frame(0),
         Request::new(0, &[0x6d, 0x70, 0, 7, block, 0, 0, 1, 0, 0, 0])
     );
-    inv.command_sent(0, true);
+    inv.command_sent(0, Outcome::Ack);
+}
+
+#[test]
+fn contested_setting_reads_again_and_ambiguous_delivery_only_verifies() {
+    for outcome in [
+        Outcome::NoAck,
+        Outcome::EchoMismatch,
+        Outcome::BadEnd,
+        Outcome::Late,
+    ] {
+        let mut inv = Inventory::new();
+        observe(&mut inv, 0, 0, 1, 0x36f, &[0; 8], 0);
+        assert!(call(&mut inv, 0x127, 0, &[24, 0, 2], 0).is_none());
+        expect_block_read(&mut inv, 3);
+        observe(&mut inv, 0, 0, 1, 0x2e7, &[3, 0, 7, 1, 3, 9], 1);
+        assert!(inv.command_frame(0).is_some());
+        inv.command_sent(0, Outcome::ArbitrationLost);
+        expect_block_read(&mut inv, 3);
+        observe(&mut inv, 0, 0, 1, 0x2e7, &[3, 0, 7, 1, 4, 10], 2);
+        assert_eq!(
+            inv.command_frame(0),
+            Request::new(0, &[0x6d, 0xf0, 0, 7, 0, 1, 3, 0, 2, 4, 10])
+        );
+        inv.command_sent(0, outcome);
+        expect_block_read(&mut inv, 3);
+        observe(&mut inv, 0, 0, 1, 0x2e7, &[3, 0, 7, 1, 4, 10], 3);
+        assert!(inv.command_frame(0).is_none());
+        assert_eq!(inv.command_reply(0).unwrap().payload()[7], 1);
+    }
+}
+
+#[test]
+fn contention_cannot_extend_a_command_or_retarget_a_different_application() {
+    let mut inv = Inventory::new();
+    observe(&mut inv, 0, 0, 1, 0x2e7, &[0x26, 0, 1, 5], 0);
+    assert!(call(&mut inv, 0x13e, 0, &[24, 0, 0, 40, 6], 0).is_none());
+    expect_block_read(&mut inv, 0x26);
+    observe(&mut inv, 0, 0, 1, 0x2e7, &[0x26, 0, 1, 5], 1);
+    expect_block_read(&mut inv, 0x30);
+    observe(
+        &mut inv,
+        0,
+        0,
+        1,
+        0x2e7,
+        &[0x30, 0, 255, 1, 6, 2, 6, 3, 6, 4, 6],
+        1,
+    );
+    assert!(inv.command_frame(0).is_some());
+    inv.command_sent(0, Outcome::ArbitrationLost);
+    expect_block_read(&mut inv, 0x26);
+    observe(&mut inv, 0, 0, 1, 0x2e7, &[0x26, 0, 1, 2], 2);
+    assert!(inv.command_frame(0).is_none());
+    assert_eq!(&inv.command_reply(0).unwrap().payload()[8..], &[255, 255]);
+
+    assert!(call(&mut inv, 0x13e, 1, &[24, 0, 0], 4).is_none());
+    let req = inv.command_frame(0).unwrap();
+    inv.command_sent(0, Outcome::ArbitrationLost);
+    assert_eq!(inv.command_frame(0), Some(req));
+    inv.command_expire(0, 14);
+    inv.command_sent(0, Outcome::ArbitrationLost);
+    assert!(inv.command_frame(0).is_none());
+    assert_eq!(&inv.command_reply(0).unwrap().payload()[8..], &[255, 255]);
+}
+
+#[test]
+fn backoff_is_per_line_idle_time_not_wall_time_or_a_replay_budget() {
+    let mut inv = Inventory::new();
+    let start = u32::MAX - 100;
+    for _ in 0..9 {
+        inv.line(0).frame_error();
+        assert!(inv.line(0).may_start(start, true));
+    }
+    inv.line(0).frame_error();
+    assert!(!inv.line(0).may_start(start, true));
+    assert!(!inv.line(0).may_start(399_899, true)); // 400,000 us across wrap
+    assert!(!inv.line(0).may_start(399_900, false));
+    inv.line(0).peer(0x3ff);
+    assert!(!inv.line(0).may_start(2_000_000, true));
+    assert!(!inv.line(0).may_start(2_600_271, true));
+    assert!(inv.line(0).may_start(2_600_272, true));
+    inv.line(1).sent(Outcome::NoAck);
+    inv.line(1).sent(Outcome::NoAck);
+    assert!(inv.line(1).may_start(3_000_000, true));
+    inv.line(0).start_backoff();
+    inv.reset(); // No Normal cooldown carried across a mode change.
+    assert!(inv.line(0).may_start(3_000_000, false));
 }
 
 #[test]
@@ -503,7 +590,7 @@ fn slab_requires_enabled_floor_sensor_and_preserves_maximum_in_all_slot_updates(
             inv.command_frame(0),
             Request::new(0, &[0x6d, 0xf0, 0, 10, 0, 1, 7, 0, 42, 42, 42, 42, 42, 70])
         );
-        inv.command_sent(0, true);
+        inv.command_sent(0, Outcome::Ack);
         expect_block_read(&mut inv, 7);
         observe(
             &mut inv,
@@ -546,7 +633,7 @@ fn fan_uses_ventilation_block_not_duct_status_or_an_unoccupied_away_alias() {
         inv.command_frame(0),
         Request::new(0, &[0x6d, 0xf0, 0, 9, 0, 1, 9, 0, 10, 20, 30, 40, 60])
     );
-    inv.command_sent(0, true);
+    inv.command_sent(0, Outcome::Ack);
     expect_block_read(&mut inv, 9);
     observe(&mut inv, 0, 0, 1, 0x2e7, &[9, 0, 31, 10, 20, 30, 40, 55], 1);
     assert_eq!(
@@ -640,7 +727,7 @@ fn device_targets_follow_application_and_setback_not_heat_setpoint_slots() {
         frame[8..8 + width].copy_from_slice(&data[3..]);
         frame[8 + index..10 + index].copy_from_slice(&[255, 0]);
         assert_eq!(inv.command_frame(0), Request::new(0, &frame[..8 + width]));
-        inv.command_sent(0, true);
+        inv.command_sent(0, Outcome::Ack);
         expect_block_read(&mut inv, block);
         sample(&mut inv, data);
         assert_eq!(
@@ -780,7 +867,7 @@ fn humidity_limits_require_rh_report_and_the_corresponding_setup_flag() {
             inv.command_frame(0),
             Request::new(0, &[0x6d, 0xf0, 0, 9, 0, 1, block, 0, 40, 33, 34, 35, 36])
         );
-        inv.command_sent(0, true);
+        inv.command_sent(0, Outcome::Ack);
         expect_block_read(&mut inv, block);
         observe(&mut inv, 0, 0, 1, 0x2e7, &[block, 0, 1, 38], 1);
         assert_eq!(&inv.command_reply(0).unwrap().payload()[5..], &[24, 0, 38]);
@@ -798,7 +885,7 @@ fn mode_write_preserves_siblings_and_confirms_only_from_postwrite_read() {
         observe(inv, 0, 8, 24, 0x2e7, &[3, 0, 7, mode, 3, 9], 1);
     };
     sample(&mut inv, 1); // Before our request has left the line.
-    inv.command_sent(0, true);
+    inv.command_sent(0, Outcome::Ack);
     observe(&mut inv, 1, 8, 24, 0x2e7, &[3, 0, 7, 1, 3, 9], 1);
     observe(&mut inv, 0, 0, 24, 0x2e7, &[3, 0, 7, 1, 3, 9], 1);
     observe(&mut inv, 0, 8, 23, 0x2e7, &[3, 0, 7, 1, 3, 9], 1);
@@ -810,10 +897,10 @@ fn mode_write_preserves_siblings_and_confirms_only_from_postwrite_read() {
         Request::new(0, &[0x6d, 0xf0, 0, 7, 8, 24, 3, 0, 2, 3, 9])
     );
     sample(&mut inv, 2);
-    inv.command_sent(0, true);
+    inv.command_sent(0, Outcome::Ack);
     assert_eq!(inv.command_frame(0), read);
     sample(&mut inv, 2);
-    inv.command_sent(0, true);
+    inv.command_sent(0, Outcome::Ack);
     assert!(inv.command_reply(0).is_none());
     sample(&mut inv, 1); // Device kept its previous mode.
     assert_eq!(
@@ -836,14 +923,14 @@ fn setpoints_resolve_current_preserve_slots_and_report_observed_values() {
         observe(&mut inv, 0, 0, 1, 0x36f, &[0, 12, 0, 0, 0, 0, 0, 0], 0);
         assert!(call(&mut inv, 0x13f, 0, &[24, 0, selector, 99], 0).is_none());
         assert!(inv.command_frame(0).is_some());
-        inv.command_sent(0, true);
+        inv.command_sent(0, Outcome::Ack);
         observe(&mut inv, 0, 0, 1, 0x2e7, &[5, 0, 31, 10, 11, 12, 13, 14], 0);
         let mut bytes = [0x6d, 0xf0, 0, 9, 0, 1, 5, 0, 0, 0, 0, 0, 0];
         bytes[8..].copy_from_slice(&want);
         assert_eq!(inv.command_frame(0), Request::new(0, &bytes));
-        inv.command_sent(0, true);
+        inv.command_sent(0, Outcome::Ack);
         assert!(inv.command_frame(0).is_some());
-        inv.command_sent(0, true);
+        inv.command_sent(0, Outcome::Ack);
         observe(&mut inv, 0, 0, 1, 0x2e7, &[5, 0, 31, 88, 88, 88, 88, 88], 0);
         assert_eq!(
             &inv.command_reply(0).unwrap().payload()[5..],
@@ -866,7 +953,7 @@ fn unsupported_ambiguous_and_abandoned_operations_never_generate_an_update() {
     let begin = |inv: &mut Inventory| {
         assert!(call(inv, 0x127, 0, &[24, 0, 1], start).is_none());
         assert!(inv.command_frame(0).is_some());
-        inv.command_sent(0, true);
+        inv.command_sent(0, Outcome::Ack);
     };
     for (block, out) in [(&[3, 0, 1, 2][..], 255), (&[3, 0, 7, 1, 3, 9], 1)] {
         begin(&mut inv);

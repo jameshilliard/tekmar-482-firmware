@@ -109,6 +109,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                 data[6..6 + frame.bytes.len()].copy_from_slice(frame.bytes);
                 out.enqueue(Kind::Rx(p as u8), tpck::TN4, &data[..6 + frame.bytes.len()]);
             } else if !reboot
+                && !frame.early_start
                 // RX sees our own frame before TX finishes. Only a peer counts as
                 // link-up, suppresses a line probe or supplies an outdoor sample.
                 && !sending[p].as_ref().is_some_and(Attempt::started)
@@ -137,6 +138,9 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
             }
         });
         for p in 0..5 {
+            if bus.rx[p].take_gap_fault() && !raw {
+                inventory.line(p).start_backoff();
+            }
             if let Some((why, bits, bytes)) = bus.rx[p].take_failure() {
                 if raw {
                     let mut data = [0; 78];
@@ -147,7 +151,9 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                     data[7..9].copy_from_slice(&bits.to_le_bytes());
                     data[9..9 + bytes.len()].copy_from_slice(bytes);
                     out.enqueue(Kind::Invalid(p as u8), tpck::TN4, &data[..9 + bytes.len()]);
-                } else if !sending[p].as_ref().is_some_and(Attempt::started) {
+                } else if !bus.rx[p].early_start()
+                    && !sending[p].as_ref().is_some_and(Attempt::started)
+                {
                     inventory.line(p).frame_error();
                 }
             }
@@ -155,6 +161,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                 inventory.line(p).down();
             }
             let t = read(TIMERS[INPUTS[p].1] + TC);
+            let may_start = raw || inventory.line(p).may_start(t, bus.rx[p].idle());
             if !raw && !reboot {
                 let foreground = inventory.has_command(p) || inventory.has_broadcast(p);
                 let discovery = inventory.line(p).pending();
@@ -177,7 +184,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                         if sending[p].is_some() {
                             owner[p] = NormalTx::Setting;
                         } else {
-                            inventory.command_sent(p, false);
+                            inventory.command_unavailable(p);
                         }
                     } else if out.can_receive()
                         && let Some(reply) = inventory.command_reply(p)
@@ -204,7 +211,11 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
             // A queued send is still a receiver until it actually drives SOF.
             // Never acknowledge our own transmission. Raw RX ACK is opt-in.
             if !reboot
-                && (!raw || ack_mask & (1 << p) != 0)
+                && (if raw {
+                    ack_mask & (1 << p) != 0
+                } else {
+                    !bus.rx[p].early_start()
+                })
                 && !sending[p].as_ref().is_some_and(Attempt::started)
                 && let Some(high) = ack[p].poll(t, bus.rx[p].ack_slot())
             {
@@ -222,22 +233,22 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
             if !ack[p].driving()
                 && let Some(attempt) = sending[p].as_mut()
             {
-                let result = attempt.poll(t);
-                if let NormalTx::Discovery(probe) = owner[p]
-                    && attempt.started()
-                {
-                    inventory.line(p).started(probe);
-                    owner[p] = NormalTx::Probe;
-                }
+                let result = attempt.poll(t, may_start);
                 let Some(result) = result else { continue };
+                if !raw
+                    && result == Outcome::ArbitrationLost
+                    && !matches!(owner[p], NormalTx::Setting)
+                {
+                    attempt.yield_arbitration(t);
+                    continue;
+                }
                 sending[p] = None;
                 if !raw {
                     inventory.line(p).sent(result);
-                    if matches!(
-                        core::mem::replace(&mut owner[p], NormalTx::Probe),
-                        NormalTx::Setting
-                    ) {
-                        inventory.command_sent(p, matches!(result, Outcome::Ack | Outcome::NoAck));
+                    match core::mem::replace(&mut owner[p], NormalTx::Probe) {
+                        NormalTx::Setting => inventory.command_sent(p, result),
+                        NormalTx::Discovery(probe) => inventory.line(p).finished(probe),
+                        _ => {}
                     }
                     continue;
                 }
