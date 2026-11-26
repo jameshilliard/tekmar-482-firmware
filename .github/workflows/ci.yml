@@ -1,0 +1,18 @@
+name: Firmware
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v8.2.0
+      - name: Install Arm binutils
+        run: sudo apt-get update && sudo apt-get install -y binutils-arm-none-eabi
+      - name: Check flash and SRAM images
+        run: make check
+        env:
+          TEKMAR_BUILD_REVISION: ${{ github.sha }}
