@@ -2,7 +2,7 @@
 
 The LPC2146 has a UART0 host link and five tN4 receive paths. The table
 uses the logical port numbers in the stock J1196J sampling routines, not
-thermostat addresses. Only the explicit TX command can drive a bus.
+thermostat addresses. Only explicit TX and receive-ACK commands can drive a bus.
 
 | Port | RX pin | Capture input | TX pin | Stock sample routine |
 | ---: | --- | --- | --- | --- |
@@ -86,6 +86,8 @@ link-layer only, not confirmation that an application acted on a message.
 | D | Invalid CRC delimiter; ACK not determined |
 | E | ACK followed by an invalid ACK delimiter or EOF |
 | M | No ACK followed by an invalid ACK delimiter or EOF |
+| L | ACK sampled and valid end; this gateway drove the ACK slot |
+| X | ACK sampled but bad end; this gateway drove the ACK slot |
 
 Bad stuffing, truncated data and CRC mismatches do not produce frame
 records. A CRC-matching body with a damaged trailer is diagnostic, not a
@@ -170,6 +172,27 @@ their outcomes, and reconciles delivered frames and drops for all five ports.
 Service delay measures from the capture latch to re-arming the next edge;
 the timer has no FIFO or hardware overrun counter. A clean summary does not
 prove a pulse was never missed.
+
+### Acknowledging incoming frames
+
+Use `board.py diagnostics PORT --ack-port N` or `ram_trial.py --frames 40
+--ack-port N` to participate in the link ACK on **one** physical port.
+All other inputs remain passive. This mode does not send any application
+frame, retry any transfer, or change a device setting. It is useful on a
+two-device line: a passive analyzer cannot acknowledge the other device.
+
+The UART command `RX-ACK N` replies `OK ACK N` or `ERR ACK-PIN` if the
+driver is unavailable. Like the stock J1196J routines at 0x470c, 0x4ad0
+and 0x4b1c, the gateway requires a matching CRC and a low CRC delimiter
+before asserting the following ACK slot. A missed start is not retried.
+A stop byte finishes an already-started pulse and releases the driver.
+`L` and `X` identify locally driven, sampled ACKs; another receiver can
+drive the same slot. A local ACK is not evidence of a peer ACK.
+
+Before the per-port summaries, `K port pulses late` reports two hex counts:
+ACK pulses started and observed deadlines too late to drive. The pulse count
+can exceed delivered local-ACK frames, e.g. if capture stops before EOF.
+The boot default, background receiver and ordinary RX-DIAG do not drive ACK.
 
 ### One-shot transmit
 

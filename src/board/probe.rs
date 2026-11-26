@@ -88,11 +88,7 @@ impl Capture {
         drop(self); // release the peripherals before the potentially slow serial reply
         send(b"RX");
         for word in elapsed.into_iter().chain([seen]).chain(stamps) {
-            let mut field = *b" 00000000";
-            for (i, digit) in field[1..].iter_mut().enumerate() {
-                *digit = b"0123456789abcdef"[((word >> (28 - 4 * i)) & 15) as usize];
-            }
-            send(&field);
+            super::send_word(word);
         }
         send(b"\r\n");
     }

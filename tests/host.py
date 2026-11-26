@@ -146,6 +146,24 @@ class HelperTest(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, err)
         self.assertIn(b"Port 4: transmit/receive echo verified; peer ACK not seen", out)
 
+    def test_receive_ack_session(self):
+        master, proc = self.start_helper("diagnostics", "--ack-port", "0", "--seconds", "1")
+        self.expect(master, b"A\nID?\n")
+        os.write(master, b"TEKMAR-482-DEV\r\n")
+        self.expect(master, b"A\nRX-ACK 0\n")
+        os.write(master, b"OK ACK 0\r\nF 0 00009c40 0e2f L 12300001a5\r\n")
+        self.expect(master, b"\n")
+        os.write(master, b"K 0 00000001 00000000\r\n")
+        for port in range(5):
+            n = int(port == 0)
+            counts = (30*n, n, 0, 0, n, 0, 0, 0, 0, 10, 0, 0, 0)
+            os.write(master, (f"D {port}" + "".join(f" {v:08x}" for v in counts) + "\r\n").encode())
+        os.write(master, b"END 00000000\r\n")
+        out, err = proc.communicate(timeout=3)
+        self.assertEqual(proc.returncode, 0, err)
+        self.assertIn(b"ack/local-drive", out)
+        self.assertIn(b"local_ack_pulses=1 missed_ack_windows=0", out)
+
     def test_noack_is_not_a_successful_send(self):
         with self.assertRaises(RuntimeError):
             Transmission((2, "NOACK"), {b"N"}).verify(2)

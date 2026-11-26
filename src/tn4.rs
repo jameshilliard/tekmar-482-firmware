@@ -27,7 +27,7 @@ enum State {
     Data,
     Check(u8),
     Delimiter,
-    Ack,
+    Ack(u32),
     End(u8),
 }
 
@@ -79,6 +79,13 @@ impl Default for Receiver {
 }
 
 impl Receiver {
+    /// The physical slot boundary, fixed when the verified CRC delimiter was sampled.
+    pub fn ack_slot(&self) -> Option<(u32, u32)> {
+        match self.state {
+            State::Ack(at) => Some((self.start, at)),
+            _ => None,
+        }
+    }
     pub fn starting_at(high: bool) -> Self {
         Self {
             level: high,
@@ -180,8 +187,8 @@ impl Receiver {
                 self.state = State::Seek(0);
                 return Some(Trailer::BadDelimiter);
             }
-            State::Delimiter => State::Ack,
-            State::Ack => {
+            State::Delimiter => State::Ack(self.sample_us.wrapping_sub(BIT_US / 2)),
+            State::Ack(_) => {
                 self.ack = high;
                 State::End(8)
             }
@@ -200,6 +207,53 @@ impl Receiver {
             State::End(n) => State::End(n - 1), // ACK delimiter then seven low EOF bits
         };
         None
+    }
+}
+
+/// Schedule at most one dominant bit per received frame; a missed boundary is not retried.
+#[derive(Default)]
+pub struct LinkAck {
+    release: Option<u32>,
+    handled: Option<u32>,
+    driven_frame: Option<u32>,
+    pub pulses: u32,
+    pub late: u32,
+}
+
+impl LinkAck {
+    pub fn driving(&self) -> bool {
+        self.release.is_some()
+    }
+
+    pub fn poll(&mut self, now: u32, slot: Option<(u32, u32)>) -> Option<bool> {
+        if let Some(end) = self.release {
+            if (now.wrapping_sub(end) as i32) < 0 {
+                return None;
+            }
+            self.release = None;
+            return Some(false);
+        }
+        let Some((frame, at)) = slot else {
+            self.handled = None;
+            return None;
+        };
+        let elapsed = now.wrapping_sub(at) as i32;
+        if elapsed < 0 || self.handled == Some(at) {
+            return None;
+        }
+        self.handled = Some(at);
+        if elapsed >= (BIT_US / 4) as i32 {
+            self.late = self.late.saturating_add(1);
+            return None;
+        }
+        self.release = Some(at.wrapping_add(BIT_US));
+        self.driven_frame = Some(frame);
+        self.pulses = self.pulses.saturating_add(1);
+        Some(true)
+    }
+
+    pub fn drove_frame(&mut self, start: u32) -> bool {
+        self.driven_frame.take() == Some(start)
     }
 }
 
@@ -252,6 +306,48 @@ mod tests {
             assert_eq!(frames[0].1, [0x12, 0x30, 0, 1, 0xa5]);
             assert_eq!((frames[0].2, frames[0].3), (0xe2f, result));
         }
+    }
+
+    #[test]
+    fn ack_slot_is_only_offered_after_a_valid_delimiter_and_crc() {
+        for (damage, delimiter, valid) in [
+            (false, false, true),
+            (true, false, false),
+            (false, true, false),
+        ] {
+            let mut rx = Receiver::default();
+            let mut bits = BITS.to_vec();
+            if damage {
+                *bits.last_mut().unwrap() ^= 1;
+            }
+            for &b in b"0000000".iter().chain(&bits) {
+                rx.bit(b == b'1');
+                assert!(rx.ack_slot().is_none());
+            }
+            rx.sample_us = 21_250;
+            rx.bit(delimiter);
+            assert_eq!(rx.ack_slot(), valid.then_some((0, 20_000)));
+            rx.bit(false);
+            assert!(rx.ack_slot().is_none());
+        }
+    }
+
+    #[test]
+    fn ack_pulse_is_one_slot_even_across_wrap() {
+        let mut ack = LinkAck::default();
+        let at = u32::MAX - 300;
+        let slot = Some((7, at));
+        assert_eq!(ack.poll(at - 1, slot), None);
+        assert_eq!(ack.poll(at + 5, slot), Some(true));
+        assert_eq!(ack.poll(at.wrapping_add(BIT_US - 1), None), None);
+        assert_eq!(ack.poll(at.wrapping_add(BIT_US), None), Some(false));
+        assert_eq!(ack.poll(at.wrapping_add(BIT_US + 1), slot), None);
+        assert!(ack.drove_frame(7));
+        assert!(!ack.drove_frame(7));
+        assert_eq!(ack.poll(20_700, Some((8, 20_000))), None);
+        assert_eq!(ack.poll(20_701, Some((8, 20_000))), None);
+        assert!(!ack.drove_frame(8));
+        assert_eq!((ack.pulses, ack.late), (1, 1));
     }
 
     #[test]

@@ -177,10 +177,7 @@ extern "C" fn firmware_main() -> ! {
                 probe = Some(board::probe::Capture::start());
                 board::send(b"OK RX\r\n");
             }
-            Command::RxStream | Command::RxDiagnostics => {
-                board::probe::stream(command == Command::RxDiagnostics, &mut panel, None);
-            }
-            Command::Send(request) => board::probe::stream(true, &mut panel, Some(&request)),
+            Command::Stream(mode) => board::probe::stream(&mode, &mut panel),
             Command::EnterIsp => {
                 panel.stop();
                 board::send(ISP_ACK);

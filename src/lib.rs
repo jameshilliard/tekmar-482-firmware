@@ -12,11 +12,17 @@ pub enum Command {
     LedTest,
     RxBegin,
     RxEnd,
-    RxStream,
-    RxDiagnostics,
-    Send(tn4::tx::Request),
+    Stream(Stream),
     BadSend,
     EnterIsp,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Stream {
+    Passive,
+    Diagnostic,
+    Ack(u8),
+    Send(tn4::tx::Request),
 }
 
 /// Accept whole lines only. A damaged or oversized line is ignored until LF.
@@ -47,12 +53,16 @@ impl Decoder {
                 (false, b"LED-TEST") => Some(Command::LedTest),
                 (false, b"RX-BEGIN") => Some(Command::RxBegin),
                 (false, b"RX-END") => Some(Command::RxEnd),
-                (false, b"RX-STREAM") => Some(Command::RxStream),
-                (false, b"RX-DIAG") => Some(Command::RxDiagnostics),
-                (false, b"ENTER-ISP") => Some(Command::EnterIsp),
-                (false, [b'T', b'X', b' ', request @ ..]) => {
-                    Some(tn4::tx::Request::parse(request).map_or(Command::BadSend, Command::Send))
+                (false, b"RX-STREAM") => Some(Command::Stream(Stream::Passive)),
+                (false, b"RX-DIAG") => Some(Command::Stream(Stream::Diagnostic)),
+                (false, [b'R', b'X', b'-', b'A', b'C', b'K', b' ', n @ b'0'..=b'4']) => {
+                    Some(Command::Stream(Stream::Ack(n - b'0')))
                 }
+                (false, b"ENTER-ISP") => Some(Command::EnterIsp),
+                (false, [b'T', b'X', b' ', request @ ..]) => Some(
+                    tn4::tx::Request::parse(request)
+                        .map_or(Command::BadSend, |r| Command::Stream(Stream::Send(r))),
+                ),
                 _ => None,
             };
             self.len = 0;

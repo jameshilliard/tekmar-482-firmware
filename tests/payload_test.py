@@ -131,6 +131,12 @@ class PayloadTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "input level flags"):
             FrameAudit(True).record(summary(0, empty + [4]))
 
+    def test_local_ack_capture_cannot_be_replayed_as_a_peer_ack(self):
+        for bad_summary in [[], [b"K 3 00000000 00000000\r\n"], [b"K 2 00000001 00000000\r\n"]]:
+            lines = [b"F 3 000061a8 5f14 L 7d7123420582\r\n", *bad_summary, b"END 00000000\r\n"]
+            with self.subTest(bad_summary=bad_summary), self.assertRaisesRegex(ValueError, "local ACK"):
+                list(replay(lines))
+
 
 if __name__ == "__main__":
     unittest.main()

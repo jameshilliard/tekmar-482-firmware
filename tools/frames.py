@@ -12,11 +12,12 @@ from payloads import details
 TRAILERS = {
     b"A": "ack", b"N": "no-ack", b"D": "bad-crc-delimiter",
     b"E": "ack/bad-end", b"M": "no-ack/bad-end",
+    b"L": "ack/local-drive", b"X": "ack/local-drive/bad-end",
 }
 
 def describe(line: bytes) -> str:
     match = re.fullmatch(
-        rb"F ([0-4]) ([0-9a-f]{8}) ([0-7][0-9a-f]{3}) ([ANDEM]) ((?:[0-9a-f]{2}){4,67})\r\n",
+        rb"F ([0-4]) ([0-9a-f]{8}) ([0-7][0-9a-f]{3}) ([ANDEMLX]) ((?:[0-9a-f]{2}){4,67})\r\n",
         line,
     )
     if match is None:
@@ -53,16 +54,24 @@ class FrameAudit:
         self.seen = [Counter() for _ in range(5)]
         self.drops = {}
         self.tx_result = None
+        self.ack_summary = None
 
     def record(self, line: bytes) -> str:
+        if line.startswith(b"K "):
+            match = re.fullmatch(rb"K ([0-4]) ([0-9a-f]{8}) ([0-9a-f]{8})\r\n", line)
+            if not match or self.drops or self.ack_summary is not None or self.tx_result is not None:
+                raise ValueError(f"invalid receive-ACK summary: {line!r}")
+            port, pulses, late = int(match[1]), int(match[2], 16), int(match[3], 16)
+            self.ack_summary = port, pulses, late
+            return f"port={port} local_ack_pulses={pulses} missed_ack_windows={late}"
         if line.startswith(b"T "):
             match = re.fullmatch(rb"T ([0-4]) (ACK|NOACK|ARBITRATION|ECHO|BAD-END|BUSY|LATE|PIN-BUSY|STOPPED)\r\n", line)
-            if not match or self.drops or self.tx_result is not None:
+            if not match or self.drops or self.tx_result is not None or self.ack_summary is not None:
                 raise ValueError(f"invalid or duplicate TX result: {line!r}")
             self.tx_result = int(match[1]), match[2].decode("ascii")
             return f"port={self.tx_result[0]} tx_result={self.tx_result[1]}"
         if not line.startswith(b"D "):
-            if self.drops:
+            if self.drops or self.ack_summary is not None:
                 raise ValueError("frame received after diagnostic summaries")
             result = describe(line)
             _, port, _, _, status, _ = line.split()
@@ -77,11 +86,11 @@ class FrameAudit:
         if levels and levels[0] > 3:
             raise ValueError(f"port {port}: invalid input level flags")
         seen = self.seen[port]
-        observed_bad = sum(seen[k] for k in (b"D", b"E", b"M"))
+        observed_bad = sum(seen[k] for k in (b"D", b"E", b"M", b"X"))
         if port in self.drops or partial > 1 or starts != stuff + crc + ack + no_ack + bad + partial:
             raise ValueError(f"port {port}: inconsistent candidate accounting")
         if (sum(seen.values()) + drops != ack + no_ack + bad or
-                seen[b"A"] > ack or seen[b"N"] > no_ack or observed_bad > bad):
+                seen[b"A"] + seen[b"L"] > ack or seen[b"N"] > no_ack or observed_bad > bad):
             raise ValueError(f"port {port}: frame records disagree with receiver totals")
         self.drops[port] = drops
         result = (f"port={port} edges={edges} candidates={starts} ack={ack} no_ack={no_ack} "
@@ -95,7 +104,12 @@ class FrameAudit:
         return result + (f" last_crc={rx:04x} expected={expected:04x}" if crc else "")
 
     def finish(self, dropped):
-        if self.require_stats or self.drops:
+        for port, seen in enumerate(self.seen):
+            local = seen[b"L"] + seen[b"X"]
+            if local and (self.ack_summary is None or self.ack_summary[0] != port
+                          or self.ack_summary[1] < local):
+                raise ValueError("local ACK records disagree with driven slot count")
+        if self.require_stats or self.drops or self.ack_summary is not None:
             if len(self.drops) != 5 or sum(self.drops.values()) != dropped:
                 raise ValueError("missing port summary or inconsistent UART drop count")
         if dropped:

@@ -133,13 +133,18 @@ class Transmission(NamedTuple):
 
 
 async def capture(port, seconds: float, *, diagnostics=False, tx=None, on_record=None,
-                  stop_on_result=False, archive=None) -> Transmission:
+                  stop_on_result=False, archive=None, ack_port=None) -> Transmission:
+    if ack_port is not None and (tx is not None or not 0 <= ack_port < 5):
+        raise ValueError("receive ACK requires one port and cannot be combined with transmission")
     await identify(port)
-    audit = FrameAudit(require_stats=diagnostics or tx is not None)
+    audit = FrameAudit(require_stats=diagnostics or tx is not None or ack_port is not None)
     command, greeting = ((b"A\nRX-DIAG\n", b"OK DIAG\r\n") if diagnostics else
                          (b"A\nRX-STREAM\n", b"OK FRAMES\r\n"))
     if tx is not None:
         command, greeting = tx_command(*tx), b"OK TX\r\n"
+    elif ack_port is not None:
+        command = f"A\nRX-ACK {ack_port}\n".encode()
+        greeting = f"OK ACK {ack_port}\r\n".encode()
     await port.write(command)
     if await port.readline(64) != greeting:
         raise RuntimeError("frame stream did not start")
@@ -177,14 +182,18 @@ async def capture(port, seconds: float, *, diagnostics=False, tx=None, on_record
                 audit.finish(dropped)
                 break
             accept(line)
+    if ack_port is not None and (not audit.ack_summary or audit.ack_summary[0] != ack_port):
+        raise ValueError("missing receive-ACK summary for selected port")
+    if ack_port is None and audit.ack_summary is not None:
+        raise ValueError("unexpected receive-ACK summary")
     return Transmission(audit.tx_result, echoes)
 
 
 async def monitor(port, seconds: float, *, diagnostics=False, tx=None, on_record=None,
-                  save_capture: Path | None = None) -> None:
+                  save_capture: Path | None = None, ack_port=None) -> None:
     with (save_capture.open("xb") if save_capture is not None else nullcontext()) as archive:
         evidence = await capture(port, seconds, diagnostics=diagnostics, tx=tx, on_record=on_record,
-                                 archive=archive)
+                                 archive=archive, ack_port=ack_port)
     if tx is not None:
         evidence.verify(tx[0])
 
@@ -210,6 +219,8 @@ async def main() -> int:
     parser.add_argument("--baud", type=int, default=9600)
     parser.add_argument("--seconds", type=int, default=30, help="frame capture duration")
     parser.add_argument("--save-capture", type=Path, help="save the raw UART stream in a new file")
+    parser.add_argument("--ack-port", type=int, choices=range(5),
+                        help="with diagnostics, acknowledge CRC-verified frames on just this bus")
     parser.add_argument("--tx", nargs=2, metavar=("BUS", "HEX"), help="one native frame, for send only")
     parser.add_argument("--bus", type=int, choices=range(5), help="test just this physical port with echo-test")
     args = parser.parse_args()
@@ -221,6 +232,8 @@ async def main() -> int:
         parser.error("--bus is only for echo-test")
     if args.save_capture and args.action not in ("send", "frames", "diagnostics"):
         parser.error("--save-capture requires send, frames or diagnostics")
+    if args.ack_port is not None and args.action != "diagnostics":
+        parser.error("--ack-port requires diagnostics")
     try:
         async with connect(args.port, args.baud) as port:
             if args.action == "echo-test":
@@ -230,7 +243,7 @@ async def main() -> int:
                               save_capture=args.save_capture)
             elif args.action in ("frames", "diagnostics"):
                 await monitor(port, args.seconds, diagnostics=args.action == "diagnostics",
-                              save_capture=args.save_capture)
+                              save_capture=args.save_capture, ack_port=args.ack_port)
             elif args.action in ("panel", "led-test"):
                 await panel(port, args.action == "led-test")
             elif args.action == "probe":

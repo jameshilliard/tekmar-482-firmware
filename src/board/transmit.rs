@@ -10,15 +10,19 @@ const TX_PINS: [usize; 5] = [28, 13, 22, 8, 29];
 
 pub(super) struct Attempt {
     sender: Sender,
+    pin: LineDriver,
+}
+
+pub(super) struct LineDriver {
     tx: u32,
     rx: u32,
     mask: u32,
     enabled: bool,
 }
 
-impl Attempt {
-    pub(super) fn new(request: &Request, rx_pin: u32, now: u32) -> Option<Self> {
-        let pin = TX_PINS[usize::from(request.port)];
+impl LineDriver {
+    pub(super) fn claim(port: u8, rx_pin: u32) -> Option<Self> {
+        let pin = TX_PINS[usize::from(port)];
         let tx = 1 << pin;
         let rx = 1 << rx_pin;
         if read(FIO) & tx != 0 || (read(PINSEL0 + 4 * (pin / 16)) >> (2 * (pin % 16))) & 3 != 0 {
@@ -27,7 +31,6 @@ impl Attempt {
         let mask = read(MASK);
         write(MASK, mask & !(rx | tx));
         Some(Self {
-            sender: Sender::new(request, now),
             tx,
             rx,
             mask,
@@ -35,28 +38,41 @@ impl Attempt {
         })
     }
 
-    pub(super) fn poll(&mut self, now: u32) -> Option<&'static [u8]> {
-        match self.sender.poll(now, read(PIN) & self.rx != 0) {
-            Action::Drive(high) => {
-                write(if high { SET } else { CLR }, self.tx);
-                if !self.enabled {
-                    write(FIO, read(FIO) | self.tx);
-                    self.enabled = true;
-                }
-                None
-            }
-            Action::Finish(outcome) => Some(outcome.label()),
-            Action::None => None,
+    pub(super) fn drive(&mut self, high: bool) {
+        write(if high { SET } else { CLR }, self.tx);
+        if !self.enabled {
+            write(FIO, read(FIO) | self.tx);
+            self.enabled = true;
         }
     }
 }
 
-impl Drop for Attempt {
+impl Drop for LineDriver {
     fn drop(&mut self) {
         if self.enabled {
             write(CLR, self.tx);
             write(FIO, read(FIO) & !self.tx);
         }
         write(MASK, self.mask);
+    }
+}
+
+impl Attempt {
+    pub(super) fn new(request: &Request, rx_pin: u32, now: u32) -> Option<Self> {
+        Some(Self {
+            pin: LineDriver::claim(request.port, rx_pin)?,
+            sender: Sender::new(request, now),
+        })
+    }
+
+    pub(super) fn poll(&mut self, now: u32) -> Option<&'static [u8]> {
+        match self.sender.poll(now, read(PIN) & self.pin.rx != 0) {
+            Action::Drive(high) => {
+                self.pin.drive(high);
+                None
+            }
+            Action::Finish(outcome) => Some(outcome.label()),
+            Action::None => None,
+        }
     }
 }

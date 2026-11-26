@@ -1,8 +1,8 @@
-use super::super::transmit::Attempt;
+use super::super::transmit::{Attempt, LineDriver};
 use super::super::{LSR, THRE, UART0};
 use super::{CCR, CR0, Capture, FIO0PIN, INPUTS, IR, TC, TIMERS, read, send, write};
-use tekmar_482_firmware::tn4::tx::Request;
-use tekmar_482_firmware::tn4::{Frame, Receiver, Trailer};
+use tekmar_482_firmware::Stream;
+use tekmar_482_firmware::tn4::{Frame, LinkAck, Receiver, Trailer};
 
 fn hex(dst: &mut [u8], value: u32) {
     for (i, byte) in dst.iter_mut().rev().enumerate() {
@@ -18,16 +18,18 @@ struct Outbox {
 }
 
 impl Outbox {
-    fn frame(&mut self, port: usize, f: Frame<'_>) {
+    fn frame(&mut self, port: usize, f: Frame<'_>, local: bool) {
         let mut line = [0u8; 22 + 2 * 67];
         line[..20].copy_from_slice(b"F 0 00000000 0000 A ");
         line[2] += port as u8;
         hex(&mut line[4..12], f.start_us);
         hex(&mut line[13..17], u32::from(f.crc));
         line[18] = match f.trailer {
+            Trailer::Ack if local => b'L',
             Trailer::Ack => b'A',
             Trailer::NoAck => b'N',
             Trailer::BadDelimiter => b'D',
+            Trailer::BadEnd { ack: true } if local => b'X',
             Trailer::BadEnd { ack: true } => b'E',
             Trailer::BadEnd { ack: false } => b'M',
         };
@@ -124,28 +126,45 @@ impl Receivers {
     }
 }
 
-pub fn stream(diagnostic: bool, panel: &mut super::super::panel::Panel, request: Option<&Request>) {
+pub fn stream(mode: &Stream, panel: &mut super::super::panel::Panel) {
     let mut out = Outbox {
         buf: [0; 1024],
         tail: 0,
         len: 0,
         dropped: [0; 5],
     };
-    send(if request.is_some() {
-        b"OK TX\r\n"
-    } else if diagnostic {
-        b"OK DIAG\r\n"
-    } else {
-        b"OK FRAMES\r\n"
-    });
+    let diagnostic = !matches!(mode, Stream::Passive);
+    let mut listener = None;
+    let mut ack = LinkAck::default();
+    match mode {
+        Stream::Ack(n) => {
+            let p = usize::from(*n);
+            let Some(pin) = LineDriver::claim(*n, INPUTS[p].0) else {
+                send(b"ERR ACK-PIN\r\n");
+                return;
+            };
+            listener = Some((p, pin));
+            send(b"OK ACK ");
+            send(&[b'0' + *n, b'\r', b'\n']);
+        }
+        Stream::Send(_) => send(b"OK TX\r\n"),
+        Stream::Diagnostic => send(b"OK DIAG\r\n"),
+        Stream::Passive => send(b"OK FRAMES\r\n"),
+    }
     let mut receivers = Receivers::start();
+    let request = if let Stream::Send(r) = mode {
+        Some(r)
+    } else {
+        None
+    };
     let mut attempt = request.and_then(|r| Attempt::new(r, INPUTS[usize::from(r.port)].0, 0));
     if let Some(r) = request
         && attempt.is_none()
     {
         out.result(r.port, b"PIN-BUSY");
     }
-    while read(LSR) & 1 == 0 {
+    // A stop byte must not cut short an ACK pulse already on the bus.
+    while read(LSR) & 1 == 0 || ack.driving() {
         let now = TIMERS.map(|t| read(t + TC));
         if let Some(tx) = &mut attempt
             && let Some(outcome) = tx.poll(now[0])
@@ -157,8 +176,16 @@ pub fn stream(diagnostic: bool, panel: &mut super::super::panel::Panel, request:
         }
         receivers.poll(now, diagnostic, |port, f| {
             panel.observe(port);
-            out.frame(port, f);
+            let local =
+                matches!(&listener, Some((p, _)) if *p == port) && ack.drove_frame(f.start_us);
+            out.frame(port, f, local);
         });
+        if let Some((p, driver)) = &mut listener
+            && let Some(high) =
+                ack.poll(read(TIMERS[INPUTS[*p].1] + TC), receivers.rx[*p].ack_slot())
+        {
+            driver.drive(high);
+        }
         out.pump();
         panel.poll();
     }
@@ -171,10 +198,17 @@ pub fn stream(diagnostic: bool, panel: &mut super::super::panel::Panel, request:
     let initial = receivers.capture.initial;
     let final_levels = read(FIO0PIN);
     drop(receivers.capture);
+    drop(listener); // nested GPIO mask claims are restored in reverse order
     while out.len != 0 {
         out.pump();
     }
     if diagnostic {
+        if let Stream::Ack(port) = mode {
+            send(&[b'K', b' ', b'0' + port]);
+            super::super::send_word(ack.pulses);
+            super::super::send_word(ack.late);
+            send(b"\r\n");
+        }
         for (port, r) in receivers.rx.iter().enumerate() {
             let s = &r.stats;
             let pin = INPUTS[port].0;
@@ -194,9 +228,7 @@ pub fn stream(diagnostic: bool, panel: &mut super::super::panel::Panel, request:
                 u32::from(s.last_expected_crc),
                 ((initial >> pin) & 1) | (((final_levels >> pin) & 1) << 1),
             ] {
-                let mut word = *b" 00000000";
-                hex(&mut word[1..], n);
-                send(&word);
+                super::super::send_word(n);
             }
             send(b"\r\n");
         }
