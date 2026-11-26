@@ -1252,6 +1252,7 @@ fn reports_keep_latest_observation_per_field_with_explicit_disable_and_no_bus_wr
         (0x37, &[1, 0, 1, 6]),
         (0x2f, &[1, 0, 0]),
         (0x77, &[1, 0, 1]),
+        (0x3f, &[1, 0, 1, 255]),
     ] {
         let r = inv.next_report(1).unwrap();
         assert_eq!(r.payload()[..5], [2, m, 1, 0, 0]);
@@ -1265,6 +1266,135 @@ fn reports_keep_latest_observation_per_field_with_explicit_disable_and_no_bus_wr
     assert!(inv.next_report(2).is_none());
     observe(&mut inv, 0, 0, 24, 0x36f, &[0; 8], 3);
     assert!(inv.next_report(154).is_none());
+}
+
+fn reported_air_targets(inv: &mut Inventory, now: u32) -> [Option<[u8; 2]>; 2] {
+    let mut values = [None; 2];
+    while let Some(report) = inv.next_report(now) {
+        let body = report.payload();
+        let i = match u32::from_le_bytes(body[1..5].try_into().unwrap()) {
+            0x13f => 0,
+            0x147 => 1,
+            _ => continue,
+        };
+        assert!(values[i].replace(body[7..].try_into().unwrap()).is_none());
+    }
+    values
+}
+
+#[test]
+fn master_and_member_target_selection_matches_stock_report_bodies() {
+    // Rows and columns are disabled, enabled, demand only, enabled + demand.
+    let selection = [[0, 2, 0, 2], [1, 0, 1, 2], [0, 2, 0, 2], [1, 1, 1, 1]];
+    for group in [0, 16, 17] {
+        for gate in 0..4 {
+            for h in 0..4 {
+                for c in 0..4 {
+                    let mut inv = Inventory::new();
+                    inv.set_reporting(true);
+                    let master = [
+                        group | gate << 5,
+                        0,
+                        h | 4,
+                        40,
+                        0,
+                        0,
+                        c | 8,
+                        50,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                    ];
+                    observe(&mut inv, 0, 0, 1, 0x377, &master, 0);
+                    let chosen = selection[h as usize][c as usize];
+                    let denied = if group <= 16 { gate } else { 0 };
+                    let values = [1, 2].map(|side| {
+                        Some([
+                            1,
+                            if chosen == side && denied != side {
+                                side * 10 + 30
+                            } else {
+                                255
+                            },
+                        ])
+                    });
+                    assert_eq!(reported_air_targets(&mut inv, 0), values, "{master:?}");
+                    // A member on a different port consults that same global group.
+                    for (p, side, flags) in [(1, 1, 0x21), (2, 2, 1), (3, 1, 0x41), (4, 2, 0x81)] {
+                        let member = [group | ((side - 1) << 5), flags | 24, 60, 0, 0, 0, 0, 0];
+                        observe(&mut inv, p, 0, 1, 0x36f, &member, 1);
+                        let expected = if denied == side || flags & 0xc0 != 0 {
+                            255
+                        } else {
+                            60
+                        };
+                        assert_eq!(
+                            reported_air_targets(&mut inv, 1)[usize::from(side - 1)],
+                            Some([6, expected])
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn air_targets_preserve_slot_aliases_sentinels_and_mode_gates() {
+    let mut inv = Inventory::new();
+    inv.set_reporting(true);
+    call(&mut inv, 0x16f, 0, &[1], 0);
+    for (id, body) in [
+        (0x2e7, &[5, 0, 31, 10, 20, 30, 40, 50][..]), // Before the active setback is known.
+        (0x2e7, &[6, 0, 31, 11, 21, 31, 41, 51]),
+        (0x377, &[0, 0, 5, 66, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+    ] {
+        observe(&mut inv, 0, 0, 1, id, body, 0);
+    }
+    assert_eq!(
+        reported_air_targets(&mut inv, 0),
+        [Some([1, 66]), Some([1, 21])]
+    );
+    for (selector, h, c) in [
+        (2, 10, 11),
+        (3, 66, 21),
+        (4, 10, 11),
+        (5, 66, 21),
+        (6, 50, 51),
+        (7, 255, 255),
+    ] {
+        observe(
+            &mut inv,
+            0,
+            0,
+            1,
+            0x36f,
+            &[0, selector << 2 | 1, 0, 0, 0, 0, 0, 0],
+            0,
+        );
+        assert_eq!(
+            reported_air_targets(&mut inv, 0),
+            [Some([selector, h]), Some([selector, c])]
+        );
+    }
+    call(&mut inv, 0x16f, 0, &[0], 0);
+    observe(&mut inv, 0, 0, 1, 0x36f, &[0, 1, 255, 0, 0, 0, 0, 0], 0);
+    for (mode, heat, cool) in [
+        (0, false, false),
+        (1, true, false),
+        (2, true, true),
+        (3, false, true),
+        (255, true, true),
+    ] {
+        observe(&mut inv, 0, 0, 1, 0x2e7, &[3, 0, 1, mode], 0);
+        observe(&mut inv, 0, 0, 1, 0x36f, &[0, 24, 0, 0, 0, 0, 0, 0], 0);
+        assert_eq!(
+            reported_air_targets(&mut inv, 0),
+            [heat.then_some([6, 255]), cool.then_some([6, 51])]
+        );
+    }
 }
 
 #[test]

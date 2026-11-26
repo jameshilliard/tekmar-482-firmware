@@ -8,7 +8,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 from frames import encode, replay
 from payloads import DECODERS, decode_payload
-from payloads.climate import AirStatus, ThermostatConfiguration, ThermostatMode as Mode
+from payloads.climate import AirGroupTargets, AirStatus, AirTarget, ThermostatConfiguration, ThermostatMode as Mode
 from payloads.codec import Reader
 from payloads.io import IoEndpoint, IoReport, IoType, io_terminal
 from payloads.line import ClockReport, GroupReport, SetpointAssignment, ZoneSyncAdjustment, ZoneTargetMode, group_command
@@ -235,6 +235,26 @@ class PayloadTests(unittest.TestCase):
         self.assertNotIn("mode_setting", decode_payload(0x377, master))
         for mid, data in ((0x36f, member[:7]), (0x377, master[:12])):
             self.assertIn("truncated", decode_payload(mid, data))
+
+    def test_air_group_target_uses_master_gate_selection_and_heat_setback(self):
+        book = AirGroupTargets()
+        def master(g, h, c, ht=40, ct=50):
+            return book.observe(AirStatus.read(Reader(bytes([g, 0, h, ht, 0, 0, c, ct, 0, 0, 0, 0, 0])), master=True))
+        def member(g, f, target=42):
+            return book.observe(AirStatus.read(Reader(bytes([g, f, target, 0, 0, 0, 0, 0])), master=False))
+        self.assertEqual(master(16, 4, 11), AirTarget(T.COOL, 1, 50))
+        self.assertEqual(master(16, 7, 11), AirTarget(T.HEAT, 1, 40))
+        self.assertIsNone(master(16, 5, 9))
+        self.assertIsNone(master(48, 7, 11))  # No fallback to cool if the chosen heat is inhibited.
+        self.assertIsNone(member(16, 1))
+        self.assertEqual(member(48, 1), AirTarget(T.COOL, 0, 42))
+        self.assertEqual(master(112, 7, 11), AirTarget(T.HEAT, 1, 40))  # gate 3, not a bitmap
+        self.assertEqual(master(49, 7, 11), AirTarget(T.HEAT, 1, 40))  # group 17 is not indexed
+        for flags in (0, 2, 65, 129):
+            self.assertIsNone(member(16, flags))
+        self.assertIsNone(member(16, 1, 0))
+        self.assertEqual(member(16, 33, 255), AirTarget(T.HEAT, 0, 255))
+        self.assertIsNone(member(16, 33, 255).celsius)
 
     def test_thermostat_selector_uses_setup_and_revision_not_reported_demand(self):
         for m in Mode:

@@ -67,6 +67,11 @@ selection, clock daylight handling and their limits, see
 
 ## Payload notation
 
+For the distinction between an air-group operating target, the configured
+heat/cool table, and an inhibited or inactive channel, see
+[live room setpoints](normal-mode.md#bus-compatibility). Raw capture
+retains both channel bytes regardless of eligibility.
+
 Offsets below start at the first byte **after** the header. A word (`u16`)
 or double word (`u32`) is little-endian unless stated otherwise. Within a
 byte, bit 0 is the least significant bit; `b[5:2]` includes both endpoints.

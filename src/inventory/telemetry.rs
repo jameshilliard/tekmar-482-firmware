@@ -1,5 +1,9 @@
 //! Device readings common to the tHA Request, Response:Update and Report paths.
-use super::{block_byte, settings::Setting};
+use super::{
+    air::{AirStatus, Side},
+    block_byte,
+    settings::{Setting, slots},
+};
 use crate::trpc::{Call, Reply};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -93,6 +97,7 @@ pub(super) struct Telemetry {
     events: u8,
     setback: u8,
     mode: u8,
+    air_slots: [[u8; 5]; 2],
     targets: [[u8; 2]; 4],
     rh_targets: [u8; 2],
     device_target: [u8; 3], // selector and little-endian degH from the same status
@@ -111,7 +116,11 @@ enum Floor {
 }
 
 fn temperature(data: &[u8], i: usize) -> u16 {
-    match u16::from_le_bytes([data[i], data[i + 1]]) {
+    normalized_temperature([data[i], data[i + 1]])
+}
+
+fn normalized_temperature(word: [u8; 2]) -> u16 {
+    match u16::from_le_bytes(word) {
         0x4000 | 0x8000 | 0xc000 => u16::MAX,
         other => other,
     }
@@ -146,6 +155,7 @@ impl Telemetry {
         events: 0,
         setback: 0,
         mode: 0,
+        air_slots: [[0; 5]; 2],
         targets: [[0; 2]; 4],
         rh_targets: [0; 2],
         device_target: [0; 3],
@@ -161,6 +171,7 @@ impl Telemetry {
         events: 255,
         setback: 255,
         mode: 255,
+        air_slots: [[255; 5]; 2],
         targets: [[255; 2]; 4],
         rh_targets: [255; 2],
         device_target: [255; 3],
@@ -255,7 +266,14 @@ impl Telemetry {
                 if !self.configured(setting) {
                     return 0;
                 }
-                let Some((i, _)) = super::settings::slots(self.setback) else {
+                if matches!(*block, 5 | 6) {
+                    for (i, slot) in self.air_slots[idx].iter_mut().enumerate() {
+                        if let Some(value) = block_byte(*mask, values, i) {
+                            *slot = value;
+                        }
+                    }
+                }
+                let Some((i, _)) = slots(self.setback) else {
                     return 0;
                 };
                 let Some(value) = block_byte(*mask, values, i) else {
@@ -296,44 +314,56 @@ impl Telemetry {
         }
     }
 
+    pub(super) fn air_status(&mut self, air: AirStatus, setbacks: bool) -> u16 {
+        self.air = normalized_temperature(air.temperature);
+        self.demand = air.demand;
+        self.setback = air.setback;
+        let mut fields = Field::Temperature.mask() | Field::Demand.mask() | Field::Setback.mask();
+        if self.floor == Floor::Only {
+            return fields;
+        }
+        self.attributes |= Self::HEAT;
+        if air.cool_capable {
+            self.attributes |= Self::COOL;
+        }
+        if self.is_setpoint_device() {
+            return fields;
+        }
+        let active = slots(self.setback);
+        if let Some((side, value)) = air.target {
+            let table = &mut self.air_slots[side as usize];
+            if !setbacks {
+                table.fill(value);
+            } else if let Some((_, mask)) = active {
+                for (i, slot) in table.iter_mut().enumerate() {
+                    if mask & (1 << i) != 0 {
+                        *slot = value;
+                    }
+                }
+            }
+        }
+        for (side, field, attribute, excluded_mode) in [
+            (Side::Heat, Field::Heat, Self::HEAT, 3),
+            (Side::Cool, Field::Cool, Self::COOL, 1),
+        ] {
+            if self.mode == 0 || self.mode == excluded_mode || self.attributes & attribute == 0 {
+                self.dirty &= !field.mask();
+                continue;
+            }
+            let i = side as usize;
+            self.targets[i] = [
+                self.setback,
+                active.map_or(255, |(slot, _)| self.air_slots[i][slot]),
+            ];
+            fields |= field.mask();
+        }
+        fields
+    }
+
     /// Called only after the enclosing dispatcher checks the native payload length.
     pub(super) fn observe(&mut self, message: u32, data: &[u8]) -> u16 {
         use Field::{Demand, Humidity, Setback, Temperature};
-        if self.floor != Floor::Only {
-            match message {
-                0x36f => {
-                    self.attributes |= Self::HEAT;
-                    if data[1] & 1 != 0 && data[0] & 0x20 != 0 {
-                        self.attributes |= Self::COOL;
-                    }
-                }
-                0x377 => self.attributes |= Self::HEAT | Self::COOL,
-                _ => {}
-            }
-        }
         let (air, demand, setback) = match message {
-            0x36f => (
-                3,
-                if data[1] & 3 != 3 {
-                    0
-                } else if data[0] & 32 == 0 {
-                    1
-                } else {
-                    3
-                },
-                (data[1] >> 2) & 7,
-            ),
-            0x377 => (
-                4,
-                if data[2] & 3 == 3 {
-                    1
-                } else if data[6] & 3 == 3 {
-                    3
-                } else {
-                    0
-                },
-                (data[2] >> 2) & 7,
-            ),
             0x22f if data[1] & 0x30 == 0x10 => (
                 4,
                 if data[1] & 4 == 0 {

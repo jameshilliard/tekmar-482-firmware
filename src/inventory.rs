@@ -1,5 +1,6 @@
 //! Normal-mode inventory. Bus addresses, not product numbers, identify entries.
 use crate::trpc::{Call, GatewayVersion, Reply};
+mod air;
 mod broadcast;
 mod groups;
 mod line;
@@ -65,6 +66,7 @@ struct Port {
 }
 
 pub struct Inventory {
+    air_groups: air::AirGroups,
     groups: groups::Groups,
     broadcasts: broadcast::Broadcasts,
     outdoor: outdoor::Outdoor,
@@ -88,6 +90,7 @@ impl Default for Inventory {
 impl Inventory {
     pub const fn new() -> Self {
         Self {
+            air_groups: air::AirGroups::EMPTY,
             groups: groups::Groups::EMPTY,
             broadcasts: broadcast::Broadcasts::EMPTY,
             outdoor: outdoor::Outdoor::EMPTY,
@@ -320,6 +323,8 @@ impl Inventory {
             changed
         } else if message == 0x2e7 {
             row.live.setting_report(data)
+        } else if let Some(air) = self.air_groups.observe(message, data) {
+            row.live.air_status(air, self.setbacks)
         } else {
             row.live.observe(message, data)
         };
@@ -385,6 +390,7 @@ impl Inventory {
     }
 
     pub fn reset(&mut self) {
+        self.air_groups = air::AirGroups::EMPTY;
         self.groups = groups::Groups::EMPTY;
         self.broadcasts = broadcast::Broadcasts::EMPTY;
         self.outdoor = outdoor::Outdoor::EMPTY;

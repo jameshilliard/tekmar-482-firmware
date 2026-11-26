@@ -531,11 +531,16 @@ def run(path, ram, fast=False):
                     call(0x13d,b"\x0c\x01",True)
                     call(0x13d,b"\x0c\0")
                 else:
-                    inject(bytes.fromhex("76f00608 2003000a06000000"))
+                    inject(bytes.fromhex("76f00608 20032a0a06000000"))
             elif method == 0x12f and data[0] == 2 and phase == "capture":
                 assert data[5:] == bytes.fromhex("010003")
                 assert (6,bytes.fromhex("023701000001000a06")) in actual
                 assert (6, bytes.fromhex("021f01000001000300")) in actual
+                phase = "live-cool-target"
+            elif method == 0x147 and phase == "live-cool-target":
+                # No block 5 or 6 read: only the member supplied this target.
+                assert data == bytes.fromhex("0247010000 0100 00 2a")
+                assert (6, bytes.fromhex("023f010000 0100 00 ff")) in actual
                 phase = "fan-attributes"
                 inject(bytes.fromhex("6e700604 09000100"))
             elif method == 0x11f and phase == "fan-attributes":

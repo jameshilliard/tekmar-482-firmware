@@ -26,7 +26,7 @@ behavior or compatibility with every serial client's timeout.
 | 12F ActiveDemand, 137 CurrentTemperature, 138 CurrentFloorTemperature | Request, read-only Update echo and Report. Source and availability rules below. |
 | 13D SetpointGroupEnable | Request cached state for group 1..12; Update broadcasts on all five lines. Report from observed group status. |
 | 13E SetpointDevice | Addressed Request and Update of a 16-bit target by setback. Reports from setpoint control status, not group enable. |
-| 13F HeatSetpoint, 147 CoolSetpoint | Addressed Request and Update by setback, using native blocks 5 and 6. Report the active slot when a block is observed and the active setback is known. |
+| 13F HeatSetpoint, 147 CoolSetpoint | Addressed Request and Update by setback, using native blocks 5 and 6. Report the active slot from configuration or air-group status (36F/377). |
 | 14F SlabSetpoint, 157 FanPercent | Addressed Request, Update and active-slot Report. Blocks 7 and 9; see sensor requirements and fan units below. |
 | 150 RelativeHumidity | Request and Report from RHReport. Update is ignored. |
 | 151 HumidityMax, 152 HumidityMin | Addressed Request, Update and Report. Require an RH source and the corresponding block A3 enable flag. Not setback-indexed in tHA. |
@@ -100,9 +100,25 @@ Stock settings often reply from cache. This implementation reads the device
 for supported setting operations, so a response can take longer, report
 the value the device actually retained, or indicate a busy port. The
 stock gate on discretionary block queries after WaterCycleStart (`37F`,
-handler `0x68e4`) is not implemented. Stock also updates active thermostat
-heat/cool targets from air-group status; reports from stored configuration
-blocks alone do not cover that path.
+handler `0x68e4`) and the one-device-per-minute background refresh are not
+implemented.
+
+**Live room setpoints.** An eligible air-group status updates the target
+cache directly. A member supplies its enabled side; a master with both
+sides enabled supplies the calling side (heat wins a tie; neither if idle).
+The master's heat-side flags supply the setback for **both** sides.
+Zero, channel flag bits 6/7, or a matching group inhibit code prevent a new
+sample. Groups 0..16 share their last master code across ports: 1 inhibits
+heat, 2 inhibits cool; J1196J compares for equality, not as a bitmask.
+Other groups use code 0. FF is an explicit unavailable value.
+
+With setbacks enabled, a sample changes the occupied alias pair, unoccupied
+alias pair, or Away slot; with setbacks disabled it fills all five. Reports
+use the current selector and cached value (FF for unknown), even when the
+latest frame did not supply a new target. Mode Off suppresses both, Heat
+suppresses cool, and Cool suppresses heat. Floor-only and native setpoint
+devices do not emit room target reports. A status is not device readback
+for an outstanding setting write.
 
 The stock **native application dispatcher** at `0x6d98` is a separate
 check from the 26 serial methods. Its cases are:
