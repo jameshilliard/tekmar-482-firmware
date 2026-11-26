@@ -15,7 +15,8 @@ native message in Raw mode does not implement its tRPC services in Normal mode.
 | 15F TakingAddress | Report the old and new addresses even with reporting disabled. Request and Update are ignored. |
 | 107 NetworkError | Request and Update return the current network error word. Reports follow native 3D7, including clearance. |
 | 10F ReportingState | Request and Update. Power-on default comes from the Reporting DIP. Test-button reporting notifications are not yet implemented. |
-| 117 OutdoorTemp, 11F DeviceAttributes | Not implemented. |
+| 117 OutdoorTemp | Not implemented. |
+| 11F DeviceAttributes | Read the observed u16 mask, echo it on Update, and report changes. See below for the evidence behind each bit. |
 | 127 ModeSetting | Addressed Request and Update use heating setup (block 3). Report on observed mode. This is not ActiveDemand. |
 | 12F ActiveDemand, 137 CurrentTemperature, 138 CurrentFloorTemperature | Request, read-only Update echo and Report. Source and availability rules below. |
 | 13D SetpointGroupEnable | Request cached state for group 1..12; Update broadcasts on all five lines. Report from observed group status. |
@@ -64,6 +65,28 @@ qualifying traffic when identity is incomplete and that port is available.
 Repeated observations of the same device are rate-limited to one probe per
 minute. Raw mode does not issue these requests, cache identities or expose
 internal probes as host transmit results.
+
+## Device attributes
+
+Read 11F with a device address. A present device with no capability evidence
+returns zero; an absent device does not reply. An Update ignores the supplied
+mask and returns the real one. Neither operation transmits on tN4. The first
+four bits are published in the tHA reference; J1196J also uses bits 4..8.
+Product identity alone does not set bits.
+
+| Mask (hex) | Native evidence |
+| --- | --- |
+| 0001, 0002 | Air-group master (377) establishes heat and cool. Member (36F) establishes heat, and cool when byte 1 bit 0 is set and byte 0 bit 5 selects cooling. A floor-only configuration suppresses both. |
+| 0004, 0100 | Sensor setup (block 0D) has exactly one floor sensor and four off slots (0004), or any floor sensor (0100). A floor-only device has both bits; a mixed room/floor device has only 0100 of these two. |
+| 0008 | FanDuctStatus (25F) or a ventilation requirement in block 09. This says nothing about the current fan speed. |
+| 0010 | RHReport (323), independent of whether either humidity limit is enabled. |
+| 0020, 0040 | Following RHReport, block A3 enables the maximum via byte 1 and the minimum via byte 0. Off or unavailable flags do not grant access. |
+| 0080 | Setpoint control status (22F) with operating mode 1, or a setpoint control setup/target block (26, 28, 2A, 2C, 2E, 30). This is not a setpoint group. |
+
+The custom firmware reports a change to **any** mask bit with reporting
+enabled, before dependent samples still pending for that device. Like the
+stock gateway, it can repeat the mask on a slab status with a configured
+floor sensor. The mask continues to accumulate evidence when reporting is off.
 
 ## Setpoint groups
 

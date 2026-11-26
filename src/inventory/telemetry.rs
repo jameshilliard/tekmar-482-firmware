@@ -4,6 +4,7 @@ use crate::trpc::{Call, Reply};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Field {
+    Attributes,
     Temperature,
     Floor,
     Demand,
@@ -19,7 +20,8 @@ pub(super) enum Field {
     Events,
 }
 impl Field {
-    const ALL: [Self; 13] = [
+    const ALL: [Self; 14] = [
+        Self::Attributes,
         Self::Temperature,
         Self::Floor,
         Self::Demand,
@@ -39,6 +41,7 @@ impl Field {
     }
     fn method(self) -> u32 {
         match self {
+            Self::Attributes => 0x11f,
             Self::Temperature => 0x137,
             Self::Floor => 0x138,
             Self::Demand => 0x12f,
@@ -60,7 +63,8 @@ impl Field {
     pub(super) fn width(self) -> usize {
         if matches!(
             self,
-            Self::Temperature
+            Self::Attributes
+                | Self::Temperature
                 | Self::Floor
                 | Self::Heat
                 | Self::Cool
@@ -85,8 +89,7 @@ pub(super) struct Telemetry {
     mode: u8,
     targets: [[u8; 2]; 4],
     rh_targets: [u8; 2],
-    observed_sources: u8,
-    rh_enabled: u8,
+    pub(super) attributes: u16,
     floor: Floor,
     pub(super) dirty: u16,
 }
@@ -108,14 +111,21 @@ fn temperature(data: &[u8], i: usize) -> u16 {
 }
 
 impl Telemetry {
-    const RH_SOURCE: u8 = 1;
-    const SETPOINT_DEVICE: u8 = 2;
+    const HEAT: u16 = 1;
+    const COOL: u16 = 2;
+    const FLOOR_ONLY: u16 = 4;
+    const FAN: u16 = 8;
+    const RH_SOURCE: u16 = 16;
+    const RH_MAX: u16 = 32;
+    const RH_MIN: u16 = 64;
+    const SETPOINT_DEVICE: u16 = 128;
+    const FLOOR_SENSOR: u16 = 256;
 
     pub(super) fn mark_setpoint_device(&mut self) {
-        self.observed_sources |= Self::SETPOINT_DEVICE;
+        self.attributes |= Self::SETPOINT_DEVICE;
     }
     pub(super) fn is_setpoint_device(&self) -> bool {
-        self.observed_sources & Self::SETPOINT_DEVICE != 0
+        self.attributes & Self::SETPOINT_DEVICE != 0
     }
     pub(super) fn setback(&self) -> u8 {
         self.setback
@@ -130,8 +140,7 @@ impl Telemetry {
         mode: 0,
         targets: [[0; 2]; 4],
         rh_targets: [0; 2],
-        observed_sources: 0,
-        rh_enabled: 0,
+        attributes: 0,
         floor: Floor::Unknown,
         dirty: 0,
     };
@@ -148,6 +157,7 @@ impl Telemetry {
         ..Self::EMPTY
     };
     pub(super) fn sensor_setup(&mut self, mask: u8, values: &[u8]) -> Option<u16> {
+        self.attributes &= !(Self::FLOOR_ONLY | Self::FLOOR_SENSOR);
         let mut floors = 0;
         let mut off = 0;
         for i in 0..5 {
@@ -177,10 +187,14 @@ impl Telemetry {
         let changed = self.floor != next;
         self.floor = next;
         if self.floor == Floor::Only {
+            self.attributes &= !(Self::HEAT | Self::COOL);
+            self.attributes |= Self::FLOOR_ONLY;
             self.dirty &= !(Field::Heat.mask() | Field::Cool.mask());
         }
         if !self.configured(Setting::Slab) {
             self.dirty &= !Field::SlabTarget.mask();
+        } else {
+            self.attributes |= Self::FLOOR_SENSOR;
         }
         Some(if changed {
             Field::Temperature.mask() | Field::Floor.mask()
@@ -193,13 +207,13 @@ impl Telemetry {
         match setting {
             Setting::Slab => matches!(self.floor, Floor::Only | Floor::Mixed),
             Setting::Heat | Setting::Cool => self.floor != Floor::Only,
-            Setting::HumidityMin => self.has_rh() && self.rh_enabled & 1 != 0,
-            Setting::HumidityMax => self.has_rh() && self.rh_enabled & 2 != 0,
+            Setting::HumidityMin => self.attributes & Self::RH_MIN != 0,
+            Setting::HumidityMax => self.attributes & Self::RH_MAX != 0,
             _ => true,
         }
     }
     pub(super) fn has_rh(&self) -> bool {
-        self.observed_sources & Self::RH_SOURCE != 0
+        self.attributes & Self::RH_SOURCE != 0
     }
     pub(super) fn setting_report(&mut self, data: &[u8]) -> u16 {
         let [block, 0, mask, values @ ..] = data else {
@@ -214,6 +228,12 @@ impl Telemetry {
                 Field::Mode.mask()
             }
             5 | 6 | 7 | 9 => {
+                if *block == 9
+                    && *mask & 31 != 0
+                    && block_byte(*mask, values, mask.trailing_zeros() as usize).is_some()
+                {
+                    self.attributes |= Self::FAN;
+                }
                 let (idx, field, setting) = match *block {
                     5 => (0, Field::Heat, Setting::Heat),
                     6 => (1, Field::Cool, Setting::Cool),
@@ -232,14 +252,17 @@ impl Telemetry {
                 self.targets[idx] = [self.setback, value];
                 field.mask()
             }
-            0xa3 => {
-                self.rh_enabled = 0;
-                for (i, f) in [Field::HumidityMin, Field::HumidityMax]
-                    .into_iter()
-                    .enumerate()
+            0xa3 if self.has_rh() => {
+                self.attributes &= !(Self::RH_MIN | Self::RH_MAX);
+                for (i, (f, bit)) in [
+                    (Field::HumidityMin, Self::RH_MIN),
+                    (Field::HumidityMax, Self::RH_MAX),
+                ]
+                .into_iter()
+                .enumerate()
                 {
                     if block_byte(*mask, values, i).is_some_and(|v| v != 0 && v != 255) {
-                        self.rh_enabled |= 1 << i;
+                        self.attributes |= bit;
                     } else {
                         self.dirty &= !f.mask();
                     }
@@ -248,7 +271,7 @@ impl Telemetry {
             }
             0xa4 | 0xa5 => {
                 let i = usize::from(*block - 0xa4);
-                if !self.has_rh() || self.rh_enabled & (1 << i) == 0 {
+                if self.attributes & [Self::RH_MIN, Self::RH_MAX][i] == 0 {
                     return 0;
                 }
                 let Some(value) = block_byte(*mask, values, 0) else {
@@ -264,6 +287,18 @@ impl Telemetry {
     /// Called only after the enclosing dispatcher checks the native payload length.
     pub(super) fn observe(&mut self, message: u32, data: &[u8]) -> u16 {
         use Field::{Demand, Humidity, Setback, Temperature};
+        if self.floor != Floor::Only {
+            match message {
+                0x36f => {
+                    self.attributes |= Self::HEAT;
+                    if data[1] & 1 != 0 && data[0] & 0x20 != 0 {
+                        self.attributes |= Self::COOL;
+                    }
+                }
+                0x377 => self.attributes |= Self::HEAT | Self::COOL,
+                _ => {}
+            }
+        }
         let (air, demand, setback) = match message {
             0x36f => (
                 3,
@@ -299,7 +334,7 @@ impl Telemetry {
                 (data[0] >> 1) & 7,
             ),
             0x323 => {
-                self.observed_sources |= Self::RH_SOURCE;
+                self.attributes |= Self::RH_SOURCE;
                 self.humidity = data[2];
                 return Humidity.mask();
             }
@@ -312,6 +347,10 @@ impl Telemetry {
                 };
                 return Field::Events.mask() | if self.setback < 7 { Setback.mask() } else { 0 };
             }
+            0x25f => {
+                self.attributes |= Self::FAN;
+                return 0;
+            }
             0x26f => {
                 self.slab = temperature(data, 2);
                 let target =
@@ -323,8 +362,10 @@ impl Telemetry {
                     };
                 return target
                     | match self.floor {
-                        Floor::Only => Temperature.mask() | Field::Floor.mask(),
-                        Floor::Mixed => Field::Floor.mask(),
+                        Floor::Only => {
+                            Field::Attributes.mask() | Temperature.mask() | Field::Floor.mask()
+                        }
+                        Floor::Mixed => Field::Attributes.mask() | Field::Floor.mask(),
                         _ => 0,
                     };
             }
@@ -338,6 +379,7 @@ impl Telemetry {
 
     fn value(&self, field: Field) -> u16 {
         match field {
+            Field::Attributes => self.attributes,
             Field::Temperature if self.floor == Floor::Only => self.slab,
             Field::Temperature => self.air,
             Field::Floor if matches!(self.floor, Floor::Only | Floor::Mixed) => self.slab,

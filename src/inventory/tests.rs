@@ -618,7 +618,8 @@ fn reports_keep_latest_observation_per_field_with_explicit_disable_and_no_bus_wr
         &[2, 7, 1, 0, 0, 0, 0]
     );
     for (m, body) in [
-        (0x37, &[1, 0, 1, 6][..]),
+        (0x1f, &[1, 0, 1, 0][..]),
+        (0x37, &[1, 0, 1, 6]),
         (0x2f, &[1, 0, 0]),
         (0x77, &[1, 0, 1]),
     ] {
@@ -634,4 +635,51 @@ fn reports_keep_latest_observation_per_field_with_explicit_disable_and_no_bus_wr
     assert!(inv.next_report(2).is_none());
     observe(&mut inv, 0, 0, 24, 0x36f, &[0; 8], 3);
     assert!(inv.next_report(154).is_none());
+}
+
+#[test]
+fn attributes_follow_native_sources_not_the_requested_mask_or_product() {
+    let mut inv = Inventory::new();
+    let read = |inv: &mut Inventory| {
+        let reply = call(inv, 0x11f, 1, &[1, 0], 0).unwrap();
+        u16::from_le_bytes(reply.payload()[7..].try_into().unwrap())
+    };
+    assert!(call(&mut inv, 0x11f, 1, &[1, 0, 0, 0], 0).is_none());
+    for (id, body, mask) in [
+        (0x2e7, &[0, 0, 7, 1, 2, 3][..], 0),
+        (0x36f, &[32, 0, 0, 0, 0, 0, 0, 0], 1), // Selected cool, but not operating.
+        (0x36f, &[32, 1, 0, 0, 0, 0, 0, 0], 3),
+        (0x2e7, &[9, 0, 0], 3),
+        (0x2e7, &[9, 0, 1, 0], 11),
+        (0x2e7, &[0xa3, 0, 3, 1, 1], 11), // No RH source.
+        (0x323, &[0, 0, 41, 0, 0, 0], 27),
+        (0x2e7, &[0xa3, 0, 3, 1, 0], 91),
+        (0x2e7, &[0xa3, 0, 3, 0, 1], 59),
+        (0x2e7, &[0xa3, 0, 3, 0xff, 0], 27),
+        (0x26f, &[0; 4], 27), // SlabStatus without sensor configuration.
+        (0x2e7, &[13, 0, 3, 1, 2], 0x11b),
+        (0x2e7, &[13, 0, 1, 2], 0x11c),
+        (0x377, &[0; 13], 0x11c), // No room heat/cool in a floor-only setup.
+        (0x2e7, &[13, 0, 1, 1], 0x18),
+        (0x377, &[0; 13], 0x1b),
+        (0x22f, &[0; 11], 0x1b),
+        (0x2e7, &[0x26, 0, 1, 0], 0x9b),
+    ] {
+        observe(&mut inv, 0, 0, 24, id, body, 0);
+        assert_eq!(read(&mut inv), mask, "{id:x} {body:?}");
+        assert!(!inv.has_reports());
+    }
+    assert_eq!(
+        call(&mut inv, 0x11f, 0, &[1, 0, 255, 255], 0)
+            .unwrap()
+            .payload(),
+        [3, 0x1f, 1, 0, 0, 1, 0, 0x9b, 0]
+    );
+    assert!(!inv.has_command(0));
+    assert!(call(&mut inv, 0x11f, 1, &[1, 0], 151).is_none());
+    observe(&mut inv, 0, 0, 24, 0x25f, &[0; 5], 151);
+    assert_eq!(
+        call(&mut inv, 0x11f, 1, &[1, 0], 151).unwrap().payload()[7..],
+        [8, 0]
+    );
 }

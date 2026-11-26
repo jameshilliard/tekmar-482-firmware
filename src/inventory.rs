@@ -112,8 +112,7 @@ fn block_byte(mask: u8, data: &[u8], index: usize) -> Option<u8> {
     if mask & bit == 0 {
         return None;
     }
-    let span = 8 - mask.leading_zeros() as usize;
-    let offset = if data.len() >= span {
+    let offset = if data.len() >= 8 || (mask >> data.len()) == 0 {
         index
     } else if data.len() == mask.count_ones() as usize {
         (mask & (bit - 1)).count_ones() as usize
@@ -261,6 +260,7 @@ impl Inventory {
         row.address = address;
         row.subnet = subnet;
         row.last_seen = now;
+        let previous_attributes = row.live.attributes;
         if message == 0x22f && data[1] & 0x30 == 0x10
             || message == 0x2e7
                 && matches!(data, [0x26 | 0x28 | 0x2a | 0x2c | 0x2e | 0x30, 0, _, _, ..])
@@ -307,6 +307,9 @@ impl Inventory {
         }
         if !self.setbacks {
             changed &= !Field::Setback.mask();
+        }
+        if row.live.attributes != previous_attributes {
+            changed |= Field::Attributes.mask();
         }
         if self.reporting && changed != 0 {
             row.live.dirty |= changed;

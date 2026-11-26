@@ -222,7 +222,20 @@ def run(path, ram, fast=False):
             elif method == 0x12f and data[0] == 2:
                 assert data[5:] == bytes.fromhex("010003")
                 assert (6,bytes.fromhex("023701000001000a06")) in actual
-                call(0x10f,b"\0",True)
+                assert (6, bytes.fromhex("021f01000001000300")) in actual
+                phase = "fan-attributes"
+                inject(bytes.fromhex("6e700604 09000100"))
+            elif method == 0x11f and phase == "fan-attributes":
+                assert data[5:] == bytes.fromhex("01000b00")
+                if data[0] == 2:
+                    call(0x11f, bytes.fromhex("01000000"))
+                elif data[0] == 4:
+                    assert encode(kind, data) == bytes.fromhex("ca0906041f01000001000b003f35")
+                    call(0x11f, bytes.fromhex("0100ffff"), True)
+                else:
+                    assert data[0] == 3
+                    phase = "settings"
+                    call(0x10f,b"\0",True)
             elif method == 0x10f and data[5:] == b"\0":
                 if phase == "move":
                     # Published example: node 24 to 23 = tHA address 1 to 2.
