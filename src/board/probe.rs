@@ -82,7 +82,7 @@ impl Capture {
 }
 
 mod stream;
-pub use stream::stream;
+pub use stream::{Receivers, stream};
 
 impl Drop for Capture {
     fn drop(&mut self) {

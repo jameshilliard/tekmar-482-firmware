@@ -30,7 +30,7 @@ def smoke(image: bytes, ram: bool) -> None:
     tx_body = bytes.fromhex("12300001a5")
     tx_check = binascii.crc_hqx(b"\0" + tx_body, 0xffff)
     tx_cmd = f"A\nTX 0 {tx_body.hex()} {tx_check:04x}\n".encode()
-    frames = deque([b"?", b"A!", b"A\nBAD-ENTER-ISP\n", b"A\nID?\n",
+    frames = deque([b"?", b"A!", b"A\nBAD-ENTER-ISP\n", b"A\nID?\n", None, "inputs",
                     b"A\nLED-TEST\n", b"A\nPANEL?\n", b"A\nRX-END\n", b"A\nRX-BEGIN\n", b"A\nRX-BEGIN\n",
                     b"A\nRX-END\n", b"A\nRX-STREAM\n", tx_cmd, b"A\nRX-BEGIN\n", b"A\nENTER-ISP\r\n"])
     incoming = deque()
@@ -45,6 +45,8 @@ def smoke(image: bytes, ram: bool) -> None:
     edges = deque((i * 2500, bit) for i, bit in enumerate(wire) if i and bit != wire[i-1])
     streaming = False
     sending = False
+    background_test = False
+    input_start = None
     tx_latch = 0
     clock = 0
 
@@ -84,21 +86,24 @@ def smoke(image: bytes, ram: bool) -> None:
     cpu.mem_map(0xe0014000, 0x1000)
 
     def timer_write(uc, offset, size, value, index):
-        nonlocal streaming, sending, clock
+        nonlocal streaming, sending, clock, edges
         regs = timers[index]
         assert size == 4 and offset in (0, 4, 0x0c, 0x14, 0x28, 0x70)
         if offset == 0:
             regs[0] = regs.get(0, 0) & ~value
             return
         regs[offset] = value
+        if offset == 4 and value == 2 and index == 0:
+            streaming = sending = False
         if offset == 4 and value == 1:
             assert regs[0x0c] == 47 and regs[0x14] == 0 and regs[0x70] == 0
             pins = sum(2 << (2 * pin) for pin in (2, 4, 6, 10, 11))
             assert uc.mem_read(0xE002C000, 4) == struct.pack("<I", pins | 5)
             if regs[0x28] == (0x16d, 0x2d)[index]:
-                streaming = True
                 if index == 0:
                     sending = outgoing.endswith(b"OK TX\r\n")
+                    streaming = sending or outgoing.endswith(b"OK FRAMES\r\n")
+                    edges = deque((i * 2500, b) for i, b in enumerate(wire) if i and b != wire[i-1])
                     clock = 0
                 regs[8] = regs[0] = 0
                 return
@@ -109,17 +114,34 @@ def smoke(image: bytes, ram: bool) -> None:
                 regs[0x2c + channel * 4] = 1 + 16 * index + channel
 
     def timer_read(uc, offset, size, index):
-        nonlocal clock, streaming
+        nonlocal clock, streaming, background_test, input_start
         assert size == 4 and offset in (0, 8, 0x28, 0x2c, 0x30, 0x34)
-        if streaming and offset == 8:
+        if (streaming or background_test or input_start is not None) and offset == 8:
             if index == 0:
                 clock += 100 if sending else 200
+                if background_test or input_start is not None:
+                    uc.mem_write(0xe0014008, struct.pack("<I", clock))
+                if input_start is not None:
+                    elapsed = clock - input_start
+                    # A short bounce followed by a held press with the DIP flipped.
+                    pressed = 2_000 < elapsed < 6_000 or 30_000 < elapsed < 140_000
+                    gpio[0x14] = (gpio[0x14] | (1 << 7)) if elapsed > 30_000 else gpio[0x14]
+                    if pressed:
+                        gpio[0x14] &= ~(1 << 14)
+                    else:
+                        gpio[0x14] |= 1 << 14
+                    if elapsed > 210_000:
+                        input_start = None
+                        incoming.extend(b"A\nPANEL?\n")
                 if not sending and edges and edges[0][0] <= clock:
                     stamp, bit = edges.popleft()
                     assert timers[0][0x28] >> 3 & 7 == (5 if bit == "1" else 6)
                     timers[0][0x30] = stamp
                     timers[0][0] |= 0x20
-                if clock > (240_000 if sending else (len(wire) + 2) * 2500):
+                if background_test and clock > 240_000:
+                    background_test = False
+                    incoming.extend(b"A\nPANEL?\n")
+                elif streaming and clock > (240_000 if sending else (len(wire) + 2) * 2500):
                     streaming = False
                     incoming.append(10)
             return clock
@@ -140,14 +162,20 @@ def smoke(image: bytes, ram: bool) -> None:
         return incoming.popleft()
 
     def uart_write(uc, offset, size, value, user_data):
-        nonlocal dlab, drained, pending_polls
+        nonlocal dlab, drained, pending_polls, background_test, input_start
         writes.append((offset, value))
         if offset == 0x0C:
             dlab = bool(value & 0x80)
         elif offset == 0x20:
             assert value == 0x305 and drained and not incoming
             assert uc.mem_read(0xE01FC080, 4) == struct.pack("<I", 3)
-            incoming.extend(frames.popleft())
+            command = frames.popleft()
+            if command is None:
+                background_test = True
+            elif command == "inputs":
+                input_start = clock
+            else:
+                incoming.extend(command)
         elif offset == 0 and not dlab:
             outgoing.append(value)
             drained = False
@@ -159,8 +187,10 @@ def smoke(image: bytes, ram: bool) -> None:
         assert not frames
         assert uc.mem_read(0xE01FC080, 4) == bytes(4)
         passive, active = bytes(outgoing).split(b"OK TX\r\n")
-        assert passive == (b"TEKMAR-482-DEV\r\nOK LED\r\n"
-                            b"PANEL 00000001 00000001 00000000 00000000 00000001 00000001 00000001\r\n"
+        assert passive == (b"TEKMAR-482-DEV\r\n"
+                            b"PANEL 00000001 00000001 00000000 00000000 00000001 00000001 00000000\r\n"
+                            b"PANEL 00000001 00000000 00000001 00000001 00000001 00000001 00000001\r\nOK LED\r\n"
+                            b"PANEL 00000001 00000000 00000001 00000001 00000001 00000001 00000001\r\n"
                             b"ERR RX-INACTIVE\r\nOK RX\r\nOK RX\r\n"
                             b"RX 000f4240 000f4241 0000000d 00000002 00000000"
                             b" 00000003 00000011 00000000\r\nOK FRAMES\r\n"

@@ -207,7 +207,11 @@ activity indicators. GPIO readback does not test those lamps optically.
 are active low. A button press or `board.py led-test PORT` walks bus 0..4
 then Test, 500 ms each. The host checks all six pin readbacks and that the
 walk ends. The RAM trial accepts `--panel-test`. Outside the walk, a bus
-LED denotes a CRC-matching frame seen in the last minute during capture,
-including an intact body with a bad trailer. It is not proof of delivery.
+LED denotes a CRC-matching frame seen in the last minute, including an
+intact body with a bad trailer. The same decoder runs while waiting for
+UART commands, without sending unsolicited records. The edge-only probe
+temporarily takes the capture timers and does not decode frames. Use
+`ram_trial.py --panel-after 30` to check LED activity before opening any
+stream. A lit LED is not proof of delivery.
 The DIP state is diagnostic, not permission to drive a bus. Test at
 power-on retains the hardware ROM entry function.

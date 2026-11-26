@@ -69,16 +69,66 @@ impl Outbox {
     }
 }
 
+pub struct Receivers {
+    capture: Capture,
+    rx: [Receiver; 5],
+    rising: [bool; 5],
+    max_delay: [u32; 5],
+}
+
+impl Receivers {
+    pub fn start() -> Self {
+        Self {
+            rx: core::array::from_fn(|_| Receiver::default()),
+            rising: [true; 5],
+            max_delay: [0; 5],
+            capture: Capture::arm(5),
+        }
+    }
+
+    pub fn poll(
+        &mut self,
+        now: [u32; 2],
+        diagnostic: bool,
+        mut report: impl FnMut(usize, Frame<'_>),
+    ) {
+        let pending = TIMERS.map(|t| read(t + IR));
+        for (port, (_, timer, ch)) in INPUTS.into_iter().enumerate() {
+            let t = TIMERS[timer];
+            let flag = 1 << (4 + ch);
+            let mut emit = |f: Frame<'_>| report(port, f);
+            if pending[timer] & flag != 0 {
+                let at = read(t + CR0 + 4 * ch);
+                write(t + IR, flag);
+                let next = if self.rising[port] { 6 } else { 5 };
+                write(
+                    t + CCR,
+                    (read(t + CCR) & !(7 << (3 * ch))) | (next << (3 * ch)),
+                );
+                if diagnostic {
+                    self.max_delay[port] = self.max_delay[port].max(read(t + TC).wrapping_sub(at));
+                }
+                self.rx[port].edge(at, self.rising[port], &mut emit);
+                self.rising[port] = !self.rising[port];
+            }
+            self.rx[port].advance(now[timer], emit);
+        }
+    }
+
+    pub fn idle(&mut self, panel: &mut super::super::panel::Panel) {
+        self.poll(TIMERS.map(|t| read(t + TC)), false, |port, _| {
+            panel.observe(port)
+        });
+    }
+}
+
 pub fn stream(diagnostic: bool, panel: &mut super::super::panel::Panel, request: Option<&Request>) {
-    let mut rx: [Receiver; 5] = core::array::from_fn(|_| Receiver::default());
-    let mut rising = [true; 5];
     let mut out = Outbox {
         buf: [0; 1024],
         tail: 0,
         len: 0,
         dropped: [0; 5],
     };
-    let mut max_delay = [0; 5];
     send(if request.is_some() {
         b"OK TX\r\n"
     } else if diagnostic {
@@ -86,7 +136,7 @@ pub fn stream(diagnostic: bool, panel: &mut super::super::panel::Panel, request:
     } else {
         b"OK FRAMES\r\n"
     });
-    let capture = Capture::arm(5); // positive edges first; idle is low
+    let mut receivers = Receivers::start();
     let mut attempt = request.and_then(|r| Attempt::new(r, INPUTS[usize::from(r.port)].0, 0));
     if let Some(r) = request
         && attempt.is_none()
@@ -103,30 +153,10 @@ pub fn stream(diagnostic: bool, panel: &mut super::super::panel::Panel, request:
                 out.result(r.port, outcome);
             }
         }
-        let pending = TIMERS.map(|t| read(t + IR));
-        for (port, (_, timer, ch)) in INPUTS.into_iter().enumerate() {
-            let t = TIMERS[timer];
-            let flag = 1 << (4 + ch);
-            let mut emit = |f: Frame<'_>| {
-                panel.observe(port);
-                out.frame(port, f);
-            };
-            if pending[timer] & flag != 0 {
-                let at = read(t + CR0 + 4 * ch);
-                write(t + IR, flag);
-                let next = if rising[port] { 6 } else { 5 };
-                write(
-                    t + CCR,
-                    (read(t + CCR) & !(7 << (3 * ch))) | (next << (3 * ch)),
-                );
-                if diagnostic {
-                    max_delay[port] = max_delay[port].max(read(t + TC).wrapping_sub(at));
-                }
-                rx[port].edge(at, rising[port], &mut emit);
-                rising[port] = !rising[port];
-            }
-            rx[port].advance(now[timer], emit);
-        }
+        receivers.poll(now, diagnostic, |port, f| {
+            panel.observe(port);
+            out.frame(port, f);
+        });
         out.pump();
         panel.poll();
     }
@@ -136,12 +166,12 @@ pub fn stream(diagnostic: bool, panel: &mut super::super::panel::Panel, request:
     {
         out.result(r.port, b"STOPPED");
     }
-    drop(capture);
+    drop(receivers.capture);
     while out.len != 0 {
         out.pump();
     }
     if diagnostic {
-        for (port, r) in rx.iter().enumerate() {
+        for (port, r) in receivers.rx.iter().enumerate() {
             let s = &r.stats;
             send(&[b'D', b' ', b'0' + port as u8]);
             for n in [
@@ -154,7 +184,7 @@ pub fn stream(diagnostic: bool, panel: &mut super::super::panel::Panel, request:
                 s.bad_trailer,
                 u32::from(r.partial()),
                 out.dropped[port],
-                max_delay[port],
+                receivers.max_delay[port],
                 u32::from(s.last_received_crc),
                 u32::from(s.last_expected_crc),
             ] {

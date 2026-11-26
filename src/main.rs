@@ -118,54 +118,75 @@ mod board {
     }
 }
 
+fn next_command(mut tick: impl FnMut()) -> Command {
+    loop {
+        board::train(&mut tick);
+        let mut decoder = Decoder::default();
+        while let Ok(byte) = board::receive(&mut tick) {
+            if let Some(cmd) = decoder.push(byte) {
+                return cmd;
+            }
+            if byte == b'\n' {
+                break;
+            }
+        }
+    }
+}
+
 #[unsafe(no_mangle)]
 extern "C" fn firmware_main() -> ! {
     board::init();
     let mut panel = board::panel::Panel::init();
     let mut probe: Option<board::probe::Capture> = None;
     loop {
-        board::train(&mut || panel.poll());
-        let mut decoder = Decoder::default();
-        while let Ok(byte) = board::receive(&mut || panel.poll()) {
-            match decoder.push(byte) {
-                Some(Command::Identify) => board::send(IDENTITY),
-                Some(Command::Panel) => {
+        // Exactly one owner of the capture timers: background, edge probe, or stream.
+        let mut idle = probe.is_none().then(board::probe::Receivers::start);
+        let command = loop {
+            let command = next_command(|| {
+                if let Some(bus) = &mut idle {
+                    bus.idle(&mut panel);
+                }
+                panel.poll();
+            });
+            match command {
+                Command::Identify => board::send(IDENTITY),
+                Command::Panel => {
                     panel.poll();
                     panel.report();
                 }
-                Some(Command::LedTest) => {
+                Command::LedTest => {
                     panel.start_test();
                     board::send(b"OK LED\r\n");
                 }
-                Some(Command::RxBegin) => {
-                    drop(probe.take());
-                    probe = Some(board::probe::Capture::start());
-                    board::send(b"OK RX\r\n");
-                }
-                Some(Command::RxEnd) => match probe.take() {
-                    Some(capture) => capture.report(),
-                    None => board::send(b"ERR RX-INACTIVE\r\n"),
-                },
-                Some(cmd @ (Command::RxStream | Command::RxDiagnostics)) => {
-                    drop(probe.take());
-                    board::probe::stream(cmd == Command::RxDiagnostics, &mut panel, None);
-                }
-                Some(Command::Send(request)) => {
-                    drop(probe.take());
-                    board::probe::stream(true, &mut panel, Some(&request));
-                }
-                Some(Command::BadSend) => board::send(b"ERR TX\r\n"),
-                Some(Command::EnterIsp) => {
-                    drop(probe.take());
-                    panel.stop();
-                    board::send(ISP_ACK);
-                    board::enter_isp();
-                }
-                None => {}
+                Command::BadSend => board::send(b"ERR TX\r\n"),
+                Command::RxEnd if probe.is_none() => board::send(b"ERR RX-INACTIVE\r\n"),
+                other => break other,
             }
-            if byte == b'\n' {
-                break;
+        };
+        drop(idle);
+        let previous = probe.take();
+        if command == Command::RxEnd {
+            if let Some(capture) = previous {
+                capture.report();
             }
+            continue;
+        }
+        drop(previous);
+        match command {
+            Command::RxBegin => {
+                probe = Some(board::probe::Capture::start());
+                board::send(b"OK RX\r\n");
+            }
+            Command::RxStream | Command::RxDiagnostics => {
+                board::probe::stream(command == Command::RxDiagnostics, &mut panel, None);
+            }
+            Command::Send(request) => board::probe::stream(true, &mut panel, Some(&request)),
+            Command::EnterIsp => {
+                panel.stop();
+                board::send(ISP_ACK);
+                board::enter_isp();
+            }
+            _ => unreachable!(),
         }
     }
 }

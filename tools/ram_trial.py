@@ -52,6 +52,8 @@ async def main():
     parser.add_argument("ram_bin", type=Path)
     parser.add_argument("--probe", action="store_true", help="observe receiver inputs before returning to ISP")
     parser.add_argument("--panel-test", action="store_true", help="cycle and read back each panel LED")
+    parser.add_argument("--panel-after", type=int, metavar="SECONDS",
+                        help="leave UART idle, then read the bus activity LEDs before any capture")
     parser.add_argument("--frames", type=int, metavar="SECONDS", help="monitor live frames from SRAM")
     parser.add_argument("--diagnostics", action="store_true", help="verify receiver totals with --frames")
     parser.add_argument("--tx", nargs=2, metavar=("BUS", "HEX"), help="send one native frame during --frames")
@@ -60,6 +62,8 @@ async def main():
     args = parser.parse_args()
     if args.frames is not None and args.frames < 1:
         parser.error("--frames must be positive")
+    if args.panel_after is not None and args.panel_after < 1:
+        parser.error("--panel-after must be positive")
     if (args.diagnostics or args.tx) and not args.frames:
         parser.error("--diagnostics and --tx require --frames")
     image = args.ram_bin.read_bytes()
@@ -72,6 +76,9 @@ async def main():
         await start_image(port, image)
         await asyncio.sleep(0.1)  # The application resets the UART FIFO during startup.
         try:
+            if args.panel_after:
+                await asyncio.sleep(args.panel_after)
+                await panel(port)
             if args.panel_test:
                 await panel(port, test=True)
             if args.probe:
