@@ -192,6 +192,15 @@ changed Away by one degE step, and restored it. Each update produced a
 report; separate addressed requests confirmed both the changed value and
 the complete original block after restoration. No flash write was needed.
 
+To exercise the local driver and capture input on every port, use
+`board.py echo-test PORT` (one port: `--bus N`) or `ram_trial.py --echo-test`.
+This sends a block read request with an empty target-node bitmap, once on
+each selected line. Success requires a matching body, CRC, physical port,
+valid trailer and transmitter result. A peer ACK is reported separately
+and is not required for a port with no peer. A local echo does not verify
+field wiring or the receiver in an external device. Normal `send` still
+requires an ACK.
+
 ### Front panel
 
 The J1196J initializer copies the port index table (flash 0xc4a4) to

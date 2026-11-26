@@ -10,7 +10,7 @@ import binascii
 from pathlib import Path
 
 from backup import check_part, expect, line, read_page, send, synchronize
-from board import monitor, panel, probe, request
+from board import echo_test, monitor, panel, probe, request
 from check_image import check
 from port import connect
 
@@ -51,6 +51,8 @@ async def main():
     parser.add_argument("port")
     parser.add_argument("ram_bin", type=Path)
     parser.add_argument("--probe", action="store_true", help="observe receiver inputs before returning to ISP")
+    parser.add_argument("--echo-test", action="store_true",
+                        help="transmit one no-target read request and verify the echo on each bus")
     parser.add_argument("--panel-test", action="store_true", help="cycle and read back each panel LED")
     parser.add_argument("--panel-after", type=int, metavar="SECONDS",
                         help="leave UART idle, then read the bus activity LEDs before any capture")
@@ -83,6 +85,8 @@ async def main():
                 await panel(port, test=True)
             if args.probe:
                 await probe(port)
+            if args.echo_test:
+                await echo_test(port, range(5))
             if args.frames:
                 tx = (int(args.tx[0]), bytes.fromhex(args.tx[1])) if args.tx else None
                 await monitor(port, args.frames, diagnostics=args.diagnostics, tx=tx)

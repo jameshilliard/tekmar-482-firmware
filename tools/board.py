@@ -110,7 +110,28 @@ def tx_command(bus, data):
     return f"A\nTX {bus} {data.hex()} {checksum:04x}\n".encode("ascii")
 
 
-async def monitor(port, seconds: float, *, diagnostics=False, tx=None, on_record=None) -> None:
+# Native BlockRequest for block 5; no target node bits set, no settings written.
+ECHO_QUERY = bytes.fromhex("6d70000705000000000000")
+
+
+class Transmission(NamedTuple):
+    result: tuple[int, str] | None
+    echoes: set[bytes]
+
+    def verify(self, bus, *, require_peer=True):
+        if self.result == (bus, "ACK"):
+            expected = b"A"
+        elif self.result == (bus, "NOACK") and not require_peer:
+            expected = b"N"
+        else:
+            raise RuntimeError(f"transmit not acknowledged or incomplete: {self.result}")
+        if expected not in self.echoes:
+            raise RuntimeError("missing CRC-verified echo with matching trailer on the selected port")
+        return expected == b"A"
+
+
+async def capture(port, seconds: float, *, diagnostics=False, tx=None, on_record=None,
+                  stop_on_result=False) -> Transmission:
     await identify(port)
     audit = FrameAudit(require_stats=diagnostics or tx is not None)
     command, greeting = ((b"A\nRX-DIAG\n", b"OK DIAG\r\n") if diagnostics else
@@ -120,13 +141,13 @@ async def monitor(port, seconds: float, *, diagnostics=False, tx=None, on_record
     await port.write(command)
     if await port.readline(64) != greeting:
         raise RuntimeError("frame stream did not start")
-    echoed = False
+    echoes = set()
     def accept(line):
-        nonlocal echoed
         print(audit.record(line), flush=True)
         if tx is not None and line.startswith(b"F "):
             _, bus, _, _, status, body = line.split()
-            echoed |= int(bus) == tx[0] and status == b"A" and bytes.fromhex(body.decode()) == tx[1]
+            if int(bus) == tx[0] and bytes.fromhex(body.decode()) == tx[1]:
+                echoes.add(status)
         if on_record is not None:
             on_record(line)
     loop = asyncio.get_running_loop()
@@ -138,6 +159,8 @@ async def monitor(port, seconds: float, *, diagnostics=False, tx=None, on_record
             except asyncio.TimeoutError:
                 break
             accept(line)
+            if stop_on_result and audit.tx_result is not None:
+                break
     finally:
         await port.write(b"\n")
         deadline = loop.time() + 4
@@ -147,27 +170,49 @@ async def monitor(port, seconds: float, *, diagnostics=False, tx=None, on_record
                 audit.finish(dropped)
                 break
             accept(line)
-    if tx is not None and audit.tx_result != (tx[0], "ACK"):
-        raise RuntimeError(f"transmit not acknowledged: {audit.tx_result}")
-    if tx is not None and not echoed:
-        raise RuntimeError("missing CRC-verified, acknowledged echo on the selected port")
+    return Transmission(audit.tx_result, echoes)
+
+
+async def monitor(port, seconds: float, *, diagnostics=False, tx=None, on_record=None) -> None:
+    evidence = await capture(port, seconds, diagnostics=diagnostics, tx=tx, on_record=on_record)
+    if tx is not None:
+        evidence.verify(tx[0])
+
+
+async def echo_test(port, buses):
+    failures = []
+    for bus in buses:
+        evidence = await capture(port, 8, tx=(bus, ECHO_QUERY), stop_on_result=True)
+        try:
+            peer = evidence.verify(bus, require_peer=False)
+        except RuntimeError as error:
+            failures.append(f"port {bus}: {error}")
+        else:
+            print(f"Port {bus}: transmit/receive echo verified; peer ACK {'seen' if peer else 'not seen'}.")
+    if failures:
+        raise RuntimeError("; ".join(failures))
 
 
 async def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["identify", "probe", "frames", "diagnostics", "send", "panel", "led-test", "enter-isp"])
+    parser.add_argument("action", choices=["identify", "probe", "echo-test", "frames", "diagnostics", "send", "panel", "led-test", "enter-isp"])
     parser.add_argument("port", help="local serial device (requires exclusive access)")
     parser.add_argument("--baud", type=int, default=9600)
     parser.add_argument("--seconds", type=int, default=30, help="frame capture duration")
     parser.add_argument("--tx", nargs=2, metavar=("BUS", "HEX"), help="one native frame, for send only")
+    parser.add_argument("--bus", type=int, choices=range(5), help="test just this physical port with echo-test")
     args = parser.parse_args()
     if args.seconds < 1:
         parser.error("--seconds must be positive")
     if (args.action == "send") != bool(args.tx):
         parser.error("send requires --tx BUS HEX")
+    if args.bus is not None and args.action != "echo-test":
+        parser.error("--bus is only for echo-test")
     try:
         async with connect(args.port, args.baud) as port:
-            if args.action == "send":
+            if args.action == "echo-test":
+                await echo_test(port, range(5) if args.bus is None else [args.bus])
+            elif args.action == "send":
                 await monitor(port, args.seconds, tx=(int(args.tx[0]), bytes.fromhex(args.tx[1])))
             elif args.action in ("frames", "diagnostics"):
                 await monitor(port, args.seconds, diagnostics=args.action == "diagnostics")

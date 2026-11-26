@@ -14,6 +14,7 @@ from pathlib import Path
 HELPER = Path(__file__).resolve().parents[1] / "tools/board.py"
 sys.path.insert(0, str(HELPER.parent))
 from frames import describe
+from board import Transmission
 
 
 class HelperTest(unittest.TestCase):
@@ -117,6 +118,30 @@ class HelperTest(unittest.TestCase):
                 self.assertEqual(proc.returncode, 0 if echoed else 1, err)
                 if not echoed:
                     self.assertIn(b"missing CRC-verified", err)
+
+    def test_unpopulated_port_echo(self):
+        master, proc = self.start_helper("echo-test", "--bus", "4")
+        self.expect(master, b"A\nID?\n")
+        os.write(master, b"TEKMAR-482-DEV\r\n")
+        self.expect(master, b"A\nTX 4 6d70000705000000000000 2d3c\n")
+        os.write(master, b"OK TX\r\nF 4 00010000 2d3f N 6d70000705000000000000\r\nT 4 NOACK\r\n")
+        self.expect(master, b"\n")
+        for port in range(5):
+            n = int(port == 4)
+            counts = (40*n, n, 0, 0, 0, n, 0, 0, 0, 16, 0, 0)
+            os.write(master, (f"D {port}" + "".join(f" {v:08x}" for v in counts) + "\r\n").encode())
+        os.write(master, b"END 00000000\r\n")
+        out, err = proc.communicate(timeout=3)
+        self.assertEqual(proc.returncode, 0, err)
+        self.assertIn(b"Port 4: transmit/receive echo verified; peer ACK not seen", out)
+
+    def test_noack_is_not_a_successful_send(self):
+        with self.assertRaises(RuntimeError):
+            Transmission((2, "NOACK"), {b"N"}).verify(2)
+        for result, echoes in [((1, "ACK"), {b"A"}), ((2, "BAD-END"), {b"M"}),
+                               ((2, "NOACK"), {b"A"}), (None, {b"N"})]:
+            with self.subTest(result=result), self.assertRaises(RuntimeError):
+                Transmission(result, echoes).verify(2, require_peer=False)
 
 if __name__ == "__main__":
     unittest.main()
