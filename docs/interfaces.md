@@ -285,6 +285,11 @@ pass. The SRAM trial returns to the installed dev image on either outcome.
 | Five bus LEDs and Test LED | `--panel-after 25 --panel-test` reads idle activity, then follows the six individual output pin levels. | Watch Bus 0 through 4, then Test. Pin readback alone cannot detect a failed lamp or a swapped label. |
 | Test button and Reporting DIP | On the running panel build, use `board.py panel PORT --check-input test` or `--check-input dip`. | An operator must act on the physical control. Counters alone do not pass either test. |
 
+In a witnessed SRAM trial, Power stayed lit and both RS-232 activity lamps
+flickered during upload. One physical Test press and release produced one
+new press count and the visible sequence Bus 0, 1, 2, 3, 4, then Test.
+All six corresponding pin levels were verified over UART.
+
 The [482 installation manual, pp. 8-10](https://www.watts.com/dfsmedia/0533dbba17714b1ab581ab07a4cbb521/42923-source/638820695670000000/482-d-09.pdf)
 identifies DTR as programming-only, and the DIP as the stock reporting
 power-on default. Neither is an application flow-control signal.
