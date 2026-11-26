@@ -2,8 +2,8 @@
 
 Both firmware images start in Normal mode. At 9600 baud, 8N1, a host
 can send a complete ordinary TPCK frame without a training command.
-Normal mode implements gateway identification, device inventory and device
-identity. See [Normal method coverage](normal-mode.md) for supported services
+Normal mode implements gateway identification, device inventory, device
+identity and thermostat telemetry. See [Normal method coverage](normal-mode.md) for supported services
 and remaining gaps. Select Raw mode to exchange native frames. The NXP ROM
 ISP uses its own handshake after an explicit handoff.
 

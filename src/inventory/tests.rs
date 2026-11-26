@@ -141,3 +141,105 @@ fn deletes_and_address_changes_do_not_retain_stale_entries() {
         0
     );
 }
+
+#[test]
+fn demand_is_not_the_configured_mode_and_read_only_updates_echo_actual_values() {
+    let mut inv = Inventory::new();
+    for (id, body, temp, demand) in [
+        (0x36f, &[32, 3, 0, 0x35, 6, 0, 0, 0][..], 0x635, 3),
+        (0x36f, &[32, 2, 0, 0, 0x40, 0, 0, 0], 0xffff, 0),
+        (0x377, &[0, 0, 3, 0, 0x34, 6, 3, 0, 0, 0, 0, 0, 0], 0x634, 1),
+        (
+            0x377,
+            &[0, 0, 1, 0, 0, 0x80, 3, 0, 0, 0, 0, 0, 0],
+            0xffff,
+            3,
+        ),
+        (0x22f, &[0, 0x1c, 0, 0, 0, 0xc0, 0, 0, 0, 0, 0], 0xffff, 3),
+        (0x22f, &[0, 0x14, 0, 0, 0x22, 6, 0, 0, 0, 0, 0], 0x622, 1),
+    ] {
+        observe(&mut inv, 0, 0, 24, id, body, 0);
+        let r = call(&mut inv, 0x137, 0, &[1, 0, 0xaa, 0x55], 0).unwrap();
+        assert_eq!(r.payload()[0], 3);
+        assert_eq!(r.payload()[7..], u16::to_le_bytes(temp));
+        assert_eq!(
+            call(&mut inv, 0x12f, 1, &[1, 0], 0).unwrap().payload()[7],
+            demand
+        );
+    }
+    assert!(!inv.has_reports());
+}
+
+#[test]
+fn floor_source_follows_observed_configuration_and_resets_on_expiration() {
+    let mut inv = Inventory::new();
+    observe(&mut inv, 0, 0, 24, 0x36f, &[0, 0, 0, 0x11, 6, 0, 0, 0], 1);
+    let q = observe(&mut inv, 0, 0, 24, 0x26f, &[0, 0, 0x33, 6], 2).unwrap();
+    assert_eq!(q[4], 13);
+    let value = |inv: &mut Inventory, m, now| {
+        let r = call(inv, m, 1, &[1, 0], now).unwrap();
+        u16::from_le_bytes(r.payload()[7..].try_into().unwrap())
+    };
+    assert_eq!(value(&mut inv, 0x138, 2), 0xffff);
+    for (mask, sensors, expected_room, expected_floor) in [
+        (16, &[2][..], 0x633, 0x633),
+        (17, &[1, 0, 0, 0, 2], 0x611, 0x633),
+        (1, &[1], 0x611, 0xffff),
+    ] {
+        let mut b = [0; 8];
+        b[0] = 13;
+        b[2] = mask;
+        b[3..3 + sensors.len()].copy_from_slice(sensors);
+        observe(&mut inv, 0, 0, 24, 0x2e7, &b[..3 + sensors.len()], 3);
+        assert_eq!(value(&mut inv, 0x137, 3), expected_room);
+        assert_eq!(value(&mut inv, 0x138, 3), expected_floor);
+    }
+    observe(&mut inv, 0, 0, 24, 0x323, &[0, 0, 46, 0, 0, 0], 160);
+    assert_eq!(value(&mut inv, 0x137, 160), 0xffff);
+    assert_eq!(
+        call(&mut inv, 0x150, 1, &[1, 0, 0], 160).unwrap().payload()[7],
+        46
+    );
+    assert!(call(&mut inv, 0x150, 0, &[1, 0, 99], 160).is_none());
+}
+
+#[test]
+fn reports_keep_latest_observation_per_field_with_explicit_disable_and_no_bus_writes() {
+    let mut inv = Inventory::new();
+    observe(&mut inv, 3, 45, 31, 0x3d7, &[5, 0x82], 0);
+    assert!(!inv.has_reports());
+    assert_eq!(
+        call(&mut inv, 0x107, 0, &[0, 0], 0).unwrap().payload(),
+        &[3, 7, 1, 0, 0, 5, 0x82]
+    );
+    assert_eq!(
+        call(&mut inv, 0x10f, 0, &[3], 0).unwrap().payload(),
+        &[3, 15, 1, 0, 0, 1]
+    );
+    call(&mut inv, 0x16f, 0, &[1], 0);
+    for flags in [3, 5] {
+        observe(&mut inv, 0, 0, 24, 0x36f, &[0, flags, 0, 1, 6, 0, 0, 0], 1);
+    }
+    observe(&mut inv, 3, 45, 31, 0x3d7, &[0, 0], 1);
+    assert_eq!(
+        inv.next_report(1).unwrap().payload(),
+        &[2, 7, 1, 0, 0, 0, 0]
+    );
+    for (m, body) in [
+        (0x37, &[1, 0, 1, 6][..]),
+        (0x2f, &[1, 0, 0]),
+        (0x77, &[1, 0, 1]),
+    ] {
+        let r = inv.next_report(1).unwrap();
+        assert_eq!(r.payload()[..5], [2, m, 1, 0, 0]);
+        assert_eq!(&r.payload()[5..], body);
+    }
+    assert!(!inv.has_reports());
+    observe(&mut inv, 0, 0, 24, 0x36f, &[0; 8], 2);
+    call(&mut inv, 0x10f, 0, &[0], 2);
+    assert!(!inv.has_reports());
+    call(&mut inv, 0x10f, 0, &[1], 2);
+    assert!(inv.next_report(2).is_none());
+    observe(&mut inv, 0, 0, 24, 0x36f, &[0; 8], 3);
+    assert!(inv.next_report(154).is_none());
+}

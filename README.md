@@ -18,9 +18,11 @@ Rustup selects stable Rust 1.100.0 and supplies matching rust-src. The
 needs Cargo to build core from source. This still uses the unstable
 `-Zbuild-std=core` Cargo option: the Makefile sets `RUSTC_BOOTSTRAP=1` only
 on cross-build and cross-Clippy commands, not globally. The production
-runtime uses the Embassy revision pinned in Cargo.lock.
+runtime uses the Embassy revision pinned in Cargo.lock. The Rust application
+uses Thumb-1 to fit the same dispatcher in flash and in a RAM trial. Reset
+vectors, interrupt masking and the ROM handoff use ARM instructions.
 `make image` alone builds the ELF, binary and Intel HEX under
-`target/armv4t-none-eabi/release/tekmar-482-firmware{,.bin,.hex}`. The linker
+`target/thumbv4t-none-eabi/release/tekmar-482-firmware{,.bin,.hex}`. The linker
 limits flash to the first 64 KiB. The build checks the LPC vector checksum,
 ARM entry addresses, code read protection word, size and HEX round trip.
 `make check` also exercises the parser and runs the built image against a
@@ -46,7 +48,7 @@ slots and transmit edges are driven from the capture timers, not from
 Embassy task delays.
 
 `make ram-trial` builds the same prototype linked to run at SRAM address
-`0x40001000`. Its binary is under `target/ram-trial/armv4t-none-eabi/release/`.
+`0x40001000`. Its binary is under `target/ram-trial/thumbv4t-none-eabi/release/`.
 This is **not a flash image**. On an unprotected part, after verifying a backup,
 ISP can write the binary to RAM, read it back for comparison, and use Go in ARM
 mode at `0x40001000`. This exercises the protocol on real hardware without any
@@ -63,7 +65,7 @@ erases or programs the device.
 
 After the backup finishes successfully, the ROM remains synchronized at 9600
 with echo off. In that same session (no power cycle), run
-`uv run --script tools/ram_trial.py PORT target/ram-trial/armv4t-none-eabi/release/tekmar-482-firmware.bin`.
+`uv run --script tools/ram_trial.py PORT target/ram-trial/thumbv4t-none-eabi/release/tekmar-482-firmware.bin`.
 The helper rejects flash-linked images, checks the part ID, uploads to SRAM
 only, reads it back, and runs the verified bytes. It checks the application
 identity, requests ISP and checks the part ID again in the new ROM session.

@@ -1,5 +1,4 @@
 //! Thread-mode Embassy runtime for the single-core ARM7. No VIC source is enabled.
-use core::arch::asm;
 use core::cell::{Cell, RefCell};
 use core::task::Waker;
 use critical_section::{CriticalSection, Mutex};
@@ -13,15 +12,16 @@ critical_section::set_impl!(Arm7);
 
 unsafe impl critical_section::Impl for Arm7 {
     unsafe fn acquire() -> u32 {
-        let saved: u32;
-        unsafe {
-            asm!("mrs {saved}, cpsr", "orr {tmp}, {saved}, #0xc0", "msr cpsr_c, {tmp}",
-                 saved = out(reg) saved, tmp = out(reg) _, options(nostack, preserves_flags));
+        unsafe extern "C" {
+            fn arm7_mask_interrupts() -> u32;
         }
-        saved
+        unsafe { arm7_mask_interrupts() }
     }
     unsafe fn release(saved: u32) {
-        unsafe { asm!("msr cpsr_c, {}", in(reg) saved, options(nostack, preserves_flags)) };
+        unsafe extern "C" {
+            fn arm7_restore_interrupts(saved: u32);
+        }
+        unsafe { arm7_restore_interrupts(saved) }
     }
 }
 

@@ -62,9 +62,10 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
     static INVENTORY: static_cell::ConstStaticCell<Inventory> =
         static_cell::ConstStaticCell::new(Inventory::new());
     let inventory = INVENTORY.take();
+    inventory.set_reporting(panel.borrow().report()[0] & 1 != 0);
     let mut bus = Receivers::start();
     let mut decoder = tpck::Decoder::default();
-    let mut out = Output::new();
+    let out = Output::take();
     let mut baud = Acquisition::default();
     let mut raw = false;
     let mut reboot = false;
@@ -315,6 +316,14 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                 }
                 Ok(None) => {}
             }
+        }
+        if !raw
+            && !reboot
+            && out.can_report()
+            && inventory.has_reports()
+            && let Some(report) = inventory.next_report(Instant::now().as_secs() as u32)
+        {
+            out.enqueue(Kind::Control, tpck::TRPC, report.payload());
         }
         match out.pump() {
             Some(Kind::Result(p)) => occupied[p as usize] = false,

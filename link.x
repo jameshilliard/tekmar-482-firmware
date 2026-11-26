@@ -4,8 +4,9 @@ MEMORY {
     IMAGE (rx) : ORIGIN = DEFINED(__ram_trial) ? 0x40001000 : 0,
                  LENGTH = DEFINED(__ram_trial) ? 24K : 64K
     /* Leave the bottom 0x200 and top 0x120 bytes to the bootloader. */
-    RAM (rw) : ORIGIN = DEFINED(__ram_trial) ? 0x40007000 : 0x40000200,
-               LENGTH = DEFINED(__ram_trial) ? 0xee0 : 0x7ce0
+    LOW (rw) : ORIGIN = 0x40000200, LENGTH = 0xe00
+    RAM (rw) : ORIGIN = DEFINED(__ram_trial) ? 0x40007000 : 0x40001000,
+               LENGTH = DEFINED(__ram_trial) ? 0xee0 : 0x6ee0
     AUX (rw) : ORIGIN = 0x7fd00000, LENGTH = 8K
 }
 SECTIONS {
@@ -24,6 +25,12 @@ SECTIONS {
         __data_end = .;
     } > RAM AT > IMAGE
     __data_load = LOADADDR(.data);
+    .low_bss (NOLOAD) : ALIGN(4) {
+        __low_start = .;
+        *(.low_bss)
+        . = ALIGN(4);
+        __low_end = .;
+    } > LOW
     .bss (NOLOAD) : ALIGN(4) {
         __bss_start = .;
         *(.bss .bss.* COMMON)

@@ -25,12 +25,18 @@ pub(super) struct Output {
 }
 
 impl Output {
-    pub(super) fn new() -> Self {
-        Self {
-            records: Vec::new(),
-            offset: 0,
-            drops: [[0; 2]; 5],
-        }
+    pub(super) fn take() -> &'static mut Self {
+        #[unsafe(link_section = ".low_bss")]
+        static QUEUE: static_cell::ConstStaticCell<Output> =
+            static_cell::ConstStaticCell::new(Output {
+                records: Vec::new(),
+                offset: 0,
+                drops: [[0; 2]; 5],
+            });
+        QUEUE.take()
+    }
+    pub(super) fn can_report(&self) -> bool {
+        self.records.len() < 2
     }
     pub(super) fn can_receive(&self) -> bool {
         self.records.len() < 8

@@ -42,6 +42,7 @@ def run(path, ram, fast=False):
     if not ram:
         cpu.mem_map(0, 0x10000)
     cpu.mem_map(0x40000000, 0x8000)
+    cpu.mem_write(0x40000200, b"\xa5" * 0xe00)
     cpu.mem_write(base, path.read_bytes())
     for addr in (0x7FFFF000, 0xE002C000, 0xE01FC000, 0xE0014000):
         cpu.mem_map(addr, 0x1000)
@@ -164,6 +165,14 @@ def run(path, ram, fast=False):
     overlap = False
     phase = "capture"
 
+    def inject(body):
+        wire = protected_bits(body) + "0" * 18
+        start = clock + 30_000
+        for i, bit in enumerate(wire):
+            if i == 0 or bit != wire[i - 1]:
+                edges.append((start + i * 2500, 0, bit == "1"))
+        return start + len(wire) * 2500
+
     def reply(kind, data):
         nonlocal phase, overlap, inventory_at
         actual.append((kind, data))
@@ -171,13 +180,7 @@ def run(path, ram, fast=False):
             method = int.from_bytes(data[1:5], "little")
             if method == 0x544BF004:
                 # Product block at port 0, subnet 0, node 24 (tHA address 1).
-                body = bytes.fromhex("6e700609 00003f 828301 2301 04")
-                wire = protected_bits(body) + "0" * 18
-                start = clock + 30_000
-                for i, bit in enumerate(wire):
-                    if i == 0 or bit != wire[i - 1]:
-                        edges.append((start + i * 2500, 0, bit == "1"))
-                inventory_at = start + len(wire) * 2500
+                inventory_at = inject(bytes.fromhex("6e700609 00003f 828301 2301 04"))
             elif method == 0x167 and data[5:] == bytes(2):
                 assert actual[-2] == (6, bytes.fromhex("04670100000100"))
                 call(0x197, bytes.fromhex("010000000000"))
@@ -185,6 +188,17 @@ def run(path, ram, fast=False):
             elif method == 0x19f:
                 assert actual[-2] == (6, bytes.fromhex("0497010000010082830100"))
                 assert data[5:] == struct.pack("<HI", 1, 29104)
+                call(0x10f, b"\x01", True)
+            elif method == 0x10f and data[5:] == b"\x01":
+                inject(bytes.fromhex("76f00608 2003000a06000000"))
+            elif method == 0x12f and data[0] == 2:
+                assert data[5:] == bytes.fromhex("010003")
+                assert (6,bytes.fromhex("023701000001000a06")) in actual
+                call(0x10f,b"\0",True)
+            elif method == 0x10f and data[5:] == b"\0":
+                call(0x137,b"\x01\0\xff\xff",True)
+            elif method == 0x137 and data[0] == 3:
+                assert data[5:] == bytes.fromhex("01000a06")
                 extension(2, b"\x01", True)
             elif method == 0x544BF002 and data[5:] == bytes([1]):
                 plant_inputs()

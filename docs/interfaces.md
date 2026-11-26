@@ -37,7 +37,7 @@ For a verified SRAM trial from an installed bridge with update support:
 ```sh
 make ram-trial
 uv run --script tools/ram_trial.py "$PORT" \
-  target/ram-trial/armv4t-none-eabi/release/tekmar-482-firmware.bin \
+  target/ram-trial/thumbv4t-none-eabi/release/tekmar-482-firmware.bin \
   --from-app --frames 60
 ```
 
@@ -103,7 +103,7 @@ For a witnessed test from the installed dev firmware:
 
 ```sh
 uv run --script tools/ram_trial.py "$PORT" \
-  target/ram-trial/armv4t-none-eabi/release/tekmar-482-firmware.bin \
+  target/ram-trial/thumbv4t-none-eabi/release/tekmar-482-firmware.bin \
   --from-app --check-input test --input-timeout 90
 ```
 

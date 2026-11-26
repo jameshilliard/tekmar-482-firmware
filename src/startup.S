@@ -33,14 +33,37 @@ _start:
     ldr r1, [r0]
     orr r1, r1, #0x80000000
     str r1, [r0]
+    mov r3, #0
+    ldr r1, =__low_start
+    ldr r2, =__low_end
+3:  cmp r1, r2
+    strlo r3, [r1], #4
+    blo 3b
     ldr r1, =__bss_start
     ldr r2, =__bss_end
-    mov r3, #0
 2:  cmp r1, r2
     strlo r3, [r1], #4
     blo 2b
-    b firmware_main
+    ldr r0, =firmware_main
+    bx r0
 .size _start, .-_start
+
+/* Thumb-1 has no CPSR access. These leaves return to either instruction set. */
+.global arm7_mask_interrupts
+.type arm7_mask_interrupts,%function
+arm7_mask_interrupts:
+    mrs r0, cpsr
+    orr r1, r0, #0xc0
+    msr cpsr_c, r1
+    bx lr
+.size arm7_mask_interrupts, .-arm7_mask_interrupts
+
+.global arm7_restore_interrupts
+.type arm7_restore_interrupts,%function
+arm7_restore_interrupts:
+    msr cpsr_c, r0
+    bx lr
+.size arm7_restore_interrupts, .-arm7_restore_interrupts
 
 .global rom_iap
 .type rom_iap,%function

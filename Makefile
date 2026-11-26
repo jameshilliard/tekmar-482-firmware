@@ -1,5 +1,5 @@
-ELF := target/armv4t-none-eabi/release/tekmar-482-firmware
-RAM_ELF := target/ram-trial/armv4t-none-eabi/release/tekmar-482-firmware
+ELF := target/thumbv4t-none-eabi/release/tekmar-482-firmware
+RAM_ELF := target/ram-trial/thumbv4t-none-eabi/release/tekmar-482-firmware
 OBJCOPY ?= arm-none-eabi-objcopy
 
 .PHONY: image ram-trial check
@@ -19,7 +19,7 @@ ram-trial:
 check: image ram-trial
 	cargo fmt --check
 	cargo test --locked --lib
-	RUSTC_BOOTSTRAP=1 cargo clippy --locked --release --target armv4t-none-eabi -Zbuild-std=core -- -D warnings
+	RUSTC_BOOTSTRAP=1 cargo clippy --locked --release --target thumbv4t-none-eabi -Zbuild-std=core -- -D warnings
 	uv run --script tests/host.py
 	python3 tests/payload_test.py
 	uv run --script tests/backup_test.py

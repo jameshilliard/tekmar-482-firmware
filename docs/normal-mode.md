@@ -13,13 +13,15 @@ native message in Raw mode does not implement its tRPC services in Normal mode.
 | 167 DeviceInventory | Full walk, exact lookup, clear one, clear all. No unsolicited inventory report. |
 | 197 DeviceType, 19F DeviceVersion | Read addressed identity from block 0. Ignore writes. |
 | 15F TakingAddress | Native address changes update the cache. Serial report not yet implemented. |
-| 107 NetworkError, 10F ReportingState, 117 OutdoorTemp | Not implemented. |
-| 11F DeviceAttributes, 127 ModeSetting, 12F ActiveDemand | Not implemented. |
-| 137 CurrentTemperature, 138 CurrentFloorTemperature | Not implemented. |
+| 107 NetworkError | Request and Update return the current network error word. Reports follow native 3D7, including clearance. |
+| 10F ReportingState | Request and Update. Power-on default comes from the Reporting DIP. Test-button reporting notifications are not yet implemented. |
+| 117 OutdoorTemp, 11F DeviceAttributes, 127 ModeSetting | Not implemented. |
+| 12F ActiveDemand, 137 CurrentTemperature, 138 CurrentFloorTemperature | Request, read-only Update echo and Report. Source and availability rules below. |
 | 13D SetpointGroupEnable, 13E SetpointDevice | Not implemented. The documented melt/storm controls are group operations, not discovered device addresses. |
 | 13F HeatSetpoint, 147 CoolSetpoint, 14F SlabSetpoint, 157 FanPercent | Not implemented. |
-| 150 RelativeHumidity, 151 HumidityMax, 152 HumidityMin | Not implemented. |
-| 16F SetbackEnable, 177 SetbackState, 17F SetbackEvents | Not implemented. These are distinct from the native weekly schedule tables. |
+| 150 RelativeHumidity | Request and Report from RHReport. Update is ignored. |
+| 151 HumidityMax, 152 HumidityMin, 17F SetbackEvents | Not implemented. |
+| 16F SetbackEnable, 177 SetbackState | Read or set the gateway enable flag; read the active setback and receive reports when enabled. Per-slot setpoint operations are not yet implemented. |
 | 187 FirmwareRevision, 1A7 DateTime | Not implemented. FirmwareBuild is a separate custom extension, not a vendor revision. |
 
 ## Inventory and identity
@@ -48,3 +50,26 @@ qualifying traffic when identity is incomplete and that port is available.
 Repeated observations of the same device are rate-limited to one probe per
 minute. Raw mode does not issue these requests, cache identities or expose
 internal probes as host transmit results.
+
+## Live readings
+
+Air-group member (36F), master (377), and setpoint control (22F, operating
+mode 1) use different offsets for measured temperature and demand. A device
+in heating mode with no demand reports 0, not 1. The master reports heat if
+both heat and cool are demanding. A native RHReport (323) contributes its
+control humidity, not a humidity target.
+
+SlabStatus (26F) supplies the floor reading. The gateway requests sensor
+setup (block 000D) to determine whether that reading also supplies
+CurrentTemperature. Only one floor sensor and four off slots qualifies as
+floor-only. A mixed room/floor configuration keeps both readings separate.
+No confirmed floor configuration means the floor reading is unavailable.
+Native temperature sentinels 4000, 8000 and C000 all become FFFF in tRPC.
+
+The gateway updates its cache even when reporting is off. When enabled,
+qualifying native reports schedule serial reports immediately; the gateway
+does not wait for a periodic poll or synthesize a sample on a quiet bus.
+If the UART is busy, pending samples of the same device and field collapse
+to the latest value. Disabling reporting clears pending samples; explicit
+reads still work. SetbackEnable gates setback reports, not temperature or
+demand. No telemetry Update writes a thermostat setting.

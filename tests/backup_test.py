@@ -68,7 +68,7 @@ class BackupTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_ram_trial_requires_correct_link_and_exact_readback(self):
         image_dir = Path(__file__).resolve().parents[1] / "target"
-        image_path = Path("armv4t-none-eabi/release/tekmar-482-firmware.bin")
+        image_path = Path("thumbv4t-none-eabi/release/tekmar-482-firmware.bin")
         flash = (image_dir / image_path).read_bytes()
         ram = (image_dir / "ram-trial" / image_path).read_bytes()
         untouched = Transcript([])

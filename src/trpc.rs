@@ -26,6 +26,10 @@ pub struct Reply {
 }
 
 impl Reply {
+    pub(crate) fn report(method: u32, body: &[u8]) -> Self {
+        Self::new(2, method, body)
+    }
+
     pub fn payload(&self) -> &[u8] {
         &self.bytes[..self.len]
     }
