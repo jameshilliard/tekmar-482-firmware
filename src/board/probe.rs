@@ -1,5 +1,5 @@
 //! Passive tN4 input capture. No bus output or VIC source is enabled.
-use super::{PCONP, PINSEL0, read, send, write};
+use super::{PCONP, PINSEL0, read, write};
 
 const TIMERS: [usize; 2] = [0xe000_4000, 0xe000_8000];
 const IR: usize = 0;
@@ -25,10 +25,6 @@ pub struct Capture {
 }
 
 impl Capture {
-    pub fn start() -> Self {
-        Self::arm(false)
-    }
-
     fn arm(alternate: bool) -> Self {
         let mut saved = Self {
             mux: read(PINSEL0),
@@ -69,29 +65,10 @@ impl Capture {
         }
         saved
     }
-
-    pub fn finish(self) -> [u32; 8] {
-        for t in TIMERS {
-            write(t + CCR, 0);
-            write(t + TCR, 0);
-        }
-        let elapsed = TIMERS.map(|t| read(t + TC));
-        let flags = TIMERS.map(|t| read(t + IR));
-        let mut seen = 0;
-        let mut stamps = [0; INPUTS.len()];
-        for (port, &(_, timer, channel)) in INPUTS.iter().enumerate() {
-            if flags[timer] & (1 << (4 + channel)) != 0 {
-                seen |= 1 << port;
-                stamps[port] = read(TIMERS[timer] + CR0 + 4 * channel);
-            }
-        }
-        let [a, b, c, d, e] = stamps;
-        [elapsed[0], elapsed[1], seen, a, b, c, d, e]
-    }
 }
 
 mod stream;
-pub use stream::{Receivers, stream};
+pub use stream::run;
 
 impl Drop for Capture {
     fn drop(&mut self) {

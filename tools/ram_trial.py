@@ -93,7 +93,7 @@ async def main():
     parser.add_argument("--panel-after", type=int, metavar="SECONDS",
                         help="leave UART idle, then read the bus activity LEDs before any capture")
     parser.add_argument("--frames", type=int, metavar="SECONDS", help="monitor live frames from SRAM")
-    parser.add_argument("--diagnostics", action="store_true", help="verify receiver totals with --frames")
+    parser.add_argument("--diagnostics", action="store_true", help="read receiver drop counts with --frames")
     parser.add_argument("--ack-port", type=int, choices=range(5),
                         help="acknowledge incoming frames on this port during --frames")
     parser.add_argument("--save-capture", type=Path, help="retain raw UART records from --frames")

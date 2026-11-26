@@ -25,3 +25,4 @@ check: image ram-trial
 	uv run --script tests/backup_test.py
 	uv run --script tests/smoke.py $(ELF).bin
 	uv run --script tests/smoke.py --ram $(RAM_ELF).bin
+	uv run --script tests/smoke.py --ram --fast $(RAM_ELF).bin

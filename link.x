@@ -9,6 +9,7 @@ MEMORY {
 }
 SECTIONS {
     .vectors ORIGIN(IMAGE) : { KEEP(*(.vectors)) } > IMAGE
+    .revision ORIGIN(IMAGE) + 0x100 : { KEEP(*(.revision)) } > IMAGE
     .crp ORIGIN(IMAGE) + 0x1fc : { LONG(0xffffffff) } > IMAGE
     .text : {
         *(.text.startup) *(.text .text.*)

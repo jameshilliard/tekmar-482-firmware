@@ -6,14 +6,13 @@
 
 import argparse
 import asyncio
-import binascii
-import re
+import struct
 import sys
 from contextlib import nullcontext
 from pathlib import Path
 from typing import NamedTuple
 
-from frames import MAX_RECORD_BYTES, FrameAudit, dropped_records
+from frames import describe, encode
 from port import connect
 
 
@@ -27,12 +26,25 @@ class PanelState(NamedTuple):
     test: int
 
 
+async def call(port, method, body=b"", *, update=False, receive=None):
+    method = (0x544bf000 + method).to_bytes(4, "little")
+    await port.write(encode(6, bytes([0 if update else 1]) + method + body))
+    async def wait():
+        while True:
+            kind, data = await port.packet()
+            if kind == 1 and receive is not None:
+                receive(data)
+            if kind != 6 or data[:1] != bytes([3 if update else 4]):
+                continue
+            if data[1:5] == method:
+                return data[5:]
+            if data[1:5] == bytes(4) or (data[1:5] == bytes.fromhex("06f04b54") and data[5:9] == method):
+                raise RuntimeError(f"management request rejected: {data.hex()}")
+    return await asyncio.wait_for(wait(), 5)
+
+
 async def panel_state(port):
-    await port.write(b"A\nPANEL?\n")
-    line = await port.readline(100)
-    if not re.fullmatch(rb"PANEL(?: [0-9a-f]{8}){7}\r\n", line):
-        raise ValueError(f"invalid panel state: {line!r}")
-    state = PanelState(*(int(v, 16) for v in line.split()[1:]))
+    state = PanelState(*struct.unpack("<7I", await call(port, 7)))
     if max(state.boot, state.inputs) > 3 or max(state.pins, state.leds) > 63 or state.test > 1:
         raise ValueError(f"invalid panel flags: {state}")
     if state.leds != state.pins:
@@ -103,8 +115,7 @@ async def panel(port, test=False, *, check_input=None, seconds=60):
         return
     if not test:
         return
-    await port.write(b"A\nLED-TEST\n")
-    if await port.readline() != b"OK LED\r\n":
+    if await call(port, 8, update=True):
         raise RuntimeError("lamp test did not start")
     observed = []
     deadline = asyncio.get_running_loop().time() + 5
@@ -120,153 +131,100 @@ async def panel(port, test=False, *, check_input=None, seconds=60):
     print("LED GPIO readback passed: bus 0, 1, 2, 3, 4, Test.")
 
 
-async def identify(port) -> str:
-    await port.write(b"A\nID?\n")
-    identity = await port.readline(64)
-    if identity != b"TEKMAR-482-DEV\r\n":
-        raise RuntimeError("no development firmware identity; no ISP command sent")
-    return identity.decode("ascii").rstrip()
+async def identify(port):
+    if port.baudrate != 9600:
+        burst = bytes([0xca]) * max(1, port.baudrate // 1250)
+        for preamble in (burst, burst, bytes([0xca])):
+            await port.write(preamble)
+            await asyncio.sleep(0.08)
+    caps = await call(port, 1)
+    if len(caps) != 4 or caps[0] != 1 or caps[1] > 1 or caps[2] != 5:
+        raise RuntimeError("missing binary bridge capabilities")
+    return caps
 
 
-async def request(port, enter_isp: bool) -> None:
-    identity = await identify(port)
+async def request(port, enter_isp):
+    caps = await identify(port)
     if not enter_isp:
-        print(identity)
+        print("Firmware build:", (await call(port, 4)).decode("ascii"))
         return
-    await port.write(b"A\nENTER-ISP\n")
-    if await port.readline(64) != b"OK ISP\r\n":
-        raise RuntimeError("no ISP acknowledgment; gateway state unknown, not retrying")
-    print("ISP handoff acknowledged; the serial port is now available to the flasher.")
+    if not caps[3] & 2 or await call(port, 5, update=True):
+        raise RuntimeError("firmware update handoff not acknowledged")
+    print("ROM ISP handoff acknowledged.")
 
 
-async def probe(port) -> None:
+async def probe(port):
     await identify(port)
-    await port.write(b"A\nRX-BEGIN\n")
-    if await port.readline(64) != b"OK RX\r\n":
-        raise RuntimeError("receiver capture did not start")
+    first = struct.unpack("<12I", await call(port, 10))
     await asyncio.sleep(1)
-    await port.write(b"A\nRX-END\n")
-    reply = await port.readline(96)
-    if not re.fullmatch(rb"RX(?: [0-9a-f]{8}){8}\r\n", reply):
-        raise ValueError(f"invalid capture reply: {reply!r}")
-    t0, t1, seen, *stamps = (int(v, 16) for v in reply.split()[1:])
-    if not t0 or not t1 or seen >= 1 << len(stamps):
-        raise ValueError(f"invalid timer or port mask: {reply!r}")
-    print(f"Timer 0: {t0} us; Timer 1: {t1} us")
-    for idx, stamp in enumerate(stamps):
-        active = bool(seen & (1 << idx))
-        elapsed = t1 if idx in (1, 3) else t0
-        if stamp > elapsed or (stamp and not active):
-            raise ValueError(f"invalid capture timestamp for port {idx}: {stamp}")
-        status = f"edge observed, last at {stamp} us" if active else "no edge observed"
-        print(f"Port {idx}: {status}")
+    second = struct.unpack("<12I", await call(port, 10))
+    for p in range(5):
+        print(f"Port {p}: {(second[2+p]-first[2+p]) & 0xffffffff} edges; last tick {second[7+p]}")
 
 
-def tx_command(bus, data):
-    if not 0 <= bus <= 4 or len(data) < 4 or (data[3] & 63) + 4 != len(data):
-        raise ValueError("expected port 0..4 and a complete tN4 header and payload")
-    checksum = binascii.crc_hqx(bytes([bus]) + data, 0xffff)
-    return f"A\nTX {bus} {data.hex()} {checksum:04x}\n".encode("ascii")
-
-
-# Native BlockRequest for block 5; no target node bits set, no settings written.
 ECHO_QUERY = bytes.fromhex("6d70000705000000000000")
 
 
-class Transmission(NamedTuple):
-    result: tuple[int, str] | None
-    echoes: set[bytes]
-
-    def verify(self, bus, *, require_peer=True):
-        if self.result == (bus, "ACK"):
-            expected = b"A"
-        elif self.result == (bus, "NOACK") and not require_peer:
-            expected = b"N"
-        else:
-            raise RuntimeError(f"transmit not acknowledged or incomplete: {self.result}")
-        if expected not in self.echoes:
-            raise RuntimeError("missing CRC-verified echo with matching trailer on the selected port")
-        return expected == b"A"
-
-
-async def capture(port, seconds: float, *, diagnostics=False, tx=None, on_record=None,
-                  stop_on_result=False, archive=None, ack_port=None) -> Transmission:
-    if ack_port is not None and (tx is not None or not 0 <= ack_port < 5):
-        raise ValueError("receive ACK requires one port and cannot be combined with transmission")
-    await identify(port)
-    audit = FrameAudit(require_stats=diagnostics or tx is not None or ack_port is not None)
-    command, greeting = ((b"A\nRX-DIAG\n", b"OK DIAG\r\n") if diagnostics else
-                         (b"A\nRX-STREAM\n", b"OK FRAMES\r\n"))
-    if tx is not None:
-        command, greeting = tx_command(*tx), b"OK TX\r\n"
-    elif ack_port is not None:
-        command = f"A\nRX-ACK {ack_port}\n".encode()
-        greeting = f"OK ACK {ack_port}\r\n".encode()
-    await port.write(command)
-    if await port.readline(64) != greeting:
-        raise RuntimeError("frame stream did not start")
-    echoes = set()
-    def accept(line):
-        print(audit.record(line), flush=True)
-        if tx is not None and line.startswith(b"F "):
-            _, bus, _, _, status, body = line.split()
-            if int(bus) == tx[0] and bytes.fromhex(body.decode()) == tx[1]:
-                echoes.add(status)
-        if on_record is not None:
-            on_record(line)
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + seconds
-    async def read_record(deadline):
-        line = await port.readline(MAX_RECORD_BYTES, timeout=max(0, deadline - loop.time()))
-        if archive is not None:
-            archive.write(line)
-        return line
-    try:
-        while loop.time() < deadline:
-            try:
-                line = await read_record(deadline)
-            except asyncio.TimeoutError:
-                break
-            accept(line)
-            if stop_on_result and audit.tx_result is not None:
-                break
-    finally:
-        await port.write(b"\n")
-        deadline = loop.time() + 4
-        while True:
-            line = await read_record(deadline)
-            if (dropped := dropped_records(line)) is not None:
-                audit.finish(dropped)
-                break
-            accept(line)
-    if ack_port is not None and (not audit.ack_summary or audit.ack_summary[0] != ack_port):
-        raise ValueError("missing receive-ACK summary for selected port")
-    if ack_port is None and audit.ack_summary is not None:
-        raise ValueError("unexpected receive-ACK summary")
-    return Transmission(audit.tx_result, echoes)
-
-
-async def monitor(port, seconds: float, *, diagnostics=False, tx=None, on_record=None,
-                  save_capture: Path | None = None, ack_port=None) -> None:
+async def monitor(port, seconds, *, diagnostics=False, tx=None, on_record=None,
+                  save_capture=None, ack_port=None, require_peer=True):
+    caps = await identify(port)
+    if not caps[3] & 1:
+        raise RuntimeError("Raw mode not available")
+    if tx and (tx[0] not in range(5) or len(tx[1]) < 4 or len(tx[1]) != 4 + (tx[1][3] & 63)):
+        raise ValueError("invalid native frame")
+    if ack_port is not None and ack_port not in range(5):
+        raise ValueError("invalid ACK port")
+    result = None
     with (save_capture.open("xb") if save_capture is not None else nullcontext()) as archive:
-        evidence = await capture(port, seconds, diagnostics=diagnostics, tx=tx, on_record=on_record,
-                                 archive=archive, ack_port=ack_port)
-    if tx is not None:
-        evidence.verify(tx[0])
+        if await call(port, 2, bytes([1]), update=True) != bytes([1]):
+            raise RuntimeError("failed to enter Raw mode")
+        def receive(data):
+            nonlocal result
+            row = describe(data)
+            if archive:
+                archive.write(encode(1, data))
+            if on_record:
+                on_record(data)
+            if data[0] == 2:
+                if not tx or tx[0] != data[1] or result is not None:
+                    raise RuntimeError("unexpected terminal TX result")
+                result = data[2:]
+            print(row, flush=True)
+        try:
+            mask = bytes([0 if ack_port is None else 1 << ack_port])
+            if await call(port, 9, mask, update=True, receive=receive) != mask:
+                raise RuntimeError("ACK mask not acknowledged")
+            if tx:
+                await port.write(encode(1, bytes((1, tx[0])) + tx[1]))
+            deadline = asyncio.get_running_loop().time() + seconds
+            while (delay := deadline - asyncio.get_running_loop().time()) > 0 and (not tx or result is None):
+                try:
+                    kind, data = await asyncio.wait_for(port.packet(), delay)
+                except asyncio.TimeoutError:
+                    break
+                if kind == 1:
+                    receive(data)
+        finally:
+            if await call(port, 2, bytes([0]), update=True, receive=receive) != bytes([0]):
+                raise RuntimeError("failed to leave Raw mode")
+    if tx and result != bytes([0]) and (require_peer or result != bytes([2, 1])):
+        raise RuntimeError(f"send not confirmed: {result!r}")
+    if diagnostics:
+        for p in range(5):
+            actual, valid, invalid = struct.unpack("<BII", await call(port, 3, bytes([p])))
+            if actual != p:
+                raise RuntimeError("wrong stats port")
+            print(f"port={p} dropped_valid={valid} dropped_invalid={invalid}")
 
 
 async def echo_test(port, buses):
-    failures = []
     for bus in buses:
-        evidence = await capture(port, 8, tx=(bus, ECHO_QUERY), stop_on_result=True)
-        try:
-            peer = evidence.verify(bus, require_peer=False)
-        except RuntimeError as error:
-            failures.append(f"port {bus}: {error}")
-        else:
-            print(f"Port {bus}: transmit/receive echo verified; peer ACK {'seen' if peer else 'not seen'}.")
-    if failures:
-        raise RuntimeError("; ".join(failures))
+        echoes = []
+        await monitor(port, 8, tx=(bus, ECHO_QUERY), require_peer=False,
+                      on_record=lambda data: echoes.append(data) if data[:2] == bytes((0,bus)) else None)
+        if not any(data[6:] == ECHO_QUERY for data in echoes):
+            raise RuntimeError(f"no matching bus echo on port {bus}")
+        print(f"Port {bus}: transmit echo verified.")
 
 
 async def main() -> int:
@@ -276,7 +234,7 @@ async def main() -> int:
     parser.add_argument("--baud", type=int, default=9600)
     parser.add_argument("--seconds", type=int, default=30, help="capture or panel input test duration")
     parser.add_argument("--check-input", choices=("test", "dip"), help="verify a physical change with panel")
-    parser.add_argument("--save-capture", type=Path, help="save the raw UART stream in a new file")
+    parser.add_argument("--save-capture", type=Path, help="save binary Raw records in a new file")
     parser.add_argument("--ack-port", type=int, choices=range(5),
                         help="with diagnostics, acknowledge CRC-verified frames on just this bus")
     parser.add_argument("--tx", nargs=2, metavar=("BUS", "HEX"), help="one native frame, for send only")

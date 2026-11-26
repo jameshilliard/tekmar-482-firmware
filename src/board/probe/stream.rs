@@ -1,77 +1,24 @@
+use super::super::baud::Acquisition;
+use super::super::output::{Kind, Output};
+use super::super::panel::Panel;
 use super::super::transmit::{Attempt, LineDriver};
-use super::super::{LSR, Line, THRE, UART0, hex};
-use super::{CCR, CR0, Capture, FIO0PIN, INPUTS, IR, TC, TIMERS, read, send, write};
+use super::{CCR, CR0, Capture, INPUTS, IR, TC, TIMERS, read, write};
 use core::cell::RefCell;
 use embassy_futures::yield_now;
-use tekmar_482_firmware::Stream;
-use tekmar_482_firmware::tn4::{Frame, LinkAck, Receiver, Trailer};
-
-struct Outbox {
-    buf: [u8; 1024],
-    tail: usize,
-    len: usize,
-    dropped: [u32; 5],
-}
-
-impl Outbox {
-    fn frame(&mut self, port: usize, f: Frame<'_>, local: bool) {
-        let mut line = [0u8; 22 + 2 * 67];
-        line[..20].copy_from_slice(b"F 0 00000000 0000 A ");
-        line[2] += port as u8;
-        hex(&mut line[4..12], f.start_us);
-        hex(&mut line[13..17], u32::from(f.crc));
-        line[18] = match f.trailer {
-            Trailer::Ack if local => b'L',
-            Trailer::Ack => b'A',
-            Trailer::NoAck => b'N',
-            Trailer::BadDelimiter => b'D',
-            Trailer::BadEnd { ack: true } if local => b'X',
-            Trailer::BadEnd { ack: true } => b'E',
-            Trailer::BadEnd { ack: false } => b'M',
-        };
-        for (digits, &byte) in line[20..].as_chunks_mut::<2>().0.iter_mut().zip(f.bytes) {
-            hex(digits, u32::from(byte));
-        }
-        let end = 20 + f.bytes.len() * 2;
-        line[end..end + 2].copy_from_slice(b"\r\n");
-        if end + 2 + 32 > self.buf.len() - self.len {
-            self.dropped[port] = self.dropped[port].saturating_add(1);
-            return;
-        }
-        self.append(&line[..end + 2]);
-    }
-
-    fn append(&mut self, line: &[u8]) {
-        for &b in line {
-            self.buf[(self.tail + self.len) % self.buf.len()] = b;
-            self.len += 1;
-        }
-    }
-
-    fn result(&mut self, port: u8, outcome: &[u8]) {
-        self.append(&[b'T', b' ', b'0' + port, b' ']);
-        self.append(outcome);
-        self.append(b"\r\n");
-    }
-
-    fn pump(&mut self) {
-        if self.len == 0 || read(LSR) & THRE == 0 {
-            return;
-        }
-        // THRE indicates the 16-byte UART0 transmit FIFO is empty.
-        for _ in 0..self.len.min(16) {
-            write(UART0, u32::from(self.buf[self.tail]));
-            self.tail = (self.tail + 1) % self.buf.len();
-            self.len -= 1;
-        }
-    }
-}
+use embassy_time::Instant;
+use tekmar_482_firmware::{
+    tn4::{
+        Frame, LinkAck, Receiver, Trailer,
+        tx::{Outcome, Request},
+    },
+    tpck,
+    trpc::{AfterDrain, Call},
+};
 
 pub struct Receivers {
-    capture: Capture,
+    _capture: Capture,
     rx: [Receiver; 5],
     rising: [bool; 5],
-    max_delay: [u32; 5],
 }
 
 impl Receivers {
@@ -81,17 +28,11 @@ impl Receivers {
         Self {
             rx: high.map(Receiver::starting_at),
             rising: high.map(|level| !level),
-            max_delay: [0; 5],
-            capture,
+            _capture: capture,
         }
     }
 
-    pub fn poll(
-        &mut self,
-        now: [u32; 2],
-        diagnostic: bool,
-        mut report: impl FnMut(usize, Frame<'_>),
-    ) {
+    pub fn poll(&mut self, now: [u32; 2], mut report: impl FnMut(usize, Frame<'_>)) {
         let pending = TIMERS.map(|t| read(t + IR));
         for (port, &(_, timer, ch)) in INPUTS.iter().enumerate() {
             let t = TIMERS[timer];
@@ -105,137 +46,232 @@ impl Receivers {
                     t + CCR,
                     (read(t + CCR) & !(7 << (3 * ch))) | (next << (3 * ch)),
                 );
-                if diagnostic {
-                    self.max_delay[port] = self.max_delay[port].max(read(t + TC).wrapping_sub(at));
-                }
                 self.rx[port].edge(at, self.rising[port], &mut emit);
                 self.rising[port] = !self.rising[port];
             }
             self.rx[port].advance(now[timer], emit);
         }
     }
-
-    pub fn idle(&mut self, panel: &mut super::super::panel::Panel) {
-        self.poll(TIMERS.map(|t| read(t + TC)), false, |port, _| {
-            panel.observe(port)
-        });
-    }
+}
+fn stamp() -> u32 {
+    Instant::now().as_millis() as u32
 }
 
-pub async fn stream(mode: &Stream, panel: &RefCell<super::super::panel::Panel>) {
-    let mut out = Outbox {
-        buf: [0; 1024],
-        tail: 0,
-        len: 0,
-        dropped: [0; 5],
-    };
-    let diagnostic = !matches!(mode, Stream::Passive);
-    let mut listener = None;
-    let mut ack = LinkAck::default();
-    match mode {
-        Stream::Ack(n) => {
-            let p = usize::from(*n);
-            let Some(pin) = LineDriver::claim(*n, INPUTS[p].0) else {
-                send(b"ERR ACK-PIN\r\n").await;
-                return;
-            };
-            listener = Some((p, pin));
-            let mut hello = *b"OK ACK 0\r\n";
-            hello[7] += *n;
-            send(&hello).await;
-        }
-        Stream::Send(_) => send(b"OK TX\r\n").await,
-        Stream::Diagnostic => send(b"OK DIAG\r\n").await,
-        Stream::Passive => send(b"OK FRAMES\r\n").await,
-    }
-    let mut receivers = Receivers::start();
-    let request = if let Stream::Send(r) = mode {
-        Some(r)
-    } else {
-        None
-    };
-    let mut attempt = request.and_then(|r| Attempt::new(r, INPUTS[usize::from(r.port)].0, 0));
-    if let Some(r) = request
-        && attempt.is_none()
-    {
-        out.result(r.port, b"PIN-BUSY");
-    }
-    // A stop byte must not cut short an ACK pulse already on the bus.
-    while read(LSR) & 1 == 0 || ack.driving() {
+pub async fn run(panel: &RefCell<Panel>) -> ! {
+    let mut bus = Receivers::start();
+    let mut decoder = tpck::Decoder::default();
+    let mut out = Output::new();
+    let mut baud = Acquisition::default();
+    let mut raw = false;
+    let mut reboot = false;
+    let mut occupied = [false; 5];
+    let mut sending: [Option<Attempt>; 5] = core::array::from_fn(|_| None);
+    let mut ack: [LinkAck; 5] = core::array::from_fn(|_| LinkAck::default());
+    let mut ack_pin: [Option<LineDriver>; 5] = core::array::from_fn(|_| None);
+    let mut ack_mask = 0u8;
+    loop {
         let now = TIMERS.map(|t| read(t + TC));
-        if let Some(tx) = &mut attempt
-            && let Some(outcome) = tx.poll(now[0])
-        {
-            drop(attempt.take()); // release the line before reporting the result
-            if let Some(r) = request {
-                out.result(r.port, outcome);
+        bus.poll(now, |p, frame| {
+            panel.borrow_mut().observe(p);
+            if raw && matches!(frame.trailer, Trailer::Ack | Trailer::NoAck) {
+                let mut data = [0; 73];
+                data[1] = p as u8;
+                data[2..6].copy_from_slice(&stamp().to_le_bytes());
+                data[6..6 + frame.bytes.len()].copy_from_slice(frame.bytes);
+                out.enqueue(Kind::Rx(p as u8), tpck::TN4, &data[..6 + frame.bytes.len()]);
             }
-        }
-        receivers.poll(now, diagnostic, |port, f| {
-            panel.borrow_mut().observe(port);
-            let local =
-                matches!(&listener, Some((p, _)) if *p == port) && ack.drove_frame(f.start_us);
-            out.frame(port, f, local);
         });
-        if let Some((p, driver)) = &mut listener
-            && let Some(high) =
-                ack.poll(read(TIMERS[INPUTS[*p].1] + TC), receivers.rx[*p].ack_slot())
-        {
-            driver.drive(high);
-        }
-        out.pump();
-        yield_now().await;
-    }
-    read(UART0); // any byte stops capture; subsequent commands use normal training
-    if attempt.take().is_some()
-        && let Some(r) = request
-    {
-        out.result(r.port, b"STOPPED");
-    }
-    let initial = receivers.capture.initial;
-    let final_levels = read(FIO0PIN);
-    drop(receivers.capture);
-    drop(listener); // nested GPIO mask claims are restored in reverse order
-    while out.len != 0 {
-        out.pump();
-        yield_now().await;
-    }
-    if diagnostic {
-        if let Stream::Ack(port) = mode {
-            let mut line = Line::new(&[b'K', b' ', b'0' + port]);
-            line.words([ack.pulses, ack.late]);
-            line.send().await;
-        }
-        for (port, r) in receivers.rx.iter().enumerate() {
-            let s = &r.stats;
-            let pin = INPUTS[port].0;
-            let mut line = Line::new(&[b'D', b' ', b'0' + port as u8]);
-            line.words([
-                s.edges,
-                s.starts,
-                s.stuffing,
-                s.crc_mismatch,
-                s.ack,
-                s.no_ack,
-                s.bad_trailer,
-                u32::from(r.partial()),
-                out.dropped[port],
-                receivers.max_delay[port],
-                u32::from(s.last_received_crc),
-                u32::from(s.last_expected_crc),
-                ((initial >> pin) & 1) | (((final_levels >> pin) & 1) << 1),
-            ]);
-            if let Some((start, body)) = r.last_crc_failure() {
-                line.words([start]);
-                line.body(body);
+        for p in 0..5 {
+            if let Some((why, bits, bytes)) = bus.rx[p].take_failure()
+                && raw
+            {
+                let mut data = [0; 78];
+                data[0] = 4;
+                data[1] = p as u8;
+                data[2..6].copy_from_slice(&stamp().to_le_bytes());
+                data[6] = why;
+                data[7..9].copy_from_slice(&bits.to_le_bytes());
+                data[9..9 + bytes.len()].copy_from_slice(bytes);
+                out.enqueue(Kind::Invalid(p as u8), tpck::TN4, &data[..9 + bytes.len()]);
             }
-            line.send().await;
+            let t = read(TIMERS[INPUTS[p].1] + TC);
+            if let Some(attempt) = sending[p].as_mut() {
+                if let Some(result) = attempt.poll(t) {
+                    sending[p] = None;
+                    let why = match result {
+                        Outcome::Ack => 0,
+                        Outcome::NoAck => 1,
+                        Outcome::ArbitrationLost => 2,
+                        Outcome::EchoMismatch => 3,
+                        Outcome::BadEnd => 4,
+                        Outcome::Late => 5,
+                    };
+                    let body = [2, p as u8, if why == 0 { 0 } else { 2 }, why];
+                    out.enqueue(
+                        Kind::Result(p as u8),
+                        tpck::TN4,
+                        if why == 0 { &body[..3] } else { &body },
+                    );
+                }
+            } else if !reboot && raw && ack_mask & (1 << p) != 0 {
+                if ack_pin[p].is_none() {
+                    ack_pin[p] = LineDriver::claim(p as u8, INPUTS[p].0);
+                }
+                if let Some(driver) = ack_pin[p].as_mut()
+                    && let Some(level) = ack[p].poll(t, bus.rx[p].ack_slot())
+                {
+                    driver.drive(level);
+                }
+            }
         }
+        if !reboot && out.can_receive() {
+            baud.poll(now[0], &mut decoder);
+            let byte = super::super::try_receive();
+            if !baud.locked && byte != Ok(None) {
+                baud.activity(now[0]);
+            }
+            match byte {
+                Err(()) => decoder.reset(),
+                Ok(Some(b)) => {
+                    if let Some(packet) = decoder.push(b) {
+                        baud.locked = true;
+                        if packet.kind == tpck::TN4 {
+                            if let [1, port, body @ ..] = packet.data {
+                                let p = usize::from(*port);
+                                if p >= 5 {
+                                    out.enqueue(Kind::Control, tpck::TN4, &[3, *port, 2]);
+                                } else if occupied[p] {
+                                    out.enqueue(Kind::Overlap(*port), tpck::TN4, &[3, *port, 1]);
+                                } else {
+                                    occupied[p] = true;
+                                    let mut reason = 0;
+                                    if !raw {
+                                        reason = 3;
+                                    } else if let Some(req) = Request::new(*port, body) {
+                                        if ack[p].driving() {
+                                            reason = 4;
+                                        } else {
+                                            ack_pin[p] = None;
+                                            sending[p] = Attempt::new(
+                                                &req,
+                                                INPUTS[p].0,
+                                                read(TIMERS[INPUTS[p].1] + TC),
+                                            );
+                                            if sending[p].is_none() {
+                                                reason = 2;
+                                            }
+                                        }
+                                    } else {
+                                        reason = 1;
+                                    }
+                                    if reason != 0 {
+                                        out.enqueue(
+                                            Kind::Result(*port),
+                                            tpck::TN4,
+                                            &[2, *port, 1, reason],
+                                        );
+                                    }
+                                }
+                            }
+                        } else if let Some(call) = Call::parse(packet) {
+                            let busy = occupied.contains(&true) || ack.iter().any(LinkAck::driving);
+                            let reply = match (call.method, call.service, call.body) {
+                                (0x544bf002, 0, [m @ 0..=1]) if !busy => {
+                                    raw = *m == 1;
+                                    if !raw {
+                                        ack_mask = 0;
+                                        ack_pin = core::array::from_fn(|_| None);
+                                    }
+                                    call.ok(&[*m])
+                                }
+                                (0x544bf002, 0, [_]) if busy => call.error(1),
+                                (0x544bf003, 1, [p @ 0..=4]) => {
+                                    let mut b = [0; 9];
+                                    b[0] = *p;
+                                    for (chunk, n) in b[1..]
+                                        .as_chunks_mut::<4>()
+                                        .0
+                                        .iter_mut()
+                                        .zip(out.drops[*p as usize])
+                                    {
+                                        chunk.copy_from_slice(&n.to_le_bytes());
+                                    }
+                                    call.ok(&b)
+                                }
+                                (0x544bf007, 1, []) => {
+                                    let mut b = [0; 28];
+                                    for (chunk, v) in b
+                                        .as_chunks_mut::<4>()
+                                        .0
+                                        .iter_mut()
+                                        .zip(panel.borrow().report())
+                                    {
+                                        chunk.copy_from_slice(&v.to_le_bytes());
+                                    }
+                                    call.ok(&b)
+                                }
+                                (0x544bf008, 0, []) => {
+                                    panel.borrow_mut().start_test();
+                                    call.ok(&[])
+                                }
+                                (0x544bf009, 0, [mask @ 0..=31]) if raw && !busy => {
+                                    for (p, pin) in ack_pin.iter_mut().enumerate() {
+                                        if mask & (1 << p) == 0 {
+                                            *pin = None;
+                                        }
+                                    }
+                                    ack_mask = *mask;
+                                    call.ok(&[*mask])
+                                }
+                                (0x544bf009, 0, [_]) if busy => call.error(1),
+                                (0x544bf00a, 1, []) => {
+                                    let mut b = [0; 48];
+                                    let counts = bus.rx.each_ref().map(|r| r.stats.edges);
+                                    let stamps =
+                                        INPUTS.map(|(_, t, ch)| read(TIMERS[t] + CR0 + 4 * ch));
+                                    for (chunk, n) in b
+                                        .as_chunks_mut::<4>()
+                                        .0
+                                        .iter_mut()
+                                        .zip(now.into_iter().chain(counts).chain(stamps))
+                                    {
+                                        chunk.copy_from_slice(&n.to_le_bytes());
+                                    }
+                                    call.ok(&b)
+                                }
+                                (0x544bf002 | 0x544bf003 | 0x544bf007..=0x544bf00a, _, _) => {
+                                    call.error(2)
+                                }
+                                _ => call.management(raw, busy).unwrap_or_else(|| {
+                                    if raw {
+                                        call.error(3)
+                                    } else {
+                                        call.unsupported()
+                                    }
+                                }),
+                            };
+                            reboot = reply.after_drain == AfterDrain::EnterRom;
+                            out.enqueue(
+                                if reboot { Kind::Reboot } else { Kind::Control },
+                                tpck::TRPC,
+                                reply.payload(),
+                            );
+                        }
+                    }
+                }
+                Ok(None) => {}
+            }
+        }
+        match out.pump() {
+            Some(Kind::Result(p)) => occupied[p as usize] = false,
+            Some(Kind::Reboot) => {
+                drop(ack_pin);
+                drop(bus);
+                panel.borrow_mut().stop();
+                super::super::enter_isp();
+            }
+            _ => {}
+        }
+        yield_now().await;
     }
-    let mut end = *b"END 00000000\r\n";
-    hex(
-        &mut end[4..12],
-        out.dropped.into_iter().fold(0, u32::saturating_add),
-    );
-    send(&end).await;
 }

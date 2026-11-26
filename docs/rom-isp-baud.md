@@ -7,8 +7,8 @@ it as an argument to the Set Baud Rate command. For a standard host rate,
 speed on this board.
 
 Bench: 12 MHz tekmar 482, LPC2146 part ID `0x0402ff23`, ROM 2.13, Linux,
-Prolific USB-RS232 adapter, serialx 1.8.1. ISP was invoked by the flash
-application's `ENTER-ISP` command at 9600; the host then selected the
+Prolific USB-RS232 adapter, serialx 1.8.1. ISP was entered from the running
+application at 9600 baud; the host then selected the
 test baud **before** sending the ROM's first `?`. These are host settings,
 not oscilloscope measurements or specifications for other boards.
 

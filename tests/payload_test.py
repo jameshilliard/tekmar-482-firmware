@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-from frames import FrameAudit, replay
+from frames import encode, replay
 from payloads import DECODERS, decode_payload
 
 
@@ -114,58 +114,19 @@ class PayloadTests(unittest.TestCase):
         self.assertEqual(fields["pair5_supply_temperature_raw"], 0x1234)
         self.assertEqual(fields["pair6_melting_time_minutes"], 12)
 
-    def test_replay_keeps_diagnostics_and_verifies_record_integrity(self):
-        record = b"F 3 000061a8 5f14 M 7d7123420582\r\n"
-        end = b"END 00000000\r\n"
-        decoded, = replay([record, end])
-        self.assertIn("no-ack/bad-end NetworkError code=5 instance=2 priority=2", decoded)
-        self.assertEqual(list(replay([end])), [])
-        for lines, error in (([record], "missing END"), ([end, record], "after END"),
-                             ([record, b"END 00000002\r\n"], "dropped 2"),
-                             ([record.replace(b"0582", b"0583"), end], "line 1: tN4 CRC")):
-            with self.subTest(error=error), self.assertRaisesRegex(ValueError, error):
-                list(replay(lines))
-
-    def test_receiver_accounting(self):
-        record = b"F 3 000061a8 5f14 M 7d7123420582\r\n"
-        def summary(port, counters):
-            return (f"D {port}" + "".join(f" {n:08x}" for n in counters) + "\r\n").encode()
-        empty = [0] * 12
-        stats = [101, 4, 1, 1, 0, 0, 1, 1, 0, 12, 0x55, 0xaa]
-        audit = FrameAudit(True)
-        audit.record(record)
-        for port in range(5):
-            audit.record(summary(port, stats if port == 3 else empty))
-        audit.finish(0)
-        for p, counts in ((3, stats), (2, empty)):
+    def test_binary_replay(self):
+        message = encode(1, bytes.fromhex("0003190000007d7123420582"))
+        [row] = replay([message[:3], message[3:]])
+        self.assertIn("id=0x3d7", row)
+        self.assertIn("NetworkError code=5 instance=2 priority=2", row)
+        [invalid] = replay([encode(1, bytes.fromhex("040200000000020900ab80"))])
+        self.assertIn("bit_count=9 bits=ab80", invalid)
+        for packet in (message[:-1], message[:-2] + bytes([message[-2] ^ 1, message[-1]]),
+                       encode(1, bytes.fromhex("040200000000020900ab81")),
+                       encode(1, bytes.fromhex("0003190000007d71234205")),
+                       encode(1, b"\x80\x00")):
             with self.assertRaises(ValueError):
-                audit.record(summary(p, counts))
-        with self.assertRaises(ValueError):
-            FrameAudit(True).record(summary(3, stats))
-        with self.assertRaises(ValueError):
-            FrameAudit(True).finish(0)
-        for level, expected in [(0, "steady-idle"), (3, "steady-dominant")]:
-            msg = FrameAudit(True).record(summary(0, empty + [level]))
-            self.assertIn(expected, msg)
-        with self.assertRaisesRegex(ValueError, "input level flags"):
-            FrameAudit(True).record(summary(0, empty + [4]))
-
-    def test_local_ack_capture_cannot_be_replayed_as_a_peer_ack(self):
-        for bad_summary in [[], [b"K 3 00000000 00000000\r\n"], [b"K 2 00000001 00000000\r\n"]]:
-            lines = [b"F 3 000061a8 5f14 L 7d7123420582\r\n", *bad_summary, b"END 00000000\r\n"]
-            with self.subTest(bad_summary=bad_summary), self.assertRaisesRegex(ValueError, "local ACK"):
-                list(replay(lines))
-
-    def test_rejected_crc_snapshot(self):
-        def row(*, body=b"12300001a5", received=0xe2e, expected=0xe2f, failures=1):
-            counts = [30, failures, 0, failures, 0, 0, 0, 0, 0, 11, received, expected, 0]
-            return ("D 2" + "".join(f" {v:08x}" for v in counts)).encode() + b" 00000010 " + body + b"\r\n"
-        report = FrameAudit().record(row())
-        self.assertIn("last_crc=0e2e expected=0e2f rejected_start_us=16 rejected_body=12300001a5", report)
-        for bad in (row(body=b"12300001a4"), row(body=b"12300001"), row(received=0xe2f),
-                    row(received=0x8000), row(expected=0xde), row(received=0, expected=0, failures=0)):
-            with self.subTest(bad=bad), self.assertRaises(ValueError):
-                FrameAudit().record(bad)
+                list(replay([packet]))
 
 
 if __name__ == "__main__":

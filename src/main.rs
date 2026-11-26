@@ -3,20 +3,35 @@
 
 use board::panel::Panel;
 use core::{arch::global_asm, cell::RefCell, panic::PanicInfo, ptr};
-use embassy_futures::{
-    select::{Either, select},
-    yield_now,
-};
 use embassy_time::Timer;
 use static_cell::StaticCell;
-use tekmar_482_firmware::{Command, Decoder, IDENTITY, ISP_ACK};
 
 global_asm!(include_str!("startup.S"), options(raw));
 mod runtime;
 
+#[used]
+#[unsafe(link_section = ".revision")]
+static REVISION: [u8; 48] = {
+    let mut field = [0; 48];
+    let magic = b"TK48REV\0";
+    let rev = env!("TEKMAR_BUILD_REVISION").as_bytes();
+    let mut i = 0;
+    while i < magic.len() {
+        field[i] = magic[i];
+        i += 1;
+    }
+    let mut j = 0;
+    while j < rev.len() {
+        field[i + j] = rev[j];
+        j += 1;
+    }
+    field
+};
+
 mod board {
     use super::ptr;
-    use embassy_futures::yield_now;
+    pub(super) mod baud;
+    mod output;
     pub mod panel;
     pub mod probe;
     mod transmit;
@@ -72,82 +87,13 @@ mod board {
         write(UART0 + 0x30, 0x80); // enable transmitter
     }
 
-    pub async fn drain() {
-        while read(LSR) & TEMT == 0 {
-            yield_now().await;
-        }
-    }
-
-    pub async fn train() {
-        // Do not let the next measurement change the baud of a pending reply.
-        drain().await;
-        loop {
-            write(UART0 + 0x08, 3); // clear stale RX data, leave TX alone
-            write(ACR, 0x305); // clear flags, start mode 0, retry on measurement timeout
-            // Mode 0 measures the first two falling edges of 'A' and receives the byte.
-            if receive().await == Ok(b'A') && receive().await == Ok(b'\n') {
-                return;
-            }
-        }
-    }
-
-    pub async fn receive() -> Result<u8, ()> {
-        loop {
-            let status = read(LSR);
-            let byte = (status & 1 != 0).then(|| read(UART0) as u8);
-            if status & 0x1e != 0 {
-                return Err(());
-            }
-            if let Some(byte) = byte {
-                return Ok(byte);
-            }
-            yield_now().await;
-        }
-    }
-
-    pub async fn send(bytes: &[u8]) {
-        for chunk in bytes.chunks(16) {
-            while read(LSR) & THRE == 0 {
-                yield_now().await;
-            }
-            for &byte in chunk {
-                write(UART0, u32::from(byte));
-            }
-        }
-    }
-
-    fn hex(dst: &mut [u8], mut value: u32) {
-        for b in dst.iter_mut().rev() {
-            *b = b"0123456789abcdef"[(value & 15) as usize];
-            value >>= 4;
-        }
-    }
-
-    // Largest diagnostic line: prefix, fourteen words and 67 hex bytes.
-    pub struct Line(heapless::Vec<u8, 272>);
-
-    impl Line {
-        pub fn new(prefix: &[u8]) -> Self {
-            Self(heapless::Vec::from_slice(prefix).unwrap())
-        }
-        pub fn words(&mut self, values: impl IntoIterator<Item = u32>) {
-            for value in values {
-                let mut word = *b" 00000000";
-                hex(&mut word[1..], value);
-                self.0.extend_from_slice(&word).unwrap();
-            }
-        }
-        fn body(&mut self, bytes: &[u8]) {
-            self.0.push(b' ').unwrap();
-            for &byte in bytes {
-                let mut digits = [0; 2];
-                hex(&mut digits, u32::from(byte));
-                self.0.extend_from_slice(&digits).unwrap();
-            }
-        }
-        pub async fn send(&mut self) {
-            self.0.extend_from_slice(b"\r\n").unwrap();
-            send(&self.0).await;
+    pub fn try_receive() -> Result<Option<u8>, ()> {
+        let status = read(LSR);
+        let byte = (status & 1 != 0).then(|| read(UART0) as u8);
+        if status & 0x1e != 0 {
+            Err(())
+        } else {
+            Ok(byte)
         }
     }
 
@@ -163,21 +109,6 @@ mod board {
     }
 }
 
-async fn next_command() -> Command {
-    loop {
-        board::train().await;
-        let mut decoder = Decoder::default();
-        while let Ok(byte) = board::receive().await {
-            if let Some(cmd) = decoder.push(byte) {
-                return cmd;
-            }
-            if byte == b'\n' {
-                break;
-            }
-        }
-    }
-}
-
 #[embassy_executor::task]
 async fn indicators(panel: &'static RefCell<Panel>) {
     loop {
@@ -186,76 +117,9 @@ async fn indicators(panel: &'static RefCell<Panel>) {
     }
 }
 
-async fn commands(panel: &RefCell<Panel>, probing: bool) -> Command {
-    loop {
-        match next_command().await {
-            Command::Identify => board::send(IDENTITY).await,
-            Command::Build => {
-                board::send(concat!("BUILD ", env!("TEKMAR_BUILD_REVISION"), "\r\n").as_bytes())
-                    .await
-            }
-            Command::Panel => {
-                let mut line = board::Line::new(b"PANEL");
-                line.words(panel.borrow().report());
-                line.send().await;
-            }
-            Command::LedTest => {
-                panel.borrow_mut().start_test();
-                board::send(b"OK LED\r\n").await;
-            }
-            Command::BadSend => board::send(b"ERR TX\r\n").await,
-            Command::RxEnd if !probing => board::send(b"ERR RX-INACTIVE\r\n").await,
-            other => return other,
-        }
-    }
-}
-
 #[embassy_executor::task]
-async fn bridge(panel: &'static RefCell<Panel>) {
-    let mut probe: Option<board::probe::Capture> = None;
-    loop {
-        let command = if probe.is_some() {
-            commands(panel, true).await
-        } else {
-            // Cancel background capture (and release both timers) at a mode change.
-            let mut idle = board::probe::Receivers::start();
-            match select(commands(panel, false), async {
-                loop {
-                    idle.idle(&mut panel.borrow_mut());
-                    yield_now().await;
-                }
-            })
-            .await
-            {
-                Either::First(command) => command,
-                Either::Second(never) => never,
-            }
-        };
-        let previous = probe.take();
-        if command == Command::RxEnd {
-            if let Some(capture) = previous {
-                let mut line = board::Line::new(b"RX");
-                line.words(capture.finish());
-                line.send().await;
-            }
-            continue;
-        }
-        drop(previous);
-        match command {
-            Command::RxBegin => {
-                probe = Some(board::probe::Capture::start());
-                board::send(b"OK RX\r\n").await;
-            }
-            Command::Stream(mode) => board::probe::stream(&mode, panel).await,
-            Command::EnterIsp => {
-                board::send(ISP_ACK).await;
-                board::drain().await;
-                panel.borrow_mut().stop();
-                board::enter_isp();
-            }
-            _ => unreachable!(),
-        }
-    }
+async fn gateway(panel: &'static RefCell<Panel>) {
+    board::probe::run(panel).await;
 }
 
 #[unsafe(no_mangle)]
@@ -265,7 +129,8 @@ extern "C" fn firmware_main() -> ! {
     let panel = PANEL.init_with(|| RefCell::new(Panel::init()));
     runtime::run(|spawner| {
         spawner.spawn(indicators(panel).unwrap());
-        spawner.spawn(bridge(panel).unwrap());
+        board::baud::set_divisor(board::baud::DEFAULT_DIVISOR);
+        spawner.spawn(gateway(panel).unwrap());
     })
 }
 

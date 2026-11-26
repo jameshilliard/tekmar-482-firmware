@@ -6,6 +6,7 @@
 
 import os
 import select
+import struct
 import subprocess
 import sys
 import tempfile
@@ -14,8 +15,8 @@ from pathlib import Path
 
 HELPER = Path(__file__).resolve().parents[1] / "tools/board.py"
 sys.path.insert(0, str(HELPER.parent))
-from frames import describe
-from board import PanelState, Transmission
+from frames import encode
+from board import PanelState, ECHO_QUERY
 
 
 class HelperTest(unittest.TestCase):
@@ -38,30 +39,34 @@ class HelperTest(unittest.TestCase):
             received += os.read(master, 128)
         self.assertEqual(received, request)
 
+    def exchange(self, master, method, reply, body=b"", *, update=False):
+        mid = struct.pack("<I", 0x544bf000 + method)
+        self.expect(master, encode(6, bytes([0 if update else 1]) + mid + body))
+        os.write(master, encode(6, bytes([3 if update else 4]) + mid + reply))
+
+    def capabilities(self, master):
+        self.exchange(master, 1, bytes([1, 0, 5, 3]))
+
     def test_handoff(self):
-        master, proc = self.start_helper("enter-isp", "--baud", "187500")
-        self.expect(master, b"A\nID?\n")
-        os.write(master, b"TEKMAR-482-DEV\r\n")
-        self.expect(master, b"A\nENTER-ISP\n")
-        os.write(master, b"OK ISP\r\n")
+        master, proc = self.start_helper("enter-isp")
+        self.capabilities(master)
+        self.exchange(master, 5, b"", update=True)
         _, err = proc.communicate(timeout=3)
         self.assertEqual(proc.returncode, 0, err)
 
     def test_identify(self):
         master, proc = self.start_helper("identify")
-        self.expect(master, b"A\nID?\n")
-        os.write(master, b"TEKMAR-482-DEV\r\n")
+        self.capabilities(master)
+        self.exchange(master, 4, b"unversioned")
         out, err = proc.communicate(timeout=3)
         self.assertEqual(proc.returncode, 0, err)
-        self.assertEqual(out.strip(), b"TEKMAR-482-DEV")
+        self.assertIn(b"unversioned", out)
 
     def panel_check(self, which, states):
         master, proc = self.start_helper("panel", "--check-input", which, "--seconds", "5")
-        self.expect(master, b"A\nID?\n")
-        os.write(master, b"TEKMAR-482-DEV\r\n")
+        self.capabilities(master)
         for state in states:
-            self.expect(master, b"A\nPANEL?\n")
-            os.write(master, ("PANEL" + "".join(f" {v:08x}" for v in state) + "\r\n").encode())
+            self.exchange(master, 7, struct.pack("<7I", *state))
         out, err = proc.communicate(timeout=2)
         return proc.returncode, out + err
 
@@ -92,143 +97,63 @@ class HelperTest(unittest.TestCase):
             self.assertNotEqual(status, 0, output)
             self.assertIn(message, output)
 
-    def test_wrong_device(self):
+    def test_without_update_capability_no_handoff(self):
         master, proc = self.start_helper("enter-isp")
-        self.expect(master, b"A\nID?\n")
-        os.write(master, b"unexpected identity\r\n")
+        self.exchange(master, 1, bytes([1, 0, 5, 1]))
         _, err = proc.communicate(timeout=3)
-        self.assertNotEqual(proc.returncode, 0)
-        self.assertIn(b"no ISP command sent", err)
+        self.assertNotEqual(proc.returncode, 0, err)
         self.assertFalse(select.select([master], [], [], 0)[0])
 
     def test_probe(self):
         master, proc = self.start_helper("probe")
-        self.expect(master, b"A\nID?\n")
-        os.write(master, b"TEKMAR-482-DEV\r\n")
-        self.expect(master, b"A\nRX-BEGIN\n")
-        os.write(master, b"OK RX\r\n")
-        self.expect(master, b"A\nRX-END\n")
-        os.write(master, b"RX 000f4240 000f4241 00000003 00000000 0000000f"
-                         b" 00000000 00000000 00000000\r\n")
+        self.capabilities(master)
+        self.exchange(master, 10, bytes(48))
+        self.exchange(master, 10, struct.pack("<12I", *range(12)))
         out, err = proc.communicate(timeout=3)
         self.assertEqual(proc.returncode, 0, err)
-        self.assertIn(b"Timer 0: 1000000 us; Timer 1: 1000001 us", out)
-        self.assertIn(b"Port 0: edge observed, last at 0 us", out)
-        self.assertIn(b"Port 1: edge observed, last at 15 us", out)
-        self.assertIn(b"Port 4: no edge observed", out)
+        self.assertIn(b"Port 4: 6 edges; last tick 11", out)
 
-    def test_frames(self):
-        directory = tempfile.TemporaryDirectory()
-        self.addCleanup(directory.cleanup)
-        target = Path(directory.name) / "native.frames"
-        master, proc = self.start_helper("frames", "--seconds", "1", "--save-capture", str(target))
-        self.expect(master, b"A\nID?\n")
-        os.write(master, b"TEKMAR-482-DEV\r\n")
-        self.expect(master, b"A\nRX-STREAM\n")
-        os.write(master, b"OK FRAMES\r\nF 2 000061a8 0e2f A 12300001a5\r\n")
-        self.expect(master, b"\n")
-        os.write(master, b"F 0 00010000 0e2f M 12300001a5\r\nEND 00000000\r\n")
-        out, err = proc.communicate(timeout=3)
-        self.assertEqual(proc.returncode, 0, err)
-        self.assertIn(b"port=2 t=25000us priority=0 id=0x123", out)
-        self.assertIn(b"payload=a5 crc=0x0e2f no-ack/bad-end", out)
-        raw = target.read_bytes()
-        self.assertEqual(raw, b"F 2 000061a8 0e2f A 12300001a5\r\n"
-                              b"F 0 00010000 0e2f M 12300001a5\r\nEND 00000000\r\n")
-        _, proc = self.start_helper("frames", "--save-capture", str(target))
-        _, err = proc.communicate(timeout=3)
-        self.assertNotEqual(proc.returncode, 0, err)
-        self.assertEqual(target.read_bytes(), raw)
+    def raw(self, master, mask=0):
+        self.capabilities(master)
+        self.exchange(master, 2, b"\x01", b"\x01", update=True)
+        self.exchange(master, 9, bytes([mask]), bytes([mask]), update=True)
 
-    def test_corrupt_frame_records(self):
-        for raw in (b"12300001", b"12300001a4", b"z", b"ff" * 68):
-            with self.assertRaises(ValueError):
-                describe(b"F 2 000061a8 0e2f A " + raw + b"\r\n")
+    def close_raw(self, master):
+        self.exchange(master, 2, b"\0", b"\0", update=True)
 
-    def test_maximum_rejected_body_in_live_diagnostics(self):
-        master, proc = self.start_helper("diagnostics", "--seconds", "1")
-        self.expect(master, b"A\nID?\n")
-        os.write(master, b"TEKMAR-482-DEV\r\n")
-        self.expect(master, b"A\nRX-DIAG\n")
-        os.write(master, b"OK DIAG\r\n")
-        self.expect(master, b"\n")
-        for port in range(5):
-            counts = [0] * 13
-            suffix = b""
-            if port == 4:
-                counts[:4] = [82, 1, 0, 1]
-                counts[10:12] = [0x7baa, 0x7bab]
-                suffix = b" ffffffff " + b"ff" * 67
-            os.write(master, (f"D {port}" + "".join(f" {v:08x}" for v in counts)).encode()
-                     + suffix + b"\r\n")
-        os.write(master, b"END 00000000\r\n")
-        out, err = proc.communicate(timeout=3)
-        self.assertEqual(proc.returncode, 0, err)
-        self.assertIn(b"rejected_start_us=4294967295 rejected_body=" + b"ff" * 67, out)
+    def test_binary_capture_and_drop_counters(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "capture.tpck"
+            master, proc = self.start_helper("diagnostics", "--ack-port", "3",
+                                             "--seconds", "1", "--save-capture", str(target))
+            self.raw(master, 1 << 3)
+            packets = encode(1, bytes.fromhex("0003190000007d7123420582"))
+            packets += encode(1, bytes.fromhex("04021900000002010080"))
+            os.write(master, packets)
+            self.close_raw(master)
+            for p in range(5):
+                self.exchange(master, 3, struct.pack("<BII", p, p, 0), bytes([p]))
+            out, err = proc.communicate(timeout=3)
+            self.assertEqual(proc.returncode, 0, err)
+            self.assertEqual(target.read_bytes(), packets)
+            self.assertIn(b"port=2 end_ms=25 invalid=2 bit_count=1 bits=80", out)
+            self.assertIn(b"port=4 dropped_valid=4 dropped_invalid=0", out)
 
-    def test_send_requires_acknowledged_echo(self):
-        for echoed in (False, True):
-            with self.subTest(echoed=echoed):
-                master, proc = self.start_helper("send", "--seconds", "1", "--tx", "0", "12300001a5")
-                self.expect(master, b"A\nID?\n")
-                os.write(master, b"TEKMAR-482-DEV\r\n")
-                self.expect(master, b"A\nTX 0 12300001a5 b45e\n")
-                os.write(master, b"OK TX\r\n")
-                if echoed:
-                    os.write(master, b"F 0 00009c40 0e2f A 12300001a5\r\n")
-                os.write(master, b"T 0 ACK\r\n")
-                self.expect(master, b"\n")
-                for port in range(5):
-                    ack = int(echoed and port == 0)
-                    counts = [30 * ack, ack, 0, 0, ack, 0, 0, 0, 0, 12, 0, 0]
-                    os.write(master, (f"D {port}" + "".join(f" {n:08x}" for n in counts) + "\r\n").encode())
-                os.write(master, b"END 00000000\r\n")
-                _, err = proc.communicate(timeout=3)
-                self.assertEqual(proc.returncode, 0 if echoed else 1, err)
-                if not echoed:
-                    self.assertIn(b"missing CRC-verified", err)
+    def test_send_and_echo(self):
+        for action, args, result, success in [
+            ("echo-test", ["--bus", "4"], b"\x02\x01", True),
+            ("send", ["--tx", "4", ECHO_QUERY.hex()], b"\x00", True),
+            ("send", ["--tx", "4", ECHO_QUERY.hex()], b"\x02\x01", False),
+        ]:
+            master, proc = self.start_helper(action, *args)
+            self.raw(master)
+            self.expect(master, encode(1, bytes([1, 4]) + ECHO_QUERY))
+            os.write(master, encode(1, bytes([0, 4, 0, 0, 0, 0]) + ECHO_QUERY)
+                     + encode(1, bytes([2, 4]) + result))
+            self.close_raw(master)
+            _, err = proc.communicate(timeout=3)
+            self.assertEqual(proc.returncode == 0, success, err)
 
-    def test_unpopulated_port_echo(self):
-        master, proc = self.start_helper("echo-test", "--bus", "4")
-        self.expect(master, b"A\nID?\n")
-        os.write(master, b"TEKMAR-482-DEV\r\n")
-        self.expect(master, b"A\nTX 4 6d70000705000000000000 2d3c\n")
-        os.write(master, b"OK TX\r\nF 4 00010000 2d3f N 6d70000705000000000000\r\nT 4 NOACK\r\n")
-        self.expect(master, b"\n")
-        for port in range(5):
-            n = int(port == 4)
-            counts = (40*n, n, 0, 0, 0, n, 0, 0, 0, 16, 0, 0)
-            os.write(master, (f"D {port}" + "".join(f" {v:08x}" for v in counts) + "\r\n").encode())
-        os.write(master, b"END 00000000\r\n")
-        out, err = proc.communicate(timeout=3)
-        self.assertEqual(proc.returncode, 0, err)
-        self.assertIn(b"Port 4: transmit/receive echo verified; peer ACK not seen", out)
-
-    def test_receive_ack_session(self):
-        master, proc = self.start_helper("diagnostics", "--ack-port", "0", "--seconds", "1")
-        self.expect(master, b"A\nID?\n")
-        os.write(master, b"TEKMAR-482-DEV\r\n")
-        self.expect(master, b"A\nRX-ACK 0\n")
-        os.write(master, b"OK ACK 0\r\nF 0 00009c40 0e2f L 12300001a5\r\n")
-        self.expect(master, b"\n")
-        os.write(master, b"K 0 00000001 00000000\r\n")
-        for port in range(5):
-            n = int(port == 0)
-            counts = (30*n, n, 0, 0, n, 0, 0, 0, 0, 10, 0, 0, 0)
-            os.write(master, (f"D {port}" + "".join(f" {v:08x}" for v in counts) + "\r\n").encode())
-        os.write(master, b"END 00000000\r\n")
-        out, err = proc.communicate(timeout=3)
-        self.assertEqual(proc.returncode, 0, err)
-        self.assertIn(b"ack/local-drive", out)
-        self.assertIn(b"local_ack_pulses=1 missed_ack_windows=0", out)
-
-    def test_noack_is_not_a_successful_send(self):
-        with self.assertRaises(RuntimeError):
-            Transmission((2, "NOACK"), {b"N"}).verify(2)
-        for result, echoes in [((1, "ACK"), {b"A"}), ((2, "BAD-END"), {b"M"}),
-                               ((2, "NOACK"), {b"A"}), (None, {b"N"})]:
-            with self.subTest(result=result), self.assertRaises(RuntimeError):
-                Transmission(result, echoes).verify(2, require_peer=False)
 
 if __name__ == "__main__":
     unittest.main()

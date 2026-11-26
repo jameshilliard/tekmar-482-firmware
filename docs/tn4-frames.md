@@ -44,19 +44,18 @@ Interpret the four header bytes as one **big-endian** integer:
 | 11:6 | Source node |
 | 5:0 | Payload length in bytes; excludes header, CRC and trailer |
 
-The physical bridge port and SOF timestamp are captured by the gateway;
+The physical bridge port and completion timestamp are captured by the gateway;
 neither is in the header. A destination, when defined, is in the payload.
 The same source and body may appear on two ports; retain both observations.
 A link ACK means a receiver asserted the ACK slot, not that a thermostat
 applied a setting. CRC success and trailer success are separate results.
 
-**Worked example.** `F 3 000061a8 5f14 M 7d7123420582` is a test vector.
+**Worked example.** A synthetic Rx record has type 01 and payload
+`00 03 19 00 00 00 7d 71 23 42 05 82`: valid frame, port 3, timestamp 25 ms.
 Header `7d712342` yields priority 1, ID `0x3d7`, subnet `0x12`, node 13,
 and payload length 2. Payload `05 82` means error 5, instance 2, priority
-2. The CRC over SOF and `7d7123420582` is `5f14`. Status `M` means no ACK
-and a damaged end: the body can be inspected, but the exchange was not
-successful. Port 3 and 25,000 microseconds describe this fixture, not the
-source address or a wall-clock time.
+2. The CRC over SOF and `7d7123420582` is `5f14`. That CRC is checked on the bus, not appended to the Rx payload.
+The timestamp is gateway uptime, not wall-clock time.
 
 ## Payload notation
 

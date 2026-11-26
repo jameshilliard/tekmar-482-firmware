@@ -1,9 +1,8 @@
 # tekmar 482 development firmware
 
 A standalone Rust/Embassy image for the LPC2146-based 482 with the 12 MHz
-crystal. Installing it replaces the factory firmware. The development image
-uses UART0 for identification, passive tN4 capture, single-attempt native
-tN4 sends, and entry into ROM ISP. It does not implement tRPC.
+crystal. Installing it replaces the factory firmware. UART0 carries [binary TPCK packets](docs/tpck-bridge.md) for tRPC management,
+passive tN4 capture, single-attempt sends and entry into ROM ISP.
 
 ## Build and test on Linux
 
@@ -33,10 +32,10 @@ deadlines. The emulator also checks the remaining stack against a canary.
 
 The ARM7TDMI port uses Embassy's cooperative thread executor, ARM7 IRQ/FIQ
 critical sections and portable atomics. The bridge task handles UART
-autobaud, commands, streaming and ROM handoff. It captures idle bus traffic
+packet framing, mode changes, streaming and ROM handoff. It captures idle bus traffic
 while waiting on commands and replies. A separate timed task debounces the
 panel inputs and updates the indicators even while the bridge awaits UART
-space. The command and stream wire formats are unchanged.
+space.
 
 Embassy time uses the free-running PWM counter at 1 MHz and extends its
 32-bit ticks across wraps. Timer0 and Timer1 remain dedicated to tN4 edge
@@ -91,38 +90,23 @@ uv run --script tools/board.py identify "$PORT"
 uv run --script tools/board.py enter-isp "$PORT"
 ```
 
-The autobaud firmware (`TEKMAR-482-DEV`) uses 8N1, no flow control.
-Prefix **each** application command with ASCII `A\n`: send `A\nID?\n` to
-read the identity, or `A\nENTER-ISP\n` to receive `OK ISP\r\n` and enter
-ROM ISP. The prefix is exactly A then LF; the command accepts LF or CRLF.
-Wait for the reply before sending another command. The host helper sends
-the prefix automatically.
+The application starts in Normal mode at 9600 baud, 8N1, without flow
+control. A host at that rate can send its first TPCK request immediately. At
+other fixed rates the helper uses [TPCK baud acquisition](docs/tpck-bridge.md#baud-acquisition).
+The helper
+uses BridgeCapabilities to identify the application. FirmwareBuild reports
+the full Git commit ID when built with `TEKMAR_BUILD_REVISION`, otherwise
+`unversioned`. See the [wire reference](docs/tpck-bridge.md) for the
+encoded requests and the limits of Normal-mode support.
 
-`A\nBUILD?\n` returns `BUILD <revision>\r\n`. Unstamped development
-images report `unversioned`. When packaging a clean release build, set
-`TEKMAR_BUILD_REVISION` to the full Git commit ID. Older images still
-answer `ID?` but do not implement `BUILD?`.
-
-UART0 measures the first two falling edges of the A using hardware autobaud
-mode 0 ([UM10139 section 10.3.13](https://www.nxp.com/docs/en/user-guide/UM10139.pdf#page=158)).
-PLL0 supplies a 48 MHz peripheral clock during application operation. The
-firmware drains the final ACK, restores the 12 MHz crystal clock, then calls
-IAP command 57 with interrupts masked. **The ROM has its own handshake**:
-send a bare `?` at the selected speed, not the application's `A\n` prefix.
-
-Use `--baud 187500` on `board.py` to use one baud from identification through
-the ROM session.
-The ISP command is unauthenticated: anyone with access to that serial link
-can reach the ROM programmer. Do not expose a serial bridge to untrusted users.
-
-The helper verifies the firmware identity before sending the command and
-does not send any programming traffic. After it exits, start an LPC2146 ISP
-tool on the same serial port, with its oscillator parameter set to 12000 kHz.
-For a non-writing bench test, use `lpc21isp -detectonly "$PORT" 9600 12000`
-and expect LPC2146 (part ID `0x0402FF23`). That test, unlike the ASCII ACK,
-confirms that the ROM actually answered. Power-cycle without Test to leave
-ISP and restart the unchanged application. Physical Test-button recovery
-remains available if the custom application cannot boot.
+The firmware update request drains its binary reply, returns the peripheral
+clock to the 12 MHz crystal and invokes ROM ISP. The ROM has its own
+handshake: select the programming baud before sending its initial `?`.
+The helper never erases or programs flash. To verify ROM entry without a
+write, use `lpc21isp -detectonly "$PORT" 9600 12000` and check for LPC2146
+part ID `0x0402ff23`. Power cycling without Test restarts the application in
+flash. Use physical ISP entry when the installed application does not
+support the handoff. Only trusted clients should have access to this link.
 
 Register and boot contracts: [NXP UM10139](https://www.nxp.com/docs/en/user-guide/UM10139.pdf),
 chapters 4 and 9, and sections 21.4.2, 21.4.11-12 and 21.9.8.

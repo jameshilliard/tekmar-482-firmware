@@ -1,5 +1,5 @@
 use super::{PINSEL0, read, write};
-use tekmar_482_firmware::tn4::tx::{Action, Request, Sender};
+use tekmar_482_firmware::tn4::tx::{Action, Outcome, Request, Sender};
 
 const FIO: usize = 0x3fff_c000;
 const MASK: usize = FIO + 0x10;
@@ -53,7 +53,10 @@ impl Drop for LineDriver {
             write(CLR, self.tx);
             write(FIO, read(FIO) & !self.tx);
         }
-        write(MASK, self.mask);
+        write(
+            MASK,
+            (read(MASK) & !(self.tx | self.rx)) | (self.mask & (self.tx | self.rx)),
+        );
     }
 }
 
@@ -65,13 +68,13 @@ impl Attempt {
         })
     }
 
-    pub(super) fn poll(&mut self, now: u32) -> Option<&'static [u8]> {
+    pub(super) fn poll(&mut self, now: u32) -> Option<Outcome> {
         match self.sender.poll(now, read(PIN) & self.pin.rx != 0) {
             Action::Drive(high) => {
                 self.pin.drive(high);
                 None
             }
-            Action::Finish(outcome) => Some(outcome.label()),
+            Action::Finish(outcome) => Some(outcome),
             Action::None => None,
         }
     }

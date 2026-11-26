@@ -9,48 +9,21 @@ pub struct Request {
 }
 
 impl Request {
-    pub fn parse(line: &[u8]) -> Option<Self> {
-        // Protect the selected physical port as well as the bus header and payload.
-        let [port @ b'0'..=b'4', b' ', tail @ ..] = line else {
-            return None;
-        };
-        let space = tail.iter().position(|&b| b == b' ')?;
-        let (body, check) = tail.split_at(space);
-        if !(8..=134).contains(&space) || space % 2 != 0 || check.len() != 5 {
+    pub fn new(port: u8, body: &[u8]) -> Option<Self> {
+        let payload_len = usize::from(*body.get(3)? & 63);
+        if port >= 5 || body.len() != 4 + payload_len {
             return None;
         }
         let mut request = Self {
-            port: port - b'0',
-            len: space / 2,
+            port,
             data: [0; 67],
+            len: body.len(),
         };
-        for (to, pair) in request.data.iter_mut().zip(body.as_chunks::<2>().0) {
-            *to = hex(pair[0])? << 4 | hex(pair[1])?;
-        }
-        let crc = check[1..]
-            .iter()
-            .try_fold(0u16, |n, &b| Some(n << 4 | u16::from(hex(b)?)))?;
-        let mut actual = 0xffffu16;
-        for b in core::iter::once(&request.port).chain(request.body()) {
-            actual ^= u16::from(*b) << 8;
-            for _ in 0..8 {
-                actual = (actual << 1) ^ if actual & 0x8000 != 0 { 0x1021 } else { 0 };
-            }
-        }
-        (actual == crc && usize::from(request.data[3] & 63) + 4 == request.len).then_some(request)
+        request.data[..body.len()].copy_from_slice(body);
+        Some(request)
     }
-
     fn body(&self) -> &[u8] {
         &self.data[..self.len]
-    }
-}
-
-fn hex(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        _ => None,
     }
 }
 
@@ -111,22 +84,7 @@ pub enum Outcome {
     ArbitrationLost,
     EchoMismatch,
     BadEnd,
-    Busy,
     Late,
-}
-
-impl Outcome {
-    pub fn label(self) -> &'static [u8] {
-        match self {
-            Self::Ack => b"ACK",
-            Self::NoAck => b"NOACK",
-            Self::ArbitrationLost => b"ARBITRATION",
-            Self::EchoMismatch => b"ECHO",
-            Self::BadEnd => b"BAD-END",
-            Self::Busy => b"BUSY",
-            Self::Late => b"LATE",
-        }
-    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -146,7 +104,6 @@ enum Phase {
 pub struct Sender {
     bits: Bits,
     phase: Phase,
-    submitted: u32,
     quiet_since: u32,
     due: u32,
     index: usize,
@@ -158,7 +115,6 @@ impl Sender {
         Self {
             bits: Bits::encode(request.body()),
             phase: Phase::Idle,
-            submitted: now,
             quiet_since: now,
             due: now,
             index: 0,
@@ -177,9 +133,6 @@ impl Sender {
             Phase::Idle => {
                 if high {
                     self.quiet_since = now;
-                }
-                if now.wrapping_sub(self.submitted) >= 5_000_000 {
-                    return self.finish(Outcome::Busy);
                 }
                 // Longer than stuffing-limited data runs, delimiter, EOF and intermission.
                 if now.wrapping_sub(self.quiet_since) < 16 * BIT_US {
@@ -243,19 +196,11 @@ mod tests {
     }
 
     #[test]
-    fn validates_command_before_claiming_a_port() {
-        assert_eq!(Request::parse(b"0 12300001a5 b45e"), Some(request()));
-        assert_eq!(Request::parse(b"4 12300001A5 B2FF").unwrap().port, 4);
-        for invalid in [
-            b"1 12300001a5 b45e".as_slice(), // CRC includes the port
-            b"0 12300002a5 e10d",            // valid CRC, invalid embedded length
-            b"0 12300001a4 b45e",
-            b"0 12300001a5 b45e1",
-            b"5 12300001a5 b45e",
-            b"0 12300001ag b45e",
-        ] {
-            assert!(Request::parse(invalid).is_none());
-        }
+    fn validates_link_structure_only() {
+        assert_eq!(Request::new(0, &[0x12, 0x30, 0, 1, 0xa5]), Some(request()));
+        assert!(Request::new(5, &[0; 4]).is_none());
+        assert!(Request::new(0, &[0; 3]).is_none());
+        assert!(Request::new(0, &[0x12, 0x30, 0, 2, 0xa5]).is_none());
     }
 
     #[test]
@@ -300,6 +245,6 @@ mod tests {
             Action::Finish(Outcome::ArbitrationLost)
         );
         let mut s = Sender::new(&request(), 0);
-        assert_eq!(s.poll(5_000_000, true), Action::Finish(Outcome::Busy));
+        assert_eq!(s.poll(5_000_000, true), Action::None);
     }
 }

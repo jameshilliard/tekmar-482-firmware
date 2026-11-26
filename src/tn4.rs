@@ -41,6 +41,9 @@ pub struct Receiver {
     history: u8,
     crc: u16,
     received: u16,
+    capture: [u8; MAX_BYTES + 2],
+    captured: usize,
+    failure: Option<u8>,
     ack: bool,
     start: u32,
     level: bool,
@@ -73,6 +76,9 @@ impl Default for Receiver {
             history: 0,
             crc: 0,
             received: 0,
+            capture: [0; MAX_BYTES + 2],
+            captured: 0,
+            failure: None,
             ack: false,
             start: 0,
             level: false,
@@ -83,6 +89,14 @@ impl Default for Receiver {
 }
 
 impl Receiver {
+    pub fn take_failure(&mut self) -> Option<(u8, u16, &[u8])> {
+        let reason = self.failure.take()?;
+        Some((
+            reason,
+            self.captured as u16,
+            &self.capture[..self.captured.div_ceil(8)],
+        ))
+    }
     pub fn last_crc_failure(&self) -> Option<(u32, &[u8])> {
         if self.stats.crc_mismatch == 0 {
             return None;
@@ -145,6 +159,7 @@ impl Receiver {
             self.history = ((self.history << 1) | b) & 63;
             match self.history {
                 0 | 63 => {
+                    self.failure = Some(1);
                     self.stats.stuffing = self.stats.stuffing.saturating_add(1);
                     self.state = State::Seek(0);
                     return None;
@@ -152,6 +167,13 @@ impl Receiver {
                 1 | 62 => return None, // complementary stuff bit after five equal bits
                 _ => {}
             }
+            let offset = self.captured % 8;
+            let slot = &mut self.capture[self.captured / 8];
+            if offset == 0 {
+                *slot = 0;
+            }
+            *slot |= b << (7 - offset);
+            self.captured += 1;
         }
         self.state = match self.state {
             State::Seek(_) if high => State::Seek(0),
@@ -159,6 +181,8 @@ impl Receiver {
             State::Seek(n) => State::Seek(n + 1),
             State::Idle if !high => State::Idle,
             State::Idle => {
+                self.capture[0] = 0x80;
+                self.captured = 1;
                 self.stats.starts = self.stats.starts.saturating_add(1);
                 self.start = self.edge_us;
                 self.bits = 0;
@@ -194,10 +218,12 @@ impl Receiver {
                     self.stats.last_expected_crc = self.crc;
                     self.last_bad_start = self.start;
                     self.last_bad_body = self.bytes;
+                    self.failure = Some(2);
                     State::Seek(0)
                 }
             }
             State::Delimiter if high => {
+                self.failure = Some(3);
                 self.state = State::Seek(0);
                 return Some(Trailer::BadDelimiter);
             }
@@ -207,6 +233,7 @@ impl Receiver {
                 State::End(8)
             }
             State::End(_) if high => {
+                self.failure = Some(4);
                 self.state = State::Seek(0);
                 return Some(Trailer::BadEnd { ack: self.ack });
             }
