@@ -181,6 +181,8 @@ SlabStatus (26F) supplies the floor reading. The gateway requests sensor
 setup (block 000D) to determine whether that reading also supplies
 CurrentTemperature. Only one floor sensor and four off slots qualifies as
 floor-only. A mixed room/floor configuration keeps both readings separate.
+Truncated or ambiguous setup reports and reports without any supported
+assignment leave the last confirmed configuration and pending reports intact.
 No confirmed floor configuration means the floor reading is unavailable.
 Native temperature sentinels 4000, 8000 and C000 all become FFFF in tRPC.
 

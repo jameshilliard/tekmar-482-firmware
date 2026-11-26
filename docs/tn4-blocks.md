@@ -69,6 +69,33 @@ available data, not these lists.
 | A3..A8 | Humidification/dehumidification setup, their setback targets, heat pump cycles, cooling purge minutes, onboard humidity sensor enable. |
 | A9..B0 | Five balance-point targets, balance-point schedule ID, W1 shutdown, W2 lockout, Y during W2, baseload mode, unoccupied humidity enable and humidity differential. |
 
+## Thermostat Sensor Inputs
+
+Block `0D` assigns onboard and external inputs 1..4, one support bit
+per slot. On an identified thermostat the codes are 0 off, 1 room,
+2 floor, 3 remote, 4 outdoor, 5 coil, 6 duct, 7 setpoint, 8 hot tub,
+9 DHW, and 10 pool. Block `15` reports room average, minimum and maximum;
+`16..1A` report each input's own role and current, minimum and maximum.
+The words are little-endian degH: Fahrenheit = (raw - 850) / 10.
+Keep zero, reserved values and half-supported words out of numeric
+readings. Two slots assigned the same role are still two inputs.
+
+The 483 SW 11 inbound block fixups and thermostat model distinguish:
+
+| Model / revision | Block | Interpretation |
+| --- | --- | --- |
+| 544 A..I; 545 and 546 A..J | `16` onboard only | Swap status codes 0 and 1. Other roles, setup and external inputs are unchanged. |
+| 538 A..D | `17` external 1 | Ignore the unreliable role byte. A complete current word below 270 degH implies off; at least 270 implies floor. A missing or reserved word cannot establish a working sensor. |
+| 528 A..B; 538 A..E | `17` external 1 | A status of off with a nonzero usable current can be displayed as floor. This is not evidence of an enabled floor assignment. |
+
+These are model/revision-specific rules, not temperature limits. When a
+revision is unknown, do not guess a correction. Preserve the wire role,
+setup role and words alongside their interpretation. If setup and a known
+status disagree, withhold labeled temperatures. The floor mean uses the
+assigned floor inputs (external 1 alone on 528/538) and rounds down in
+native units; do not publish it with missing contributors. The input
+blocks are read-only here. Raw forwarding never changes their bytes.
+
 ## Selecting Instances
 
 A single `2D7` request can select several nodes on the same subnet. Each

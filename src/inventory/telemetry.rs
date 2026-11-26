@@ -166,19 +166,16 @@ impl Telemetry {
         ..Self::EMPTY
     };
     pub(super) fn sensor_setup(&mut self, mask: u8, values: &[u8]) -> Option<u16> {
-        self.attributes &= !(Self::FLOOR_ONLY | Self::FLOOR_SENSOR);
+        if mask & 0x1f == 0 {
+            return None;
+        }
         let mut floors = 0;
         let mut off = 0;
         for i in 0..5 {
             let value = if mask & (1 << i) == 0 {
                 0
             } else {
-                let Some(value) = block_byte(mask, values, i) else {
-                    self.floor = Floor::Unknown;
-                    self.dirty &= !Field::SlabTarget.mask();
-                    return None;
-                };
-                value
+                block_byte(mask, values, i)?
             };
             match value {
                 0 => off += 1,
@@ -194,6 +191,7 @@ impl Telemetry {
             Floor::Mixed
         };
         let changed = self.floor != next;
+        self.attributes &= !(Self::FLOOR_ONLY | Self::FLOOR_SENSOR);
         self.floor = next;
         if self.floor == Floor::Only {
             self.attributes &= !(Self::HEAT | Self::COOL);

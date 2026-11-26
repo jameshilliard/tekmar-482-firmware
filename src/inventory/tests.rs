@@ -973,7 +973,11 @@ fn attributes_follow_native_sources_not_the_requested_mask_or_product() {
         (0x2e7, &[0xa3, 0, 3, 0xff, 0], 27),
         (0x26f, &[0; 4], 27), // SlabStatus without sensor configuration.
         (0x2e7, &[13, 0, 3, 1, 2], 0x11b),
+        (0x2e7, &[13, 0, 0x13, 0], 0x11b), // Truncated setup cannot clear a floor sensor.
         (0x2e7, &[13, 0, 1, 2], 0x11c),
+        (0x2e7, &[13, 0, 0x11, 0, 0, 0], 0x11c), // Neither packed nor positional.
+        (0x2e7, &[13, 0, 0x80, 0], 0x11c),       // Extension only, no known assignment.
+        (0x2e7, &[13, 0, 0], 0x11c),
         (0x377, &[0; 13], 0x11c), // No room heat/cool in a floor-only setup.
         (0x2e7, &[13, 0, 1, 1], 0x18),
         (0x377, &[0; 13], 0x1b),

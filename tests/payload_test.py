@@ -11,6 +11,7 @@ from payloads.products import block_selectors, identify_product
 from payloads.queries import NativeStatusQuery, ReplyPart, SnowmeltRole, StatusRequest
 from payloads.scenes import NativeScene, SceneReport, SceneResponse
 from payloads.schedules import DailyEvents, ScheduleBinding, ScheduleCycle, ScheduleEvent, ScheduleProfile
+from payloads.sensors import SensorRole as R, SensorSlot, ThermostatSensors
 from payloads.writes import BlockPatch, NativeField as F, WritableBlock
 
 
@@ -19,6 +20,67 @@ def decode(mid, hex_bytes):
 
 
 class PayloadTests(unittest.TestCase):
+    def test_sensor_onboard_polarity_by_revision_not_external_or_setup(self):
+        for number, last in ((99203, 8), (99202, 9), (99201, 9)):
+            product = identify_product(number)
+            setup = decode(0x2e7, "0d 00 03 01 02")
+            for z, expected in ((0, R.ROOM), (last, R.ROOM), (last + 1, R.OFF), (None, None), (255, None)):
+                status = decode(0x2e7, "16 00 07 00 f2 05")
+                external = decode(0x2e7, "17 00 07 02 f3 05")
+                reading = ThermostatSensors.from_blocks(product, z, {13: setup, 0x16: status, 0x17: external})
+                onboard, floor = reading.inputs
+                self.assertEqual((onboard.reported_raw, onboard.setup_raw, onboard.status_role), (0, 1, expected))
+                self.assertEqual(onboard.current_f, 67.2 if expected == R.ROOM else None)
+                self.assertEqual(onboard.conflict, expected == R.OFF)
+                self.assertEqual((floor.slot, floor.status_role, floor.current_f), (SensorSlot.EXTERNAL_1, R.FLOOR, 67.3))
+            for raw, expected in ((1, R.OFF), (2, R.FLOOR), (0xfd, None)):
+                status = decode_payload(0x2e7, bytes([0x16, 0, 7, raw, 0xf2, 5]))
+                self.assertEqual(ThermostatSensors.from_blocks(product, last, {0x16: status}).inputs[0].status_role, expected)
+
+    def test_sensor_538_garbage_configuration_and_legacy_floor_display_are_distinct(self):
+        for number, z, raw, word, role, display in (
+            (100103, 3, 0xf3, 0, R.OFF, R.OFF), (100103, 3, 0xf4, 269, R.OFF, R.FLOOR),
+            (100103, 3, 0xf3, 270, R.FLOOR, R.FLOOR), (100103, 3, 2, 0xffff, None, None),
+            (100103, 3, 2, 0x4000, None, None), (100103, None, 2, 1520, None, None),
+            (100103, 4, 0, 1520, R.OFF, R.FLOOR), (100103, 5, 0, 1520, R.OFF, R.OFF),
+            (102302, 1, 0, 1520, R.OFF, R.FLOOR), (102302, 2, 0, 1520, R.OFF, R.OFF),
+            (102302, 1, 2, 1520, R.FLOOR, R.FLOOR), (102302, 1, 0xfe, 1520, None, None),
+        ):
+            with self.subTest(number=number, z=z, raw=raw, word=word):
+                block = decode_payload(0x2e7, bytes([0x17, 0, 7, raw]) + word.to_bytes(2, "little"))
+                reading = ThermostatSensors.from_blocks(identify_product(number), z, {0x17: block})
+                sensor, = reading.inputs
+                self.assertEqual((sensor.reported_raw, sensor.status_role, sensor.display_role), (raw, role, display))
+                self.assertEqual(sensor.current_raw, word)
+                self.assertEqual(sensor.current_f is not None, display == R.FLOOR)
+                self.assertEqual(reading.average_floor_f is not None, role == R.FLOOR)
+
+    def test_sensor_statistics_sparse_words_roles_and_complete_floor_mean(self):
+        blocks = {13: decode(0x2e7, "0d 00 06 02 02"), 0x15: decode(0x2e7, "15 00 3f f2 05 00 40 00 00"),
+                  0x17: decode(0x2e7, "17 00 67 02 f2 05 f4 05")}
+        product = identify_product(107201)
+        first = ThermostatSensors.from_blocks(product, 0, blocks)
+        floor, missing = first.inputs
+        self.assertEqual((floor.current_f, floor.minimum_f, floor.maximum_f), (67.2, None, 67.4))
+        self.assertIsNone(missing.current_f)
+        self.assertIsNone(first.average_floor_f)
+        self.assertEqual((first.room.average_f, first.room.minimum_raw, first.room.maximum_raw), (67.2, 0x4000, 0))
+        self.assertIsNone(first.room.minimum_f)
+        self.assertIsNone(first.room.maximum_f)
+        blocks[0x18] = decode(0x2e7, "18 00 06 f5 05")  # Current without status role: separate setup supplies it.
+        self.assertEqual(ThermostatSensors.from_blocks(product, None, blocks).average_floor_f, 67.3)
+        blocks[0x18] = decode(0x2e7, "18 00 03 02 f5")  # Half a word is never a temperature.
+        self.assertIsNone(ThermostatSensors.from_blocks(product, None, blocks).average_floor_f)
+        for raw in range(11):
+            sensor, = ThermostatSensors.from_blocks(product, None, {0x17: {"sensor_configuration": raw,
+                "current_value_raw": 1520, "minimum_value_raw": 0xffff, "maximum_value_raw": 0x8000}}).inputs
+            self.assertEqual(sensor.status_role, R(raw))
+            self.assertIsNone(sensor.minimum_f)
+            self.assertIsNone(sensor.maximum_f)
+            self.assertEqual(sensor.current_f is not None, raw != 0)
+        with self.assertRaisesRegex(ValueError, "thermostat"):
+            ThermostatSensors.from_blocks(identify_product(105801), 0, blocks)
+
     def test_calendar_day_mapping_and_readback_follow_identified_revision(self):
         for tektra, part, last in ((105103, 1213, 13), (104401, 1215, 2)):
             for z, monday in ((0, 1), (last, 1), (last + 1, 0)):
