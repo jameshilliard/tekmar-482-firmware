@@ -1,5 +1,6 @@
 ELF := target/armv4t-none-eabi/release/tekmar-482-firmware
 RAM_ELF := target/ram-trial/armv4t-none-eabi/release/tekmar-482-firmware
+EMBASSY_ELF := target/embassy/armv4t-none-eabi/release/lpc2146-embassy-trial
 OBJCOPY ?= arm-none-eabi-objcopy
 
 .PHONY: image ram-trial check
@@ -25,3 +26,10 @@ check: image ram-trial
 	uv run --script tests/backup_test.py
 	uv run --script tests/smoke.py $(ELF).bin
 	uv run --script tests/smoke.py --ram $(RAM_ELF).bin
+
+.PHONY: embassy-trial
+embassy-trial:
+	RUSTC_BOOTSTRAP=1 cargo build --locked --release --manifest-path experiments/embassy/Cargo.toml --target armv4t-none-eabi -Zbuild-std=core --target-dir target/embassy
+	$(OBJCOPY) -O binary $(EMBASSY_ELF) $(EMBASSY_ELF).bin
+	python3 tools/check_image.py --ram $(EMBASSY_ELF).bin
+	uv run --script experiments/embassy/smoke.py $(EMBASSY_ELF).bin

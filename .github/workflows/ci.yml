@@ -16,3 +16,5 @@ jobs:
         run: make check
         env:
           TEKMAR_BUILD_REVISION: ${{ github.sha }}
+      - name: Check experimental Embassy SRAM image
+        run: make embassy-trial
