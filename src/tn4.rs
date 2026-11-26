@@ -23,6 +23,7 @@ pub struct Frame<'a> {
 #[derive(Clone, Copy)]
 enum State {
     Seek(u8),
+    Dominant(u8),
     Idle,
     Data,
     Check(u8),
@@ -109,7 +110,14 @@ impl Receiver {
     }
 
     pub fn partial(&self) -> bool {
-        !matches!(self.state, State::Seek(_) | State::Idle)
+        !matches!(
+            self.state,
+            State::Seek(_) | State::Dominant(_) | State::Idle
+        )
+    }
+
+    pub fn stuck_dominant(&self) -> bool {
+        matches!(self.state, State::Dominant(14))
     }
 
     /// Sample at bit centers, re-centering on each captured transition.
@@ -165,7 +173,9 @@ impl Receiver {
             self.captured += 1;
         }
         self.state = match self.state {
-            State::Seek(_) if high => State::Seek(0),
+            State::Seek(_) if high => State::Dominant(1),
+            State::Dominant(n) if high => State::Dominant((n + 1).min(14)),
+            State::Dominant(_) => State::Seek(1),
             State::Seek(6) => State::Idle,
             State::Seek(n) => State::Seek(n + 1),
             State::Idle if !high => State::Idle,
@@ -334,6 +344,24 @@ mod tests {
             assert_eq!(frames[0].1, [0x12, 0x30, 0, 1, 0xa5]);
             assert_eq!((frames[0].2, frames[0].3), (0xe2f, result));
         }
+    }
+
+    #[test]
+    fn fourteen_dominant_idle_samples_signal_a_line_fault_not_a_frame() {
+        let mut rx = Receiver::default();
+        for _ in 0..13 {
+            assert!(rx.bit(true).is_none());
+            assert!(!rx.stuck_dominant() && !rx.partial());
+        }
+        rx.bit(true);
+        assert!(rx.stuck_dominant());
+        assert!(rx.take_failure().is_none());
+        for _ in 0..7 {
+            rx.bit(false);
+            assert!(!rx.stuck_dominant());
+        }
+        rx.bit(true);
+        assert!(rx.partial());
     }
 
     #[test]

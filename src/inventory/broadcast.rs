@@ -64,11 +64,6 @@ impl Broadcast {
             }
         }
     }
-
-    pub fn outdoor_echo(self, frame: &[u8]) -> bool {
-        matches!(self.value, Value::Outdoor(word) | Value::RequestedOutdoor(word) if matches!(frame,
-            [0x72, 0xf0, 0, 4, a, b, c, d] if [*a, *b] == word.to_le_bytes() && a == c && b == d))
-    }
 }
 
 #[derive(Clone, Copy)]

@@ -99,6 +99,10 @@ def run(path, ram, fast=False):
     gpio = {0: 0, 0x10: 0, 0x14: 2 | button, 0x20: 0, 0x30: 0, 0x34: 0}
     pins = 0
     clock = 0
+    uptime_offset = 0
+    jump_at = None
+    discovery_end = None
+    retry_isp_at = None
     edges = deque()
     panel_edges = deque()
     inventory_at = None
@@ -108,12 +112,37 @@ def run(path, ram, fast=False):
     setting_exchange = exchanges[0]
     driven = [[] for _ in PORTS]
     external = [False] * len(PORTS)
+    peers = set()
+    peer_ack = [False] * len(PORTS)
+    ack_prefixes = [set() for _ in PORTS]
     drive_start = [0] * len(PORTS)
     expected_rx_acks = set()
     received_rx_acks = set()
     raw_mode, raw_ack_mask = False, 0
+    master, init = bytes.fromhex("7f700000"), bytes.fromhex("7df00000")
+    line_wires = {protected_bits(body) + "0" * 11: body for body in (master, init)}
+    probe_slots = {protected_bits(body) + "00" for body in (master, init)}
+    line_sends = [[] for _ in PORTS]
+    wire_log = deque(maxlen=12)
     clock_frame = bytes.fromhex("71f00005 1b52 05190c")
     clock_ports = set()
+
+    def line_progress():
+        nonlocal phase, jump_at, discovery_end
+        if phase == "line-cold" and len(actual) >= 4 and all(line_sends):
+            assert all([b for b, _ in tx] == [init] for tx in line_sends)
+            phase = "line-up"
+            end = inject(bytes.fromhex("7ff00001 00"))
+            inject(bytes.fromhex("7ff05001 00"), port=1, after=end)
+        elif phase == "line-up" and all(any(b == master for b, _ in tx) for tx in line_sends[:2]):
+            phase = "line-wait"
+            # Only the peer on port 1 suppresses the 30-second follow-up.
+            jump_at = inject(bytes.fromhex("7df05000"), port=1) + 20_000
+        elif phase == "line-wait" and len(line_sends[0]) == 3:
+            query_at, init_at = (at for _, at in line_sends[0][1:])
+            assert abs(init_at - query_at - 30_000_000) < 250_000
+            phase = "line-check"
+            discovery_end = clock + 1_200_000
 
     def level(p, high, at):
         pin, t, ch, _ = PORTS[p]
@@ -135,8 +164,14 @@ def run(path, ram, fast=False):
                 if off == 0 and value & tx and not gpio[0] & tx:
                     drive_start[p] = clock
                     drive_bits.append("1" if pins & tx else "0")
+                    ack_prefixes[p].clear()
+                    if not raw_mode and p in peers:
+                        ack_prefixes[p].update(probe_slots)
+                        if exchange:
+                            ack_prefixes[p].add(protected_bits(exchange[0][0]) + "00")
                 elif off in (0x18, 0x1C) and gpio[0] & tx and value & tx:
                     drive_bits.append("1" if off == 0x18 else "0")
+                    peer_ack[p] = bool(ack_prefixes[p]) and "".join(drive_bits) in ack_prefixes[p]
                 elif off == 0 and not value & tx and gpio[0] & tx:
                     if drive_bits == ["1", "0"]:
                         # Receiver drives only the link ACK slot, never its own frame.
@@ -145,12 +180,21 @@ def run(path, ram, fast=False):
                         received_rx_acks.add(slot)
                         drive_bits.clear()
                         continue
+                    wire = "".join(drive_bits)
+                    wire_log.append((drive_start[p], "tx", p, wire[:48], len(wire)))
+                    if wire in line_wires:
+                        assert not raw_mode, "autonomous discovery in Raw mode"
+                        line_sends[p].append((line_wires[wire], drive_start[p] + uptime_offset))
+                        drive_bits.clear()
+                        line_progress()
+                        continue
                     if not exchange:
+                        assert not raw_mode and not phase.startswith("line-"), (p, phase, wire)
                         drive_bits.clear()
                         continue
                     expected, device_reply = exchange.popleft()
                     # Ten delimiter/ACK/EOF bits, then the driver's final release.
-                    assert "".join(drive_bits) == protected_bits(expected) + "0" * 11
+                    assert wire == protected_bits(expected) + "0" * 11, (p, phase, expected.hex(), wire)
                     drive_bits.clear()
                     if device_reply:
                         inject(device_reply)
@@ -183,7 +227,7 @@ def run(path, ram, fast=False):
             else:
                 pins &= ~value
             for p, (_, _, _, tx) in enumerate(PORTS):
-                level(p, external[p] or bool(gpio[0] & pins & 1 << tx), clock)
+                level(p, external[p] or peer_ack[p] or bool(gpio[0] & pins & 1 << tx), clock)
         elif off in (0x38, 0x3C):
             gpio[0x34] = gpio[0x34] | value if off == 0x38 else gpio[0x34] & ~value
         else:
@@ -192,21 +236,35 @@ def run(path, ram, fast=False):
     cpu.mmio_map(0x3FFFC000, 0x1000, lambda u, o, s, d: gpio[o], None, gpio_write, None)
 
     def timer_read(uc, off, size, t):
-        nonlocal clock, inventory_at, next_byte, queued_send_at
+        nonlocal clock, inventory_at, next_byte, queued_send_at, phase, jump_at, uptime_offset, discovery_end, retry_isp_at
         if off == 8:
             if t == 0 and timers[t].get(4) == 1:
                 clock += 40
+                if retry_isp_at is not None and clock >= retry_isp_at:
+                    retry_isp_at = None
+                    extension(5, update=True)
+                    at_line_rate()
+                if jump_at is not None and clock >= jump_at:
+                    jump_at = None
+                    uptime_offset += 27_000_000  # PWM uptime only; preserve tN4 bit timing.
+                if discovery_end is not None and clock >= discovery_end:
+                    discovery_end = None
+                    assert [[b for b, _ in tx] for tx in line_sends] == [
+                        [init, master, init], [init, master], [init], [init], [init],
+                    ]
+                    phase = "capture"
+                    inventory_at = inject(bytes.fromhex("6e700609 00003f 828301 2301 04"))
                 while burst and next_byte <= clock:
                     assert len(incoming) < 16, "LPC2146 UART RX FIFO overrun during command burst"
                     incoming.append(burst.popleft())
                     next_byte += 53 if fast else 1042  # 8N1 character time in us.
                 cpu.mem_write(
-                    0xE0014008, struct.pack("<I", (0xFFFF0000 + clock) & 0xFFFFFFFF)
+                    0xE0014008, struct.pack("<I", (0xFFFF0000 + clock + uptime_offset) & 0xFFFFFFFF)
                 )
                 while edges and edges[0][0] <= clock:
                     at, p, high = edges.popleft()
                     external[p] = high
-                    level(p, high or bool(gpio[0] & pins & 1 << PORTS[p][3]), at)
+                    level(p, high or peer_ack[p] or bool(gpio[0] & pins & 1 << PORTS[p][3]), at)
                 while panel_edges and panel_edges[0][0] <= clock:
                     _, down = panel_edges.popleft()
                     gpio[0x14] = gpio[0x14] & ~button if down else gpio[0x14] | button
@@ -278,12 +336,15 @@ def run(path, ram, fast=False):
     read_events = set()
     telemetry = []
     overlap = False
-    phase = "capture"
+    phase = "line-cold"
 
     def inject(body, port=0, *, after=None):
+        if not raw_mode:
+            peers.add(port)
         protected = protected_bits(body)
         wire = protected + "0" * 18
         start = (clock if after is None else after) + 30_000
+        wire_log.append((start, "rx", port, body.hex()))
         if not raw_mode or raw_ack_mask & (1 << port):
             expected_rx_acks.add((port, start + (len(protected) + 1) * 2500))
         for i, bit in enumerate(wire):
@@ -327,13 +388,12 @@ def run(path, ram, fast=False):
             telemetry_capture()
 
     def reply(kind, data):
-        nonlocal phase, overlap, inventory_at, raw_mode, raw_ack_mask
+        nonlocal phase, overlap, raw_mode, raw_ack_mask, uptime_offset, retry_isp_at
         actual.append((kind, data))
         if kind == 6:
             method = int.from_bytes(data[1:5], "little")
             if method == 0x544BF004:
-                # Product block at port 0, subnet 0, node 24 (tHA address 1).
-                inventory_at = inject(bytes.fromhex("6e700609 00003f 828301 2301 04"))
+                line_progress()
             elif method == 0x167 and data[5:] == bytes(2):
                 assert actual[-2] == (6, bytes.fromhex("04670100000100"))
                 call(0x197, bytes.fromhex("010000000000"))
@@ -501,6 +561,7 @@ def run(path, ram, fast=False):
                 call(0x187, b"\xff\xff")
             elif method == 0x544BF002 and data[5:] == bytes([1]):
                 raw_mode = True
+                uptime_offset += 61_000_000
                 assert [pkt for k, pkt in actual if k == 6 and pkt[1:5] == bytes.fromhex("a7010000")] == [
                     bytes.fromhex("03a7010000") + b"\xff" * 7,
                     bytes.fromhex("03a7010000dc07061a020a1b"),
@@ -515,17 +576,25 @@ def run(path, ram, fast=False):
                 plant_inputs()
             elif method == 0x544BF002 and data[5:] == bytes([0]):
                 raw_mode, raw_ack_mask = False, 0
+                # A discovery attempt waiting for idle must not block an ISP handoff.
+                external[2] = True
+                level(2, True, clock)
                 extension(7)
             elif method == 0x544BF007:
                 _, inputs, presses, _, _, _, sweep = struct.unpack("<7I", data[5:])
                 assert presses == 4 and inputs == 1 and not sweep
                 assert (6, bytes.fromhex("0406f04b54 87010000 03")) in actual
+                phase = "enter-update"
                 for p in range(5):
                     extension(3, bytes([p]))
                 extension(5, update=True)
                 # Deliver these contiguous commands at line rate into a
                 # finite hardware FIFO, not the harness's unlimited backlog.
                 at_line_rate()
+            elif method == 0x544BF006 and data[5:] == bytes.fromhex("05f04b54 01"):
+                # A Normal frame already on the wire must finish before entering ISP.
+                assert phase == "enter-update" and retry_isp_at is None
+                retry_isp_at = clock + 25_000
             return
         service, p = data[:2]
         if service == 4:
@@ -652,8 +721,9 @@ def run(path, ram, fast=False):
     cpu.mmio_map(0xE000C000, 0x1000, read, None, write, None)
     cpu.hook_add(UC_HOOK_CODE, rom, begin=0x7FFFFFF0, end=0x7FFFFFF0)
     # The scenario runs real ARM instructions while each synthetic tN4 bit elapses.
-    cpu.emu_start(base, 0xFFFFFFFF, count=200_000_000)
-    assert entered, (clock, phase, [len(x) for x in exchanges], results, actual[-10:])
+    cpu.emu_start(base, 0xFFFFFFFF, count=400_000_000)
+    assert entered, (clock, phase, [len(x) for x in exchanges], results, actual[-10:],
+                     line_sends, expected_rx_acks - received_rx_acks, list(wire_log))
     assert actual[:4] == [
         (6, bytes.fromhex(x))
         for x in ("048f0100000300", "0400000000", "0401f04b5401000503")
@@ -669,12 +739,13 @@ def run(path, ram, fast=False):
         assert (6, bytes.fromhex("0403f04b54") + bytes([p]) + bytes(8)) in actual
     assert not reads and not read_events and actual[-1] == (6, bytes.fromhex("0305f04b54"))
     assert tuple(telemetry) == TELEMETRY
+    assert [b for b, _ in line_sends[2]] == [init]
     assert expected_rx_acks and received_rx_acks == expected_rx_acks, expected_rx_acks - received_rx_acks
     painted = bytes(cpu.mem_read(floor, top - floor))
     free = len(painted) - len(painted.lstrip(b"\xa5"))
     assert free >= 256, free
     print(
-        f"ARM TPCK: five simultaneous RX, invalid CRCs, independent TX/overlap, ISP; untouched stack {free} bytes"
+        f"ARM TPCK: five-port discovery, RX/ACK, invalid CRCs, independent TX/overlap, ISP; untouched stack {free} bytes"
     )
 
 

@@ -43,13 +43,28 @@ own frame. A link ACK is independent of serial reporting, application
 support for the message, and whether the device applied a setting.
 Raw mode is passive unless the host explicitly selects ports for RX ACK.
 
+Normal mode runs discovery independently on all five physical lines,
+even with serial reporting disabled. The stock application service
+(`0x78dc`) samples link state once per second:
+
+- At startup an unseen, quiet port gets one empty class-1 NetworkInitRequest
+  (`3DF`). The stock startup table at `0xc458` zeroes both the seen flag
+  and its deadline; `0xb410` treats that deadline as expired.
+- On a sampled transition to link-up, send one empty class-1 MasterQuery
+  (`3F7`). Start a new 30-second window. Unless a peer sends `3DF` on
+  **that port**, send `3DF` once at the end of the window. MasterPresent
+  (`3FF`) supplies the master's subnet but does not suppress the follow-up.
+- A valid received frame or an externally ACKed send establishes link-up.
+  A gateway's unacknowledged echo is not a peer. A link fault followed by
+  recovery can start a new cycle; elapsed silence alone cannot. Neither
+  a probe nor an ACK creates an inventory entry.
+
+Host setting operations and broadcasts take precedence over a discovery
+frame that has not started. Switching to Raw cancels pending probes;
+returning to Normal starts fresh. Raw never initiates line discovery.
+
 There are still differences from J1196J:
 
-- The stock application sends a class-1 MasterQuery (`3F7`) when a line
-  comes up, and sends NetworkInitRequest (`3DF`) after 30 seconds unless
-  it has seen that probe. Normal mode currently identifies devices from
-  observed traffic and requests missing identity, but does not run this
-  automatic line bring-up sequence. A Raw host can send either frame.
 - The stock link driver has error-dependent retries and backoff
   (`0x4354`). The custom transmitter makes one attempt. An unacknowledged
   setting write is not blindly replayed; settings use device readback.

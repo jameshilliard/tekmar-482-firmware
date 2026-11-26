@@ -27,18 +27,26 @@ class PanelState(NamedTuple):
 
 
 async def call(port, method, body=b"", *, update=False, receive=None):
-    method = (0x544bf000 + method).to_bytes(4, "little")
-    await port.write(encode(6, bytes([0 if update else 1]) + method + body))
+    key = (0x544bf000 + method).to_bytes(4, "little")
+    request = encode(6, bytes([0 if update else 1]) + key + body)
     async def wait():
+        await port.write(request)
         while True:
             kind, data = await port.packet()
             if kind == 1 and receive is not None:
                 receive(data)
             if kind != 6 or data[:1] != bytes([3 if update else 4]):
                 continue
-            if data[1:5] == method:
+            if data[1:5] == key:
                 return data[5:]
-            if data[1:5] == bytes(4) or (data[1:5] == bytes.fromhex("06f04b54") and data[5:9] == method):
+            if data[1:5] == bytes.fromhex("06f04b54") and data[5:9] == key:
+                if update and method in (2, 5) and data[9:] == b"\x01":
+                    # The transition was rejected before it took effect.
+                    await asyncio.sleep(0.025)
+                    await port.write(request)
+                    continue
+                raise RuntimeError(f"management request rejected: {data.hex()}")
+            if data[1:5] == bytes(4):
                 raise RuntimeError(f"management request rejected: {data.hex()}")
     return await asyncio.wait_for(wait(), 5)
 

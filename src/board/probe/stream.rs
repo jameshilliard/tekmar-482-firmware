@@ -7,7 +7,7 @@ use core::cell::RefCell;
 use embassy_futures::yield_now;
 use tekmar_482_firmware::uptime::Uptime;
 use tekmar_482_firmware::{
-    inventory::{AddressMove, Answer, Broadcast, Inventory, Observation},
+    inventory::{AddressMove, Answer, Broadcast, Inventory, LineProbe, Observation},
     tn4::{
         Frame, LinkAck, Receiver, Trailer,
         tx::{Outcome, Request},
@@ -57,6 +57,7 @@ impl Receivers {
 #[derive(Clone, Copy)]
 enum NormalTx {
     Probe,
+    Discovery(LineProbe),
     Setting,
     Broadcast(Broadcast),
 }
@@ -86,12 +87,13 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
     let mut ack_pin: [Option<LineDriver>; 5] = core::array::from_fn(|_| None);
     let mut ack_mask = 0u8;
     let mut uptime = Uptime::default();
+    let mut last_service = None;
     loop {
         let us = crate::board::panel::now();
-        let before = uptime.seconds;
         uptime.sample(us);
         let seconds = uptime.seconds;
-        if !raw && seconds != before {
+        if !raw && !reboot && last_service != Some(seconds) {
+            last_service = Some(seconds);
             inventory.tick(seconds);
         }
         let now = TIMERS.map(|t| read(t + TC));
@@ -107,10 +109,9 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                 data[6..6 + frame.bytes.len()].copy_from_slice(frame.bytes);
                 out.enqueue(Kind::Rx(p as u8), tpck::TN4, &data[..6 + frame.bytes.len()]);
             } else if !reboot
-                // The receiver hears our own broadcast before the sender finishes.
-                // It is not an independent outdoor sensor renewing the network value.
-                && !(matches!(owner[p], NormalTx::Broadcast(tx) if tx.outdoor_echo(frame.bytes))
-                    && sending[p].as_ref().is_some_and(Attempt::started))
+                // RX sees our own frame before TX finishes. Only a peer counts as
+                // link-up, suppresses a line probe or supplies an outdoor sample.
+                && !sending[p].as_ref().is_some_and(Attempt::started)
                 && let Some(observed) = inventory.observe(
                     p,
                     frame.bytes,
@@ -136,27 +137,31 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
             }
         });
         for p in 0..5 {
-            if let Some((why, bits, bytes)) = bus.rx[p].take_failure()
-                && raw
-            {
-                let mut data = [0; 78];
-                data[0] = 4;
-                data[1] = p as u8;
-                data[2..6].copy_from_slice(&uptime.millis(us).to_le_bytes());
-                data[6] = why;
-                data[7..9].copy_from_slice(&bits.to_le_bytes());
-                data[9..9 + bytes.len()].copy_from_slice(bytes);
-                out.enqueue(Kind::Invalid(p as u8), tpck::TN4, &data[..9 + bytes.len()]);
+            if let Some((why, bits, bytes)) = bus.rx[p].take_failure() {
+                if raw {
+                    let mut data = [0; 78];
+                    data[0] = 4;
+                    data[1] = p as u8;
+                    data[2..6].copy_from_slice(&uptime.millis(us).to_le_bytes());
+                    data[6] = why;
+                    data[7..9].copy_from_slice(&bits.to_le_bytes());
+                    data[9..9 + bytes.len()].copy_from_slice(bytes);
+                    out.enqueue(Kind::Invalid(p as u8), tpck::TN4, &data[..9 + bytes.len()]);
+                } else if !sending[p].as_ref().is_some_and(Attempt::started) {
+                    inventory.line(p).frame_error();
+                }
+            }
+            if !raw && bus.rx[p].stuck_dominant() {
+                inventory.line(p).down();
             }
             let t = read(TIMERS[INPUTS[p].1] + TC);
-            if !raw
-                && (inventory.has_command(p)
-                    || inventory.has_broadcast(p)
-                    || matches!(owner[p], NormalTx::Broadcast(_)))
-            {
+            if !raw && !reboot {
+                let foreground = inventory.has_command(p) || inventory.has_broadcast(p);
+                let discovery = inventory.line(p).pending();
                 inventory.command_expire(p, seconds);
                 let cancel = match owner[p] {
-                    NormalTx::Probe => true,
+                    NormalTx::Probe => foreground,
+                    NormalTx::Discovery(probe) => foreground || discovery != Some(probe),
                     NormalTx::Setting => inventory.command_finished(p),
                     NormalTx::Broadcast(tx) => inventory.stale_broadcast(p, tx, seconds),
                 };
@@ -165,7 +170,8 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                     sending[p] = None;
                     owner[p] = NormalTx::Probe;
                 }
-                if sending[p].is_none() && !ack[p].driving() {
+                if (foreground || discovery.is_some()) && sending[p].is_none() && !ack[p].driving()
+                {
                     if let Some(req) = inventory.command_frame(p) {
                         sending[p] = Attempt::new(&req, INPUTS[p].0, t);
                         if sending[p].is_some() {
@@ -183,6 +189,14 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                         sending[p] = Attempt::new(&req, INPUTS[p].0, t);
                         if sending[p].is_some() {
                             owner[p] = NormalTx::Broadcast(tx);
+                        }
+                    } else if !foreground
+                        && let Some(probe) = discovery
+                        && let Some(req) = probe.frame(p as u8)
+                    {
+                        sending[p] = Attempt::new(&req, INPUTS[p].0, t);
+                        if sending[p].is_some() {
+                            owner[p] = NormalTx::Discovery(probe);
                         }
                     }
                 }
@@ -207,10 +221,18 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
             }
             if !ack[p].driving()
                 && let Some(attempt) = sending[p].as_mut()
-                && let Some(result) = attempt.poll(t)
             {
+                let result = attempt.poll(t);
+                if let NormalTx::Discovery(probe) = owner[p]
+                    && attempt.started()
+                {
+                    inventory.line(p).started(probe);
+                    owner[p] = NormalTx::Probe;
+                }
+                let Some(result) = result else { continue };
                 sending[p] = None;
                 if !raw {
+                    inventory.line(p).sent(result);
                     if matches!(
                         core::mem::replace(&mut owner[p], NormalTx::Probe),
                         NormalTx::Setting
@@ -307,10 +329,14 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                             {
                                 for (p, attempt) in sending.iter_mut().enumerate() {
                                     if !ack[p].driving()
-                                        && matches!(owner[p], NormalTx::Probe)
+                                        && matches!(
+                                            owner[p],
+                                            NormalTx::Probe | NormalTx::Discovery(_)
+                                        )
                                         && attempt.as_ref().is_some_and(|a| !a.started())
                                     {
                                         *attempt = None;
+                                        owner[p] = NormalTx::Probe;
                                     }
                                 }
                             }
@@ -326,6 +352,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                                 (0x544bf002, 0, [m @ 0..=1]) if !busy => {
                                     if raw != (*m == 1) {
                                         inventory.reset();
+                                        last_service = None;
                                         panel.borrow_mut().reset_sequence();
                                     }
                                     raw = *m == 1;

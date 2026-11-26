@@ -1,9 +1,11 @@
 //! Normal-mode inventory. Bus addresses, not product numbers, identify entries.
 use crate::trpc::{Call, GatewayVersion, Reply};
 mod broadcast;
+mod discovery;
 mod groups;
 mod outdoor;
 pub use broadcast::Broadcast;
+pub use discovery::{LineDiscovery, LineProbe};
 mod settings;
 mod telemetry;
 use crate::tn4::tx::Request;
@@ -53,6 +55,7 @@ impl Device {
 
 #[derive(Default)]
 struct Port {
+    link: LineDiscovery,
     subnet: Option<u8>,
     devices: [Device; NODES],
     pending: u32,
@@ -88,6 +91,7 @@ impl Inventory {
             outdoor: outdoor::Outdoor::EMPTY,
             ports: [const {
                 Port {
+                    link: LineDiscovery::COLD,
                     subnet: None,
                     devices: [Device::EMPTY; NODES],
                     pending: 0,
@@ -169,6 +173,7 @@ impl Inventory {
         let message = (header >> 20) & 0x3ff;
         let subnet = (header >> 12) as u8;
         let bus = self.ports.get_mut(port)?;
+        bus.link.peer(message);
         if message == 0x32f {
             self.outdoor
                 .observe(data, now, self.reporting, &mut self.broadcasts);
@@ -372,6 +377,7 @@ impl Inventory {
         self.broadcasts = broadcast::Broadcasts::EMPTY;
         self.outdoor = outdoor::Outdoor::EMPTY;
         for port in &mut self.ports {
+            port.link = LineDiscovery::COLD;
             port.subnet = None;
             port.devices.fill(Device::default());
             port.pending = 0;
@@ -386,7 +392,13 @@ impl Inventory {
         self.ports[p].job.active()
     }
     pub fn tick(&mut self, now: u32) {
+        for port in &mut self.ports {
+            port.link.tick(now);
+        }
         self.outdoor.tick(now, self.reporting, &mut self.broadcasts);
+    }
+    pub fn line(&mut self, p: usize) -> &mut LineDiscovery {
+        &mut self.ports[p].link
     }
     pub fn has_broadcast(&self, p: usize) -> bool {
         self.broadcasts.pending(p)

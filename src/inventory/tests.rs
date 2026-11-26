@@ -39,6 +39,104 @@ fn address(reply: Reply) -> u16 {
 }
 
 #[test]
+fn line_discovery_is_per_port_one_shot_and_not_device_presence() {
+    use crate::tn4::tx::Outcome;
+    use LineProbe::{MasterQuery, NetworkInit};
+    let mut inv = Inventory::new();
+    let start = u32::MAX - 10;
+    inv.tick(start);
+    for p in 0..5 {
+        assert_eq!(inv.line(p).pending(), Some(NetworkInit));
+        assert_eq!(
+            NetworkInit.frame(p as u8),
+            Request::new(p as u8, &[0x7d, 0xf0, 0, 0])
+        );
+        inv.line(p).started(NetworkInit);
+        inv.line(p).sent(Outcome::NoAck);
+    }
+    let up = start + 1;
+    inv.line(0).sent(Outcome::Ack);
+    observe(&mut inv, 1, 3, 0, 0x3ff, &[1], up);
+    inv.tick(up);
+    for p in 0..5 {
+        assert_eq!(inv.line(p).pending(), (p <= 1).then_some(MasterQuery));
+        if p <= 1 {
+            assert_eq!(
+                MasterQuery.frame(p as u8),
+                Request::new(p as u8, &[0x7f, 0x70, 0, 0])
+            );
+            inv.line(p).started(MasterQuery);
+            inv.line(p).sent(Outcome::Ack);
+        }
+    }
+    observe(&mut inv, 0, 3, 0, 0x3ff, &[1], up);
+    observe(&mut inv, 1, 3, 0, 0x3df, &[], up);
+    inv.tick(up.wrapping_add(29));
+    assert!((0..5).all(|p| inv.line(p).pending().is_none()));
+    inv.tick(up.wrapping_add(30));
+    assert_eq!(inv.line(0).pending(), Some(NetworkInit));
+    assert!((1..5).all(|p| inv.line(p).pending().is_none()));
+    // A peer probe also cancels an init still waiting for a free driver.
+    observe(&mut inv, 0, 3, 0, 0x3df, &[], 30);
+    inv.tick(600);
+    assert!((0..5).all(|p| inv.line(p).pending().is_none()));
+    assert_eq!(address(call(&mut inv, 0x167, 1, &[0, 0], 600).unwrap()), 0);
+    inv.reset();
+    inv.tick(601);
+    assert!((0..5).all(|p| inv.line(p).pending() == Some(NetworkInit)));
+}
+
+#[test]
+fn discovery_rearms_only_after_a_sampled_loss_and_recovery() {
+    use crate::tn4::tx::Outcome;
+    use LineProbe::{MasterQuery, NetworkInit};
+    let mut link = LineDiscovery::COLD;
+    link.peer(0x3df); // link-up service clears the earlier seen flag
+    link.tick(1);
+    assert_eq!(link.pending(), Some(MasterQuery));
+    link.tick(40); // a held-off master query stays first
+    link.started(MasterQuery);
+    assert_eq!(link.pending(), Some(NetworkInit));
+    link.started(NetworkInit);
+    for result in [
+        Outcome::NoAck,
+        Outcome::ArbitrationLost,
+        Outcome::Late,
+        Outcome::Ack,
+    ] {
+        link.sent(result);
+        link.tick(41);
+        assert_eq!(link.pending(), None);
+    }
+    link.sent(Outcome::NoAck);
+    link.sent(Outcome::NoAck);
+    link.tick(42);
+    link.peer(0x3ff);
+    link.tick(43);
+    assert_eq!(link.pending(), Some(MasterQuery));
+    link.started(MasterQuery);
+    for _ in 0..9 {
+        link.frame_error();
+    }
+    link.tick(44);
+    link.sent(Outcome::Ack);
+    link.tick(45);
+    assert_eq!(link.pending(), None);
+    for _ in 0..10 {
+        link.frame_error();
+    }
+    link.tick(46);
+    link.sent(Outcome::Ack);
+    link.tick(47);
+    assert_eq!(link.pending(), Some(MasterQuery));
+    link.started(MasterQuery);
+    link.sent(Outcome::EchoMismatch);
+    link.peer(0x3ff); // recovered before the service sampled down
+    link.tick(48);
+    assert_eq!(link.pending(), None);
+}
+
+#[test]
 fn clock_update_admission_and_native_boundaries() {
     let mut inv = Inventory::new();
     inv.set_reporting(true);
@@ -107,7 +205,10 @@ fn outdoor_source_precedence_expiry_and_unsent_values() {
     assert_eq!(host(&mut inv, 0xbe9, 0), 0xbe9);
     assert!(!inv.has_reports());
     let queued = inv.next_broadcast(0, 0).unwrap();
-    assert!(queued.outdoor_echo(&[0x72, 0xf0, 0, 4, 0xe9, 0xb, 0xe9, 0xb]));
+    assert_eq!(
+        queued.frame(0),
+        Request::new(0, &[0x72, 0xf0, 0, 4, 0xe9, 0xb, 0xe9, 0xb])
+    );
     observe(&mut inv, 4, 0, 0, 0x32f, &[0xe9, 0xb], 0);
     assert!(inv.stale_broadcast(0, queued, 0)); // same word, actual sensor now owns it
     inv.set_reporting(true);
@@ -125,7 +226,10 @@ fn outdoor_source_precedence_expiry_and_unsent_values() {
     assert_eq!(address(inv.next_report(631).unwrap()), 1200);
     for p in 0..5 {
         let tx = inv.next_broadcast(p, 631).unwrap();
-        assert!(tx.outdoor_echo(&[0x72, 0xf0, 0, 4, 0xb0, 4, 0xb0, 4]));
+        assert_eq!(
+            tx.frame(p as u8),
+            Request::new(p as u8, &[0x72, 0xf0, 0, 4, 0xb0, 4, 0xb0, 4])
+        );
     }
     inv.tick(740);
     assert_eq!(address(inv.next_report(740).unwrap()), 0xffff);

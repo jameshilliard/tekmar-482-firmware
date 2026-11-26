@@ -50,9 +50,23 @@ class HelperTest(unittest.TestCase):
     def test_handoff(self):
         master, proc = self.start_helper("enter-isp")
         self.capabilities(master)
+        key = struct.pack("<I", 0x544bf005)
+        self.expect(master, encode(6, b"\0" + key))
+        os.write(master, encode(6, bytes.fromhex("0306f04b54") + key + b"\x01"))
         self.exchange(master, 5, b"", update=True)
         _, err = proc.communicate(timeout=3)
         self.assertEqual(proc.returncode, 0, err)
+
+    def test_non_busy_handoff_rejection_is_final(self):
+        master, proc = self.start_helper("enter-isp")
+        self.capabilities(master)
+        key = struct.pack("<I", 0x544bf005)
+        self.expect(master, encode(6, b"\0" + key))
+        os.write(master, encode(6, bytes.fromhex("0306f04b54") + key + b"\x02"))
+        _, err = proc.communicate(timeout=3)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn(b"management request rejected", err)
+        self.assertFalse(select.select([master], [], [], 0)[0])
 
     def test_identify(self):
         master, proc = self.start_helper("identify")
