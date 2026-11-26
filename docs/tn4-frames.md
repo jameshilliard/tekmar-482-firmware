@@ -134,6 +134,51 @@ maximum tN4 version. Only complete, supported fields are interpreted.
 These layouts come from the 483 block types and the J1196J block-report
 and block-update handlers. Reports include a support mask; updates do not.
 
+### Addressed snowmelt blocks
+
+These are native block IDs for `2D7` requests, `2E7` reports and `2DF`
+updates, **not** keys for a `17F` zone query or group IDs for a `21F`
+enable command. Identify the device from block 0: the 483 catalog maps
+tektra product 105801 / J1226 to model 654. Its model-specific support
+table lists all blocks below **except 00CD**, which is in the general
+registry. Use each device's reported mask, not the catalog, as evidence
+of a value. Addressed reads from a physical 654 returned all 31 listed
+blocks, including selector zero on the indexed ones. This was verified
+from block reports, not link ACKs. No settings were changed in that test.
+
+| Block (hex) | Data bytes, in order |
+| --- | --- |
+| 0071, 0072, 0078 | Melt, idle, storm slab targets respectively: one degH u16. Idle and Storm encode Off as zero; Melt has no Off setting. |
+| 0073 | Water sensitivity u8. |
+| 0074, 0075, 0079 | Manual melt run time, additional melt time, storm run time, respectively: u16 minutes. |
+| 0076, 0077 | Cold-weather cutoff and warm-weather shutdown target, respectively: raw u16. |
+| 007A, 007B | Sensor ID u8 and configuration u8: snow/ice sensor type or slab sensor selection. |
+| 007C, 007D | Slab protection u8; maximum melt time u16 in **hours**. |
+| 00C0..00C4 | One u8 per block: zone ID, sensor ID, melt group, storm group, tracked zone. |
+| 00C5 | Sensor ID u8, melt start type u8. |
+| 00C6..00CB | Sensor ID u8 and raw u16: slab high/low, supply high/low, return high/low, respectively. |
+| 00CC, 00CD | Relay ID u8 and u16 hours or cycles. |
+| 00CE, 00CF | Sensor ID u8 and u16 wet or dry level. |
+| 00D0 | Application mode u8, application type u8. The 483 names mode values 0..4 PWM, boiler, mixing, electric and sensor-only. |
+| 00D1, 00D2 | Control ID u8 and raw u16 boiler minimum or maximum. |
+
+The 483 sends the eleven-byte request layout with a little-endian u32
+argument, zero for unindexed blocks. For 007A/B, 00C5..CF and 00D1/D2,
+it selects the sensor, relay or control whose one-byte ID appears first in
+the report. ID zero is valid. 00C1 reports the configured sensor ID; it
+does not accept a sensor selector. The two bytes of a u16 must both be
+supported to interpret it; a single supported byte is kept raw.
+
+The 483's snowmelt adjustment editor writes the two-byte target for
+Melt, Idle or Storm. Its UI uses 20 F as a display substitute for Off,
+but its encoder sends **0000**, not the degH encoding of 20 F (1050).
+Changing a target does not start or stop the system. Read the block
+back for confirmation. The other layouts describe data, not evidence
+that a device accepts writes to counters, sensors or installer settings.
+See the [654 manual](https://www.watts.com/dfsmedia/0533dbba17714b1ab581ab07a4cbb521/81803-source/638820695340000000/654-d-03.pdf)
+for operating conditions and the distinction between set temperatures
+and enabling a group.
+
 ### Weekly schedules
 
 The 483's `ScheduleEvent` model defines a time byte in ten-minute units
@@ -184,14 +229,14 @@ unless its encoding is known.
 | --- | --- |
 | 01..18 | Command status; retain the individual key |
 | 19, 1a | Water detection, heat sequence |
-| 1b | Operating substate in low byte, state in high byte |
+| 1b | Operating substate in low byte, state in high byte (1 off, 2 idle, 3 storm, 4 melting) |
 | 1c, 1d, 1e, 1f | Warm-weather shutdown, cold-weather cutoff, zone type, electric off-time (15-second ticks) |
 | 20, 21 | Zone ID, sensor flags |
 | 22, 23, 24 | Slab temperature, slab setpoint, edge temperature (H) |
 | 25, 26 | Melt and storm group IDs |
 | 27, 28, 29 | Boiler, mixing and PWM outputs, raw |
 | 2a, 2b | System pump and alert-relay contacts |
-| 2c, 2d, 2e | Return, supply and supply target, raw |
+| 2c, 2d, 2e | Return, supply and supply target temperatures (H); the 483 maps these keys to its degH temperature model. |
 | 2f, 30 | Keep-alive, melting time (minutes) |
 | Others | Preserve key and raw u16 |
 

@@ -236,11 +236,107 @@ class PayloadTests(unittest.TestCase):
         fields = decode(0x17e, "09070102011b02011f0700210a002affff2d3412300c00")
         self.assertEqual(fields["pair0_command_status"], 258)
         self.assertEqual((fields["pair1_operating_state"], fields["pair1_operating_substate"]), (1, 2))
+        self.assertEqual(fields["pair1_operating_state_name"], "off")
+        self.assertNotIn("pair0_operating_state_name", decode(0x17e, "0901 1b00ff"))
         self.assertEqual(fields["pair2_electric_off_time_15s_ticks"], 7)
         self.assertEqual(fields["pair3_sensor_flags"], 10)
         self.assertEqual(fields["pair4_system_pump_contacts"], 0xffff)
         self.assertEqual(fields["pair5_supply_temperature_raw"], 0x1234)
         self.assertEqual(fields["pair6_melting_time_minutes"], 12)
+        temperatures = decode(0x17e, "0903 2c3305 2d0040 2e0000")
+        self.assertEqual(temperatures["pair0_return_temperature_f"], 48.1)
+        self.assertEqual(temperatures["pair1_supply_temperature"], "unavailable")
+        self.assertEqual(temperatures["pair2_supply_target_raw"], 0)
+        self.assertNotIn("pair2_supply_target_f", temperatures)
+
+    def test_snowmelt_configuration_reports_and_updates(self):
+        vectors = {
+            0x71: ("9c04", {"melt_setpoint_raw": 1180, "melt_setpoint_f": 33.0}),
+            0x72: ("0000", {"idle_setpoint_raw": 0, "idle_setpoint": "off"}),
+            0x73: ("04", {"water_sensitivity": 4}),
+            0x74: ("2c01", {"melt_run_time_minutes": 300}),
+            0x75: ("3c00", {"additional_melt_time_minutes": 60}),
+            0x76: ("7f05", {"cold_weather_cutoff_raw": 0x57f}),
+            0x77: ("fffe", {"warm_weather_shutdown_raw": 0xfeff}),
+            0x78: ("1a04", {"storm_setpoint_raw": 1050, "storm_setpoint_f": 20.0}),
+            0x79: ("0001", {"storm_time_minutes": 256}),
+            0x7a: ("0005", {"sensor_id": 0, "snow_ice_sensor_configuration": 5}),
+            0x7b: ("0207", {"sensor_id": 2, "slab_sensor_configuration": 7}),
+            0x7c: ("ff", {"slab_protection": 255}),
+            0x7d: ("1800", {"maximum_melt_time_hours": 24}),
+            0xc0: ("08", {"zone_id": 8}),
+            0xc1: ("00", {"sensor_id": 0}),
+            0xc2: ("05", {"melt_group_id": 5}),
+            0xc3: ("0c", {"storm_group_id": 12}),
+            0xc4: ("07", {"tracked_zone_id": 7}),
+            0xc5: ("0204", {"sensor_id": 2, "melt_start_type": 4}),
+            0xc6: ("013412", {"sensor_id": 1, "slab_high_raw": 0x1234}),
+            0xc7: ("027856", {"sensor_id": 2, "slab_low_raw": 0x5678}),
+            0xc8: ("039a78", {"sensor_id": 3, "supply_high_raw": 0x789a}),
+            0xc9: ("04bc9a", {"sensor_id": 4, "supply_low_raw": 0x9abc}),
+            0xca: ("05debc", {"sensor_id": 5, "return_high_raw": 0xbcde}),
+            0xcb: ("06f0de", {"sensor_id": 6, "return_low_raw": 0xdef0}),
+            0xcc: ("072c01", {"relay_id": 7, "heat_relay_hours": 300}),
+            0xcd: ("080100", {"relay_id": 8, "heat_relay_cycles": 1}),
+            0xce: ("0900ff", {"sensor_id": 9, "wet_level_raw": 0xff00}),
+            0xcf: ("0a1234", {"sensor_id": 10, "dry_level_raw": 0x3412}),
+            0xd0: ("0403", {"application_mode": 4, "application_mode_name": "sensor_only", "application_type": 3}),
+            0xd1: ("078967", {"control_id": 7, "boiler_minimum_raw": 0x6789}),
+            0xd2: ("021a06", {"control_id": 2, "boiler_maximum_raw": 0x61a}),
+        }
+        for block, (hex_data, expected) in vectors.items():
+            with self.subTest(block=hex(block)):
+                prefix = f"{block:02x}00"
+                mask = (1 << len(bytes.fromhex(hex_data))) - 1
+                for mid, packet in ((0x2e7, prefix + f"{mask:02x}"),
+                                    (0x2df, "1223" + prefix)):
+                    fields = decode(mid, packet + hex_data + "abcd")
+                    self.assertEqual({k: fields[k] for k in expected}, expected)
+                    self.assertEqual(fields["extension_hex"], "abcd")
+                    self.assertIn("truncated", decode(mid, packet + hex_data[:-2]))
+        self.assertNotIn("melt_setpoint", decode(0x2e7, "7100030000"))
+        self.assertEqual(decode(0x2e7, "7800030000")["storm_setpoint"], "off")
+        self.assertEqual(decode(0x2e7, "720003ffff")["idle_setpoint"], "unavailable")
+        self.assertNotIn("application_mode_name", decode(0x2e7, "d00003ff00"))
+
+    def test_indexed_snowmelt_blocks_preserve_selector_and_partial_words(self):
+        for block, selector in ((0x7a, "sensor_id"), (0x7b, "sensor_id"),
+                                (0xc5, "sensor_id"), (0xcb, "sensor_id"),
+                                (0xcc, "relay_id"), (0xcd, "relay_id"),
+                                (0xce, "sensor_id"), (0xd1, "control_id")):
+            req = f"{block:02x}00 12 04000000"
+            self.assertNotIn(selector, decode(0x2d7, req))
+            self.assertEqual(decode(0x2d7, req + "00000000")[selector], 0)
+            fields = decode(0x2d7, req + "78563412 99")
+            self.assertEqual(fields[selector], 0x12345678)
+            self.assertEqual(fields["extension_hex"], "99")
+        self.assertNotIn("sensor_id", decode(0x2d7, "c100120400000000000000"))
+        for data in ("c60006 3412", "c60006 ff3412"):
+            fields = decode(0x2e7, data)
+            self.assertEqual(fields["slab_high_raw"], 0x1234)
+            self.assertNotIn("sensor_id", fields)
+        incomplete = decode(0x2e7, "c60005 11ab")
+        self.assertEqual(incomplete["sensor_id"], 17)
+        self.assertEqual(incomplete["byte3_raw"], 0xab)
+        self.assertNotIn("slab_high_raw", incomplete)
+        extended = decode(0x2e7, "c6000f 0034129a")
+        self.assertEqual(extended["byte4_raw"], 0x9a)
+        no_value = decode(0x2e7, "720000 cc")
+        self.assertEqual(no_value["extension_hex"], "cc")
+        self.assertNotIn("idle_setpoint", no_value)
+
+    def test_secondary_block_requests_name_the_argument_not_a_report(self):
+        for ids, selector in (
+            (range(0x38, 0x3c), "schedule_id"), ((0x3c, 0x3d, 0x43, 0x45), "boiler_number"),
+            ((0x44,), "pump_number"), ((0x46,), "heating_source_id"), ((0x47,), "cooling_source_id"),
+            ((0x48, 0x49), "port_id"), ((0x4d,), "mix_pump_id"), ((0x5a,), "tank_id"),
+            (range(0x8b, 0x93), "heat_pump_source_id"), ((0x98,), "heat_pump_number"),
+        ):
+            for block in ids:
+                with self.subTest(block=hex(block)):
+                    prefix = f"{block:02x}00 12 00040000"
+                    self.assertNotIn(selector, decode(0x2d7, prefix))
+                    self.assertEqual(decode(0x2d7, prefix + "03000000")[selector], 3)
 
     def test_support_mask_does_not_shift_positional_bytes(self):
         setup = decode(0x2e7, "0f001103aabbcc01")
