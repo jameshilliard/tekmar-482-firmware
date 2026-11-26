@@ -8,7 +8,7 @@ example, native `0x31f` is a remote clock report, not a request to read the
 
 The catalog below covers the 62 message IDs registered in the 483 SW 11
 `message_types.rb` and `message_types_in.rb` registries. The [host
-decoder](../tools/payloads.py) recognizes all 62. A registration is evidence
+decoder](../tools/payloads/__init__.py) recognizes all 62. A registration is evidence
 of a message layout, not evidence that a particular model sends it. The
 bridge captures other IDs and preserves their payloads. This is not a vendor
 specification or an assertion that no other tN4 IDs exist.
@@ -100,6 +100,9 @@ Lengths describe known fields, not a reason to discard extensions.
 | `0x3f7` | MasterQuery | No payload defined. |
 
 ### Block reports
+
+The [addressed block catalog](tn4-blocks.md) covers the 166 block IDs in
+the 483 SW 11 registry, including plant, pump and heat-pump diagnostics.
 
 Physical thermostat reports can retain the **positions** of unsupported
 bytes through the last supported byte. For example, with mask `80` and

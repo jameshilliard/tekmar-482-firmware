@@ -14,6 +14,79 @@ def decode(mid, hex_bytes):
 
 
 class PayloadTests(unittest.TestCase):
+    def test_registered_addressed_blocks_have_named_report_fields(self):
+        registered = {
+            *range(0x51), 0x53, 0x54, 0x55, 0x58, 0x5a, 0x5b, 0x62,
+            *range(0x71, 0x7e), *range(0x83, 0xb1), *range(0xc0, 0xd3),
+        }
+        self.assertEqual(len(registered), 166)
+        for block in (*sorted(registered), 0x51, 0x7e, 0xabcd):
+            with self.subTest(block=hex(block)):
+                data = block.to_bytes(2, "little") + bytes.fromhex("ff 0102030405060708")
+                fields = decode_payload(0x2e7, data)
+                self.assertNotIn("truncated", fields)
+                semantic = {k for k in fields if not k.startswith("byte")} - {"block_id", "support_mask"}
+                self.assertEqual(bool(semantic), block in registered)
+
+    def test_selected_plant_registers_preserve_selectors_and_word_boundaries(self):
+        for block, selector, field in (
+            (0x43, "boiler_number", "boiler_hours"), (0x44, "pump_number", "pump_hours"),
+            (0x4d, "mix_pump_id", "mix_pump_hours"), (0x5a, "tank_id", "tank_pump_hours"),
+            (0x98, "heat_pump_number", "heat_pump_hours"),
+        ):
+            with self.subTest(block=hex(block)):
+                bid = f"{block:02x}00"
+                for mid, packet in ((0x2e7, bid + "07"), (0x2df, "0c03" + bid)):
+                    fields = decode(mid, packet + "813412ee")
+                    self.assertEqual((fields[selector], fields[field], fields["extension_hex"]),
+                                     (129, 0x1234, "ee"))
+                for payload in ("06 3412", "06 ee3412"):
+                    hours_only = decode(0x2e7, bid + payload)
+                    self.assertNotIn(selector, hours_only)
+                    self.assertEqual(hours_only[field], 0x1234)
+                partial = decode(0x2e7, bid + "05 8107")
+                self.assertEqual(partial[selector], 129)
+                self.assertEqual(partial["byte3_raw"], 7)
+                self.assertNotIn(field, partial)
+        pid = decode(0x2e7, "4600ff 72 3412 7856 bc9a de")
+        self.assertEqual((pid["heating_source_id"], pid["proportional_coefficient"],
+                          pid["integral_coefficient"], pid["derivative_coefficient"], pid["inhibit_time"]),
+                         (0x72, 0x1234, 0x5678, 0x9abc, 0xde))
+
+    def test_setup_flags_masks_and_units(self):
+        fan = decode(0x2e7, "0800 03 e439")
+        self.assertEqual((fan["fan_operation_type"], fan["fan_heat_stage1"], fan["fan_heat_stage2"],
+                          fan["fan_cool_stage1"], fan["fan_cool_stage2"], fan["ventilation_mode"]),
+                         (0, 1, 2, 3, 1, 2))
+        self.assertEqual(fan["fan_ventilation_flags"], 0x39)
+        pump = decode(0x2e7, "0200 01 9a")
+        self.assertEqual((pump["pump_required"], pump["pump_delay"]), (1, 26))
+        self.assertEqual(decode(0x2e7, "0100 08 2d")["stage2_pump_required"], 0)
+        self.assertEqual(decode(0x2e7, "8300 01 86")["tank_flag"], 1)
+        prefs = decode(0x2e7, "1400 24 1122")
+        self.assertEqual((prefs["backlight"], prefs["exercise_enable"]), (17, 34))
+        for data in ("2f 0102030456", "2f 01020304ee56"):
+            plant = decode(0x2e7, "4100" + data)
+            self.assertEqual(plant["enabled_dhw_pumps"], 4)
+            self.assertEqual(plant["primary_pump_purge_time"], 0x56)
+            self.assertNotIn("primary_pump_rotation_time", plant)
+        busses = decode(0x2e7, "3400 30 2d15")
+        self.assertEqual((busses["bus7_water_bus"], busses["bus7_water_control"], busses["bus7_heat_source_id"]),
+                         (5, 5, 0x15))
+        self.assertEqual(decode(0x2e7, "4e00 03 fa04")["outdoor_low_f"], 42.4)
+        self.assertEqual(decode(0x2e7, "4f00 03 0080")["outdoor_high"], "unavailable")
+        self.assertEqual(decode(0x2e7, "3700 01 08")["override_state_name"], "auto_2")
+        self.assertNotIn("override_state_name", decode(0x2e7, "3700 01 09"))
+        count = decode(0x2e7, "6200 0f aa55ff00")
+        self.assertEqual(count["received_message_count"], 0xff55aa)
+        self.assertNotIn("received_message_count", decode(0x2e7, "6200 0b aa5500"))
+        self.assertEqual(decode(0x2df, "0002 9100 3c3412")["minimum_compressor_run_time"], 0x1234)
+        self.assertEqual(decode(0x2e7, "a200 03 3492")["dehumidification_hours"], 0x9234)
+        dhw = decode(0x2e7, "2400 13 0399aa8832")
+        self.assertEqual((dhw["mode"], dhw["wake_exchange_target_raw"], dhw["sleep_exchange_target_raw"]),
+                         (3, 0x99, 0x32))
+        self.assertNotIn("occupied_exchange_target_raw", dhw)
+
     def test_setpoint_control_tables_preserve_word_pairs_and_extensions(self):
         self.assertEqual(decode(0x2e7, "260005 04 03")["run_mode_configuration"], 3)
         for block, app in zip(range(0x28, 0x32, 2), ("setpoint","hot_tub","dhw","floor","pool")):
