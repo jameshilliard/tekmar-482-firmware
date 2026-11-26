@@ -105,6 +105,24 @@ Lengths describe known fields, not a reason to discard extensions.
 
 ### Block reports
 
+Thermostat mode is the supported first byte of block `0003`, not a
+heat/cool bit in an air-group report. In 483 SW 11 the native codes are
+0 Off, 1 Heat, 2 Auto, 3 Cool, 4 Vent, 5 Humidity, 6 Emergency and
+7 Backup. This is a native vocabulary, not an extension of stock tHA's
+ModeSetting command. The 483 names more modes than it offers in its remote
+selector. It checks cooling stages (block `0004`) and enabled heat pumps
+(`0097`) for Auto/Cool, offers Vent for 530/540, Emergency for 557 or a
+heat-pump-enabled 553, and omits Off for 527/537. A 538 at revision G or
+later has no remote mode adjustment. Do not offer an installation-dependent
+choice just because its block appears in a model's catalog.
+
+A `36f` member reports one operating channel; a `377` master reports
+both independently. In each channel the enable bit and the demand bit
+are distinct. Keep both, including simultaneous heat/cool indications;
+neither confirms the user's mode selection. A changed operating channel
+can prompt an addressed read of block `0003`. A `2df` setting update is
+also only a request: the device's subsequent `2e7` report is the evidence.
+
 The [addressed block catalog](tn4-blocks.md) covers the 166 block IDs in
 the 483 SW 11 registry, including plant, pump and heat-pump diagnostics.
 

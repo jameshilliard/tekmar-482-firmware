@@ -8,6 +8,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 from frames import encode, replay
 from payloads import DECODERS, decode_payload
+from payloads.climate import AirStatus, ThermostatConfiguration, ThermostatMode as Mode
+from payloads.codec import Reader
 from payloads.line import ClockReport, GroupReport, SetpointAssignment, ZoneSyncAdjustment, ZoneTargetMode, group_command
 from payloads.products import block_selectors, identify_product
 from payloads.queries import NativeStatusQuery, ReplyPart, SnowmeltRole, StatusRequest
@@ -23,6 +25,46 @@ def decode(mid, hex_bytes):
 
 
 class PayloadTests(unittest.TestCase):
+    def test_air_group_mode_is_not_the_thermostat_setting(self):
+        member = bytes.fromhex("a4 62 2a 0000 07 0080 aa")
+        r = Reader(member)
+        air = AirStatus.read(r, master=False)
+        self.assertFalse(air.cool.enabled)
+        self.assertTrue(air.cool.demand)
+        self.assertFalse(air.cool.calling)
+        self.assertEqual(air.operating_flags, (4, None, 2))
+        self.assertIsNone(air.cool.temperature_f)
+        self.assertIsNone(air.remote_f)
+        self.assertEqual(air.cool.target_f, 69.8)
+        self.assertEqual((r.remaining, decode_payload(0x36f, member)["extension_hex"]), (b"\xaa", "aa"))
+        master = bytes.fromhex("65 88 07 00 2c06 13 ff 00c0 e4 b005")
+        air = AirStatus.read(Reader(master), master=True)
+        self.assertTrue(air.heat.calling and air.cool.calling)
+        self.assertEqual((air.heat.setback, air.cool.setback), (1, 4))
+        self.assertIsNone(air.cool.target_f)
+        self.assertNotIn("mode_setting", decode_payload(0x377, master))
+        for mid, data in ((0x36f, member[:7]), (0x377, master[:12])):
+            self.assertIn("truncated", decode_payload(mid, data))
+
+    def test_thermostat_selector_uses_setup_and_revision_not_reported_demand(self):
+        for m in Mode:
+            self.assertEqual(decode_payload(0x2e7, b"\x03\x00\x01" + bytes([m]))["mode_setting_name"],
+                             m.name.lower())
+        self.assertEqual(decode(0x2e7, "030001aa")["mode_setting"], 0xaa)
+        self.assertNotIn("mode_setting_name", decode(0x2e7, "030001aa"))
+        def config(number, z=1, **kw):
+            return ThermostatConfiguration.from_blocks(identify_product(number), z, {
+                3: {"mode_setting": 2}, 4: kw.get("cool", {}), 0x97: kw.get("hp", {})})
+        self.assertIsNone(config(105102).offers(Mode.COOL))
+        self.assertTrue(config(105102, hp={"enabled_heat_pumps": 1}).offers(Mode.AUTO))
+        self.assertTrue(config(105102, hp={"enabled_heat_pumps": 1}).offers(Mode.EMERGENCY))
+        self.assertFalse(config(105102, hp={"enabled_heat_pumps": 0}).offers(Mode.EMERGENCY))
+        self.assertTrue(config(100103, 5).offers(Mode.HEAT))
+        self.assertFalse(config(100103, 6).offers(Mode.HEAT))
+        self.assertIsNone(config(100103, None).offers(Mode.HEAT))
+        self.assertTrue(config(100101).offers(Mode.VENT))
+        self.assertFalse(config(100101).offers(Mode.BACKUP))
+
     def test_water_status_optional_word_and_extensions(self):
         base = "bc07 00c0 0000 19ff f9"
         for tail, dhw, extension in (("", None, None), ("ca", None, "ca"),
