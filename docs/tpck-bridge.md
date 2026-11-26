@@ -32,6 +32,11 @@ length and checksum. Wrap the result in CA and 35. An unescaped CA restarts
 the decoder. Dispatch only on a valid checksum followed immediately by an
 unescaped 35. An invalid frame has no reply or side effects.
 
+Frames may follow each other with no inter-frame delay. In particular, a host
+can submit one Send on each of several different ports without waiting for the
+first port's TxResult. The receiver drains available UART FIFO bytes before
+returning to line timing, dispatching at most one complete command per pass.
+
 Type 06 is tRPC: service u8, method u32 little endian, remaining body.
 Request (01) and Update (00) receive ResponseRequest (04) and ResponseUpdate
 (03), respectively. An unknown method receives method zero on the matching

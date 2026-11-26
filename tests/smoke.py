@@ -66,6 +66,8 @@ def run(path, ram, fast=False):
         cpu.mem_write(main, b"\xa5" * (floor - main))
     cpu.mem_write(floor, b"\xa5" * (top - floor))
     incoming = deque()
+    burst = deque()
+    next_byte = 0
     actual = []
     timers = [{}, {}]
     button = 1 << 14
@@ -150,10 +152,14 @@ def run(path, ram, fast=False):
     cpu.mmio_map(0x3FFFC000, 0x1000, lambda u, o, s, d: gpio[o], None, gpio_write, None)
 
     def timer_read(uc, off, size, t):
-        nonlocal clock, inventory_at
+        nonlocal clock, inventory_at, next_byte
         if off == 8:
             if t == 0 and timers[t].get(4) == 1:
                 clock += 40
+                while burst and next_byte <= clock:
+                    assert len(incoming) < 16, "LPC2146 UART RX FIFO overrun during command burst"
+                    incoming.append(burst.popleft())
+                    next_byte += 53 if fast else 1042  # 8N1 character time in us.
                 cpu.mem_write(
                     0xE0014008, struct.pack("<I", (0xFFFF0000 + clock) & 0xFFFFFFFF)
                 )
@@ -182,6 +188,13 @@ def run(path, ram, fast=False):
 
     def extension(method, body=b"", update=False):
         call(0x544BF000 + method, body, update)
+
+    def at_line_rate():
+        nonlocal next_byte
+        assert not burst
+        burst.extend(incoming)
+        incoming.clear()
+        next_byte = clock + (53 if fast else 1042)
 
     def plant_inputs():
         start = clock + 30_000
@@ -416,6 +429,9 @@ def run(path, ram, fast=False):
                 for p in range(5):
                     extension(3, bytes([p]))
                 extension(5, update=True)
+                # Deliver these contiguous commands at line rate into a
+                # finite hardware FIFO, not the harness's unlimited backlog.
+                at_line_rate()
             return
         service, p = data[:2]
         if service == 4:
@@ -447,6 +463,7 @@ def run(path, ram, fast=False):
             results.add(p)
             if len(results) == 5:
                 extension(2, b"\x00", True)
+                at_line_rate()  # The host cannot reply before the last stop bit.
         else:
             raise AssertionError(data)
 
@@ -502,7 +519,7 @@ def run(path, ram, fast=False):
 
     def rom(uc, addr, size, user):
         nonlocal entered
-        assert not draining and not incoming
+        assert not draining and not incoming and not burst
         assert struct.unpack("<I", uc.mem_read(0xE01FC0C4, 4))[0] & (1 << 31)
         assert uc.mem_read(uc.reg_read(UC_ARM_REG_R0), 4) == struct.pack("<I", 57)
         assert uc.mem_read(0xE01FC080, 4) == bytes(4)

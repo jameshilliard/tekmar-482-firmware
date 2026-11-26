@@ -235,7 +235,10 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
         {
             out.enqueue(Kind::Control, tpck::TRPC, reply.payload());
         }
-        'receive: {
+        // Several TPCK frames can arrive back-to-back at the negotiated baud.
+        // Empty the 16-byte UART FIFO, but return to the line timers after
+        // dispatching one command even if more bytes are already available.
+        'receive: for _ in 0..16 {
             if reboot || !out.can_receive() {
                 break 'receive;
             }
@@ -402,9 +405,10 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                                 reply.payload(),
                             );
                         }
+                        break 'receive;
                     }
                 }
-                Ok(None) => {}
+                Ok(None) => break,
             }
         }
         if !raw
