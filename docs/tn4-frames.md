@@ -142,9 +142,11 @@ enable command. Identify the device from block 0: the 483 catalog maps
 tektra product 105801 / J1226 to model 654. Its model-specific support
 table lists all blocks below **except 00CD**, which is in the general
 registry. Use each device's reported mask, not the catalog, as evidence
-of a value. Addressed reads from a physical 654 returned all 31 listed
-blocks, including selector zero on the indexed ones. This was verified
-from block reports, not link ACKs. No settings were changed in that test.
+of a value. Addressed reads from a physical 654 returned **all 32** of
+these blocks, including 00CD: selector zero returned a three-byte report
+with support mask 07, relay ID and a little-endian cycle count. The model
+table is not an upper bound on device capabilities. The test used
+selector zero on indexed blocks and did not change settings.
 
 | Block (hex) | Data bytes, in order |
 | --- | --- |
