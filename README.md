@@ -19,7 +19,7 @@ needs Cargo to build core from source. This still uses the unstable
 `-Zbuild-std=core` Cargo option: the Makefile sets `RUSTC_BOOTSTRAP=1` only
 on cross-build and cross-Clippy commands, not globally. The production
 runtime uses the Embassy revision pinned in Cargo.lock. The Rust application
-uses Thumb-1 to fit the same dispatcher in flash and in a RAM trial. Reset
+uses Thumb-1 for compact code in flash. Reset
 vectors, interrupt masking and the ROM handoff use ARM instructions.
 The release profile uses `opt-level = "s"`, full LTO, a single codegen
 unit and abort-on-panic. Compare **revision-stamped binaries** when tuning:
@@ -29,10 +29,15 @@ Debug information stays in the ELF, not in the binary loaded on the device.
 `target/thumbv4t-none-eabi/release/tekmar-482-firmware{,.bin,.hex}`. The linker
 limits flash to the first 64 KiB. The build checks the LPC vector checksum,
 ARM entry addresses, code read protection word, size and HEX round trip.
-`make check` also exercises the parser and runs the built image against a
-simulated UART up to the ROM entry point, not through the NXP ROM itself.
-Both images exercise all five capture/TX paths, UART backpressure and panel
-deadlines. The emulator also checks the remaining stack against a canary.
+`make check` exercises the parser and runs that flash image at both 9600
+and 187500 baud in the emulator. It tests all five capture/TX paths, UART
+backpressure, panel deadlines, stack headroom and the handoff to ROM.
+Neither compilation nor emulation writes a physical device.
+
+Use flash for routine hardware tests as well. Build the Python client's
+sdist with this firmware revision pinned, then use its
+[`tekmar-482 update` procedure](https://github.com/jameshilliard/tekmar-482#installation-and-updates).
+This skips an already-current build and verifies the revision after an update.
 
 ### Execution model
 
@@ -51,8 +56,9 @@ spins and streaming yields after each bounded service pass. Link ACK
 slots and transmit edges are driven from the capture timers, not from
 Embassy task delays.
 
-`make ram-trial` builds the same prototype linked to run at SRAM address
-`0x40001000`, with a 24 KiB image limit. Its binary is under
+`make check-ram` optionally builds and emulates an SRAM-linked image at
+`0x40001000` while the firmware fits its 24 KiB region. This is not a CI or
+release requirement. `make ram-trial` only builds it. Its binary is under
 `target/ram-trial/thumbv4t-none-eabi/release/`.
 This is **not a flash image**. On an unprotected part, after verifying a backup,
 ISP can write the binary to RAM, read it back for comparison, and use Go in ARM

@@ -12,7 +12,7 @@ jobs:
       - uses: astral-sh/setup-uv@v8.2.0
       - name: Install Arm binutils
         run: sudo apt-get update && sudo apt-get install -y binutils-arm-none-eabi
-      - name: Check flash and SRAM images
+      - name: Check the production flash image
         run: make check
         env:
           TEKMAR_BUILD_REVISION: ${{ github.sha }}

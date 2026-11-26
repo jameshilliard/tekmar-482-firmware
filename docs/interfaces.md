@@ -32,7 +32,8 @@ uv run --script tools/board.py diagnostics "$PORT" --seconds 60 --save-capture c
 python3 tools/frames.py capture.tpck
 ```
 
-For a verified SRAM trial from an installed bridge with update support:
+Run these checks directly on the installed flash image. For an optional
+SRAM trial of a build that still fits the 24 KiB window:
 
 ```sh
 make ram-trial
@@ -99,12 +100,10 @@ stream. A lit LED is not proof of delivery.
 The DIP state is diagnostic, not permission to drive a bus. Test at
 power-on retains the hardware ROM entry function.
 
-For a witnessed test from the installed dev firmware:
+For a witnessed test on the installed flash firmware:
 
 ```sh
-uv run --script tools/ram_trial.py "$PORT" \
-  target/ram-trial/thumbv4t-none-eabi/release/tekmar-482-firmware.bin \
-  --from-app --check-input test --input-timeout 90
+uv run --script tools/board.py panel "$PORT" --check-input test --seconds 90
 ```
 
 Wait for the prompt before touching the control. This test reads panel state without starting a software lamp test. It requires the debounced button
@@ -114,7 +113,7 @@ The corresponding `--check-input dip` test needs both switch positions
 to be observed and exactly two transitions back to the original setting.
 Use only controls accessible with the enclosure closed; skip a physical
 test if it requires opening an energized enclosure. A timeout is not a
-pass. The SRAM trial returns to the installed dev image on either outcome.
+pass. This check leaves the installed application running.
 
 ### Hardware verification
 

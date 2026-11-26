@@ -5,6 +5,7 @@
 """Test the read-only ISP transcript and backup equivalence gates without hardware."""
 
 import binascii
+import struct
 import sys
 import unittest
 from collections import deque
@@ -67,25 +68,30 @@ class BackupTest(unittest.IsolatedAsyncioTestCase):
                 backup.restore_image(raw, other, ref)
 
     async def test_ram_trial_requires_correct_link_and_exact_readback(self):
-        image_dir = Path(__file__).resolve().parents[1] / "target"
-        image_path = Path("thumbv4t-none-eabi/release/tekmar-482-firmware.bin")
-        flash = (image_dir / image_path).read_bytes()
-        ram = (image_dir / "ram-trial" / image_path).read_bytes()
+        # Two pages with a short, unaligned tail exercise chunking and padding.
+        def image(base):
+            data = bytearray(b"\xff" * 4101)
+            vectors = [0xe59ff018] * 8
+            vectors[5] = -7 * vectors[0] & 0xffffffff
+            struct.pack_into("<16I", data, 0, *vectors, *([base + 0x200] * 8))
+            return bytes(data)
+
+        ram = image(ram_trial.BASE)
         untouched = Transcript([])
         with self.assertRaises(ValueError):
-            await ram_trial.start_image(untouched, flash)
+            await ram_trial.start_image(untouched, image(0))
         self.assertEqual(untouched.sent, [])
 
-        ram += bytes(-len(ram) % 4)
+        padded = ram + bytes(-len(ram) % 4)
         rx = [b"0", str(backup.PART_ID).encode(), b"0", b"13", b"2"]
-        for start in range(0, len(ram), 4096):
-            size = min(4096, len(ram) - start)
+        for start in range(0, len(padded), 4096):
+            size = min(4096, len(padded) - start)
             rx += [b"0"] + [b"OK"] * ((size + 899) // 900)
-        for readback in (ram[:-1] + bytes([ram[-1] ^ 1]), ram):
+        for readback in (padded[:-1] + bytes([padded[-1] ^ 1]), padded):
             port = Transcript(rx + [b"0", b"0"])
             pages = [readback[i:i+4096] for i in range(0, len(readback), 4096)]
             with patch.object(ram_trial, "read_page", side_effect=pages):
-                if readback != ram:
+                if readback != padded:
                     with self.assertRaisesRegex(RuntimeError, "readback differs"):
                         await ram_trial.start_image(port, ram)
                     self.assertFalse(any(x.startswith((b"U ", b"G ")) for x in port.sent))
