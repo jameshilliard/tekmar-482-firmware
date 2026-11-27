@@ -22,7 +22,7 @@ from payloads.sensors import SensorRole as R, SensorSlot, ThermostatSensors
 from payloads.setpoint import SetpointApplication, SetpointStatus, SetpointTargets
 from payloads.snowmelt import SnowmeltAddress, SnowmeltApplication, SnowmeltOperatingState, SnowmeltPair, SnowmeltReport, WaterDetection
 from payloads.thermostat import FanDuctStatus, FanSetup, HumiditySetup, HumidityStatus, SlabStatus, TargetSlot, TargetTable, ThermostatTarget as T
-from payloads.water import BoilerMaximum, HeatSource, LoopAssignment, LoopKind, LoopSetupSlot, LoopTopology, StageDemand
+from payloads.water import BoilerMaximum, HeatSource, LoopAssignment, LoopKind, LoopSetupSlot, LoopTopology, StageCommand, StageDemand, StageSelection
 from payloads.writes import BlockPatch, NativeField as F, WritableBlock
 
 
@@ -31,6 +31,24 @@ def decode(mid, hex_bytes):
 
 
 class PayloadTests(unittest.TestCase):
+    def test_stage_selection_is_a_three_byte_one_based_bitmap(self):
+        ids = (0x35f, 0x397, 0x39f, 0x3a7, 0x3af, 0x3b7, 0x3bf)
+        self.assertEqual(set(StageCommand), set(ids))
+        wire = bytes.fromhex("ab f5 01 80 80")
+        for mid in ids:
+            with self.subTest(mid=mid):
+                for n in range(5):
+                    self.assertIn("truncated", decode_payload(mid, wire[:n]))
+                self.assertEqual(decode_payload(mid, wire + b"\xca"),
+                                 {"target_subnet": 0xab, "output_level": 117, "stage": 1,
+                                  "target_nodes_mask": "0x808001", "extension_hex": "ca"})
+        selection = StageSelection.read(Reader(wire))
+        self.assertEqual(selection.nodes, (1, 16, 24))
+        self.assertEqual(selection.payload, wire)
+        self.assertEqual(StageSelection.read(Reader(bytes(5))).nodes, ())
+        with self.assertRaises(ValueError):
+            StageSelection(0, 0, 0, 1 << 24)
+
     def test_line_reports_and_trace_fields_use_the_same_receive_layout(self):
         cases = (
             (0x010, "070299ca", ZoneSyncReport(7, 2, 0x99), 3),

@@ -107,9 +107,11 @@ TX ACK does not mean the device applied a command.
 
 An RX path is the valid native header's source with the low five node bits.
 Locally transmitted echoes are not received peer frames. Invalid frames are
-counted only per bus. A TX path is the destination of an explicitly
-single-node block request or block update. Broadcasts, multi-target requests
-and messages without a verified unicast destination remain in the port totals.
+counted only per bus. A TX path is the destination of a block update or the
+sole selected node in a block request, stage heat demand request, purge or
+stage override. The stage operations use a 24-node mask, block requests a
+31-node mask with one padding bit. Broadcasts, multi-target requests and
+messages without a verified native node destination remain in the port totals.
 Unsent requests do not count. Up to 256 distinct paths are retained without
 eviction; if the directory fills, bus totals and previously registered paths
 continue counting.

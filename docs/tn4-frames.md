@@ -595,6 +595,15 @@ supports them. Fields are listed in transmitted order.
 | `0x3ef` | AddressTaken | No payload defined. |
 | `0x3ff` | MasterPresent | Boiler subnet followed by zero to seven mixing subnets, according to payload length. |
 
+**Stage selection.** StageHeatDemandRequest and all six purge/override
+commands share a five-byte payload. The 483 SW 11 `NodeMaskIn` maps the
+three little-endian bitmap bytes to nodes 1..8, 9..16 and 17..24. For
+example, `ab f5 01 80 80` selects nodes 1, 16 and 24 on subnet AB,
+stage bit 1, output level 117. The level is a seven-bit wire value,
+not necessarily a percentage. Zero selects no node. A command is not
+a `367` StageHeatDemand report, and a link ACK cannot say which of
+several selected nodes received or acted on it.
+
 **Associating water temperatures.** A MasterPresent slot is a subnet byte
 (control in bits 7:3, bus in 2:0), not a physical gateway port. Slot 0
 advertises the boiler; slots 1 through 7 advertise those numbered mixes.

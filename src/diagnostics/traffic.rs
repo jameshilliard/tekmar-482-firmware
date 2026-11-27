@@ -185,25 +185,45 @@ fn header(body: &[u8]) -> Option<u32> {
     ))
 }
 fn destination(body: &[u8]) -> Option<[u8; 2]> {
-    match (
+    message::single_destination(
         (header(body)? >> tn4::MESSAGE_SHIFT) & tn4::MESSAGE_MASK,
         &body[HEADER_BYTES..],
-    ) {
-        (message::BLOCK_REQUEST, [_, _, subnet, a, b, c, d, ..]) => {
-            let mask = u32::from_le_bytes([*a, *b, *c, *d]);
-            (mask.is_power_of_two() && mask.leading_zeros() > 0)
-                .then(|| [*subnet, mask.trailing_zeros() as u8 + 1])
-        }
-        (message::BLOCK_UPDATE, [subnet, node, _, _, ..]) if node & NODE_MASK != 0 => {
-            Some([*subnet, *node & NODE_MASK])
-        }
-        _ => None,
-    }
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn stage_target_accounting_uses_three_mask_octets_not_the_sender() {
+        let mut t = Traffic::EMPTY;
+        for id in [0x35f, 0x397, 0x39f, 0x3a7, 0x3af, 0x3b7, 0x3bf] {
+            let mut body = [0, 0, 0, 0, 0xab, 0x83, 0, 0, 0x80];
+            body[..4].copy_from_slice(&(id << 20 | 0x4001_26c5u32).to_be_bytes());
+            t.transmitted(1, &body, Outcome::NoAck);
+            body[6] = 1; // nodes 1 and 24, no individual link outcome
+            t.transmitted(1, &body, Outcome::Ack);
+            body[8] = 0;
+            t.transmitted(1, &body, Outcome::ArbitrationLost);
+            body[6] = 0;
+            t.transmitted(1, &body, Outcome::Ack);
+            assert_eq!(destination(&body[..8]), None);
+        }
+        assert_eq!(t.used, 2);
+        assert_eq!(t.entry([1, 0xab, 24]).unwrap().no_ack, 7);
+        assert_eq!(t.entry([1, 0xab, 1]).unwrap().failed, 7);
+        assert_eq!(t.ports[1].tx_unattributed, 14);
+        assert_eq!(t.ports[1].counts.ack, 14);
+        assert_eq!(
+            message::single_destination(0x2d7, &[0, 0, 9, 0, 0, 0, 0xc0]),
+            Some([9, 31])
+        );
+        assert_eq!(
+            message::single_destination(0x2d7, &[0, 0, 9, 0, 0, 0, 0x80]),
+            None
+        );
+        assert_eq!(message::single_destination(0x367, &[9, 0, 1, 0, 0]), None);
+    }
     #[test]
     fn sources_targets_and_unaddressed_frames_stay_distinct() {
         let mut t = Traffic::EMPTY;

@@ -31,6 +31,7 @@ RAW_READS = ((bytes.fromhex("6d70000b 100000 00008000 00000000"), bytes.fromhex(
              (bytes.fromhex("17f00004 12 02 1922"), bytes.fromhex("57e250c8 1a 02 220006 190300")),
              (bytes.fromhex("1f600002 43a5"), bytes.fromhex("5f5250ce 43a5e7 01 410042caff00 08 3412 35")),
              (bytes.fromhex("1f400003 43a5e7"), bytes.fromhex("5f3250c6 43a5e7 08 7856")),
+             (bytes.fromhex("35f00005 abf5000080"), bytes.fromhex("767ab603 ab0000")),
              (bytes.fromhex("6d70000b 260000 00008000 00000000"), bytes.fromhex("6e700605 260041 0408")),
              (bytes.fromhex("6d70000b 2e0000 00008000 00000000"), bytes.fromhex("6e700609 2e003f 3506 ca05 e404")))
 TELEMETRY = ((1, bytes.fromhex("7cf25fca bc07 00c0 0000 19ff f9 ca")),
@@ -355,6 +356,7 @@ def run(path, ram, fast=False):
                         extension(14)
                         extension(14, b"\0")
                         extension(14, bytes.fromhex("000018"))
+                        extension(14, bytes.fromhex("00ab18"))
                         for p in range(5):
                             extension(3, bytes([p]))
                     extension(5, update=True)
@@ -457,6 +459,7 @@ def run(path, ram, fast=False):
     telemetry = []
     error_reports = []
     error_reads = []
+    stage_counts = []
     error_masks = []
     uart_rx_fault = 0
     overlap = False
@@ -547,6 +550,8 @@ def run(path, ram, fast=False):
                 elif len(body)==57:
                     port,rx,acked,no_ack,failed,invalid_count,_,_=struct.unpack("<B7Q",body)
                     assert port==0 and rx and acked and invalid_count
+                elif body[:4] == bytes.fromhex("00ab1801"):
+                    stage_counts.append(struct.unpack_from("<4Q", body, 4))
                 else:
                     assert len(body)==36 and body[:4]==bytes.fromhex("00001801")
                     assert sum(struct.unpack_from("<4Q",body,4))>0
@@ -991,6 +996,7 @@ def run(path, ram, fast=False):
         assert (6, bytes.fromhex("0403f04b54") + bytes([p]) + bytes(16)) in actual
     capture, = (data[5:] for kind, data in actual if kind == 6 and data[:5] == bytes.fromhex("040af04b54"))
     assert all(struct.unpack("<2I5Q5I", capture)[2:7])
+    assert stage_counts == [(1, 0, 1, 0)], stage_counts
     assert not reads and not read_events and actual[-1] == (6, bytes.fromhex("0305f04b54"))
     assert expected_flags == observed_flags, (clock, expected_flags - observed_flags, observed_flags - expected_flags)
     assert tuple(telemetry) == TELEMETRY

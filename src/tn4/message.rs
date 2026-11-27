@@ -12,14 +12,48 @@ pub const REAL_TIME_CLOCK_REPORT: u32 = 0x31f;
 pub const RH_REPORT: u32 = 0x323;
 pub const OUTDOOR_TEMPERATURE_REQUEST: u32 = 0x327;
 pub const OUTDOOR_TEMPERATURE_REPORT: u32 = 0x32f;
+pub const STAGE_HEAT_DEMAND_REQUEST: u32 = 0x35f;
 pub const AIR_GROUP_MEMBER_STATUS: u32 = 0x36f;
 pub const AIR_GROUP_MASTER_STATUS: u32 = 0x377;
 pub const WATER_CYCLE_START: u32 = 0x37f;
+pub const END_PURGE: u32 = 0x397;
+pub const START_PURGE: u32 = 0x39f;
+pub const START_OVERRIDE_ON: u32 = 0x3a7;
+pub const END_OVERRIDE_OFF: u32 = 0x3af;
+pub const END_OVERRIDE_ON: u32 = 0x3b7;
+pub const START_OVERRIDE_OFF: u32 = 0x3bf;
 pub const NETWORK_ERROR: u32 = 0x3d7;
 pub const NETWORK_INIT_REQUEST: u32 = 0x3df;
 pub const TAKING_ADDRESS: u32 = 0x3e7;
 pub const MASTER_QUERY: u32 = 0x3f7;
 pub const MASTER_PRESENT: u32 = 0x3ff;
+
+/// A provable, single native destination, not the sender in the frame header.
+pub fn single_destination(id: u32, payload: &[u8]) -> Option<[u8; 2]> {
+    let (subnet, mask) = match (id, payload) {
+        (BLOCK_UPDATE, [subnet, node, _, _, ..]) => {
+            let node = *node & super::NODE_MASK;
+            return (node != 0).then_some([*subnet, node]);
+        }
+        (BLOCK_REQUEST, [_, _, subnet, a, b, c, d, ..]) => {
+            const BLOCK_NODES: u32 = u32::MAX >> 1; // bit 31 is padding
+            (*subnet, u32::from_le_bytes([*a, *b, *c, *d]) & BLOCK_NODES)
+        }
+        (
+            STAGE_HEAT_DEMAND_REQUEST
+            | END_PURGE
+            | START_PURGE
+            | START_OVERRIDE_ON
+            | END_OVERRIDE_OFF
+            | END_OVERRIDE_ON
+            | START_OVERRIDE_OFF,
+            [subnet, _, a, b, c, ..],
+        ) => (*subnet, u32::from_le_bytes([*a, *b, *c, 0])),
+        _ => return None,
+    };
+    mask.is_power_of_two()
+        .then(|| [subnet, mask.trailing_zeros() as u8 + 1])
+}
 
 /// Minimum payload sizes, excluding the native header and any extensions.
 pub mod payload_bytes {
