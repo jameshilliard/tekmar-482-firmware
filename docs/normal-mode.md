@@ -33,7 +33,7 @@ behavior or compatibility with every serial client's timeout.
 | 14F SlabSetpoint, 157 FanPercent | Addressed Request, Update and active-slot Report. Blocks 7 and 9; see sensor requirements and fan units below. |
 | 150 RelativeHumidity | Request and Report from RHReport. Update is ignored. |
 | 151 HumidityMax, 152 HumidityMin | Addressed Request, Update and Report. Require an RH source and the corresponding block A3 enable flag. Not setback-indexed in tHA. |
-| 17F SetbackEvents | Request, read-only Update echo and Report. Returns the schedule master's configuration code (0/1/2 for zero/two/four events); FF if unknown, reserved or not a master. |
+| 17F SetbackEvents | Request, read-only Update echo and Report. An inventory entry starts at 0. Each native 2F7 replaces it with bits 7:6 of byte 0: 0/1/2 for zero/two/four events, 3 reserved. Unknown addresses do not reply. |
 | 16F SetbackEnable, 177 SetbackState | Read or set the gateway enable flag; read the active setback and receive setback reports when enabled. The flag also determines which heat, cool, floor and fan slots an Update changes. |
 | 1A7 DateTime | Update broadcasts local wall time on all five lines. No Request response or Report. |
 
@@ -41,11 +41,14 @@ behavior or compatibility with every serial client's timeout.
 [654 manual, p. 31](https://www.watts.com/dfsmedia/0533dbba17714b1ab581ab07a4cbb521/81803-source/638820695340000000/654-d-03.pdf#page=31)
 describes two or four events and master, member and local zone roles.
 The published 482 protocol promises `SetbackEvents` only for thermostat
-masters. J1196J nevertheless reads the cached byte for any inventoried
-address (handler `0xa610`, emitter `0xa5b0`); it does not query a schedule
-table. This firmware accepts a valid native master announcement from a
-654 on the same basis as any other identified peer. `FF` is unavailable,
-not zero events or proof that the snow control lacks scheduling.
+masters. On the wire, J1196J initializes the addressed cache byte to
+zero on allocation (slot + 0x33, record + 0x2f, at `0x2450`). Its
+`0x6538` handler stores the upper two native bits without checking the
+master bit or the product. `0xa610` / `0xa5b0` return that byte unchanged;
+an Update cannot set it. This firmware uses the same rule, including for
+the 654. A zero reply alone does not distinguish no schedule from no
+announcement yet; the code alone never proves schedule ownership. Use the
+native role and schedule setup for that.
 
 ## Bus compatibility
 

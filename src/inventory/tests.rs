@@ -504,13 +504,14 @@ fn broadcasts_send_once_per_line_replace_unsent_group_and_expire() {
 }
 
 #[test]
-fn schedule_events_only_describe_an_observed_schedule_master() {
+fn schedule_events_echo_the_stock_two_bit_code_not_the_role_or_request_value() {
     let mut inv = Inventory::new();
     observe(&mut inv, 0, 0, 24, 0x2f7, &[0x84, 1, 60], 0);
     assert!(call(&mut inv, 0x17f, 1, &[1, 0, 0], 0).is_none());
     observe(&mut inv, 0, 0, 24, 0x36f, &[0; 8], 0);
     inv.set_reporting(true);
-    for (flags, code) in [(4, 0), (0x44, 1), (0x84, 2), (0xc4, 255), (0x80, 255)] {
+    for flags in 0..=255 {
+        let code = flags / 64;
         observe(&mut inv, 0, 0, 24, 0x2f7, &[flags, 1, 60], 1);
         assert_eq!(
             inv.next_report(1).unwrap().payload(),
@@ -538,8 +539,8 @@ fn snow_control_identity_does_not_determine_the_schedule_count() {
         0,
     );
     let events = |inv: &mut Inventory| call(inv, 0x17f, 1, &[1, 0], 1).unwrap().payload()[7];
-    assert_eq!(events(&mut inv), 0xff);
-    for (flags, expected) in [(0x44, 1), (0x84, 2), (0x80, 0xff), (0x04, 0)] {
+    assert_eq!(events(&mut inv), 0);
+    for (flags, expected) in [(0x44, 1), (0x84, 2), (0x80, 2), (0xc0, 3), (0x04, 0)] {
         observe(
             &mut inv,
             0,

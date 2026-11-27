@@ -343,7 +343,8 @@ def run(path, ram, fast=False, *, normal_reads=False):
                     if phase == "outdoor-refresh" and not any(exchanges):
                         inject(bytes.fromhex("72f00604 4806 0000"), port=4)
                     if phase == "outdoor-request" and not any(exchanges):
-                        inject(bytes.fromhex("6f700603 840100"))
+                        phase = "setback-before-status"
+                        call(0x17f, bytes.fromhex("010000"))
                     if phase == "clock-during-read":
                         phase = "clock"
                         for line in exchanges:
@@ -938,8 +939,16 @@ def run(path, ram, fast=False, *, normal_reads=False):
                     inject(bytes.fromhex("72700000"), port=3)
                 else:
                     assert data[5:] in (bytes.fromhex("7206"), bytes.fromhex("6506"))
-            elif method == 0x17f and data[0] == 2:
-                assert data[5:] == bytes.fromhex("010002")
+            elif method == 0x17f and phase == "setback-before-status":
+                assert encode(kind, data) == bytes.fromhex("ca0806047f0100000100009335")
+                phase = "setback-member"
+                inject(bytes.fromhex("6f700603 c00100"))
+            elif method == 0x17f and phase == "setback-member":
+                assert encode(kind, data) == bytes.fromhex("ca0806027f0100000100039435")
+                phase = "setback-echo"
+                call(0x17f, bytes.fromhex("0100ff"), True)
+            elif method == 0x17f and phase == "setback-echo":
+                assert encode(kind, data) == bytes.fromhex("ca0806037f0100000100039535")
                 phase = "move"
                 call(0x10f, b"\0", True)
             elif method == 0x15f and phase == "move":

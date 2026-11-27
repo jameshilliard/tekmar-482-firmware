@@ -16,9 +16,7 @@ const SENSOR_SLOTS: usize = 5;
 const SENSOR_ROLE_OFF: u8 = 0;
 const SENSOR_ROLE_FLOOR: u8 = 2;
 const SENSOR_MASK: u8 = (1 << SENSOR_SLOTS) - 1;
-const SCHEDULE_MASTER: u8 = 1 << 2;
 const EVENT_COUNT_SHIFT: u8 = 6;
-const RESERVED_EVENT_COUNT: u8 = 3;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Field {
@@ -181,7 +179,6 @@ impl Telemetry {
         slab: u16::MAX,
         demand: UNAVAILABLE,
         humidity: UNAVAILABLE,
-        events: UNAVAILABLE,
         setback: UNAVAILABLE,
         mode: UNAVAILABLE,
         air_slots: [[u8::MAX; setback::SLOT_COUNT]; 2],
@@ -465,12 +462,8 @@ impl Telemetry {
                 Humidity.mask()
             }
             (message::SCHEDULE_STATUS, &[flags, ..]) => {
-                let code = flags >> EVENT_COUNT_SHIFT;
-                self.events = if flags & SCHEDULE_MASTER != 0 && code < RESERVED_EVENT_COUNT {
-                    code
-                } else {
-                    UNAVAILABLE
-                };
+                // Stock tHA copies bits 7:6, independently of mastership.
+                self.events = flags >> EVENT_COUNT_SHIFT;
                 Field::Events.mask()
                     | if self.setback < setback::UNKNOWN {
                         Setback.mask()
