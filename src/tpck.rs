@@ -18,26 +18,85 @@ pub struct Packet<'a> {
     pub data: &'a [u8],
 }
 
-/// Emits nothing if the payload cannot be represented by the one-byte length.
-pub fn encode(kind: u8, data: &[u8], mut put: impl FnMut(u8)) -> Result<(), TooLong> {
-    let len = u8::try_from(data.len()).map_err(|_| TooLong)?;
-    let sum = data
-        .iter()
-        .copied()
-        .fold(len.wrapping_add(kind), u8::wrapping_add);
-    put(SOF);
-    for b in [len, kind]
-        .into_iter()
-        .chain(data.iter().copied())
-        .chain([sum])
-    {
-        if matches!(b, SOF | EOF | ESC) {
-            put(ESC);
-        }
-        put(b);
+const LENGTH_OFFSET: u16 = 1;
+const KIND_OFFSET: u16 = 2;
+const PAYLOAD_OFFSET: u16 = 3;
+const ENCODED: u16 = u16::MAX;
+
+/// Resume a single TPCK frame without allocating its escaped representation.
+pub struct Encoder {
+    offset: u16,
+    sum: u8,
+    escaped: Option<u8>,
+}
+
+impl Encoder {
+    pub const EMPTY: Self = Self {
+        offset: 0,
+        sum: 0,
+        escaped: None,
+    };
+
+    pub fn started(&self) -> bool {
+        self.offset != 0
     }
-    put(EOF);
-    Ok(())
+
+    pub fn finished(&self) -> bool {
+        self.offset == ENCODED
+    }
+
+    /// Write at most `room` wire bytes. Keep kind and payload fixed until finished.
+    pub fn write(
+        &mut self,
+        kind: u8,
+        data: &[u8],
+        room: usize,
+        mut put: impl FnMut(u8),
+    ) -> Result<(), TooLong> {
+        let len = u8::try_from(data.len()).map_err(|_| TooLong)?;
+        let checksum = PAYLOAD_OFFSET + u16::from(len);
+        for _ in 0..room {
+            if let Some(byte) = self.escaped.take() {
+                put(byte);
+                continue;
+            }
+            let offset = self.offset;
+            let byte = match offset {
+                ENCODED => break,
+                0 => {
+                    self.offset = LENGTH_OFFSET;
+                    put(SOF);
+                    continue;
+                }
+                LENGTH_OFFSET => len,
+                KIND_OFFSET => kind,
+                i if i < checksum => data[usize::from(i - PAYLOAD_OFFSET)],
+                i if i == checksum => self.sum,
+                _ => {
+                    self.offset = ENCODED;
+                    put(EOF);
+                    break;
+                }
+            };
+            if offset < checksum {
+                self.sum = self.sum.wrapping_add(byte);
+            }
+            self.offset += 1;
+            if matches!(byte, SOF | EOF | ESC) {
+                self.escaped = Some(byte);
+                put(ESC);
+            } else {
+                put(byte);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Emits nothing if the payload cannot be represented by the one-byte length.
+pub fn encode(kind: u8, data: &[u8], put: impl FnMut(u8)) -> Result<(), TooLong> {
+    let mut encoder = Encoder::EMPTY;
+    encoder.write(kind, data, usize::MAX, put)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -157,6 +216,51 @@ impl Decoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fifo_sized_pulls_preserve_escaping_across_every_boundary() {
+        let fixtures = [
+            (0x35, &[][..], &[0xca, 0, 0x2f, 0x35, 0x2f, 0x35, 0x35][..]),
+            (
+                0x2f,
+                &[0xca, 0x35, 0x2f],
+                &[
+                    0xca, 3, 0x2f, 0x2f, 0x2f, 0xca, 0x2f, 0x35, 0x2f, 0x2f, 0x60, 0x35,
+                ],
+            ),
+            (6, &[0xc3], &[0xca, 1, 6, 0xc3, 0x2f, 0xca, 0x35]),
+            (
+                6,
+                &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xca],
+                &[
+                    0xca, 13, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x2f, 0xca, 0xdd, 0x35,
+                ],
+            ),
+        ];
+        for (kind, body, golden) in fixtures {
+            for budget in 1..=16 {
+                let mut output = heapless::Vec::<_, 24>::new();
+                let mut cursor = Encoder::EMPTY;
+                cursor
+                    .write(kind, body, 0, |_| panic!("no FIFO space"))
+                    .unwrap();
+                assert!(!cursor.started() && !cursor.finished());
+                for _ in 0..golden.len().div_ceil(budget) {
+                    let before = output.len();
+                    cursor
+                        .write(kind, body, budget, |b| output.push(b).unwrap())
+                        .unwrap();
+                    assert!(cursor.started());
+                    assert_eq!(output.len() - before, budget.min(golden.len() - before));
+                }
+                assert!(cursor.finished());
+                assert_eq!(output.as_slice(), golden);
+                cursor
+                    .write(kind, body, budget, |_| panic!("frame already done"))
+                    .unwrap();
+            }
+        }
+    }
 
     #[test]
     fn all_lengths_round_trip_including_escaped_lengths_and_types() {

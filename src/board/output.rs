@@ -2,6 +2,8 @@
 use super::{lpc2146::uart0, write};
 use tekmar_482_firmware::diagnostics::errors::{ErrorBook, LineError};
 use tekmar_482_firmware::tn4::{MAX_BYTES, PORT_COUNT};
+use tekmar_482_firmware::tpck;
+use tekmar_482_firmware::trpc::MAX_REPLY_BYTES;
 const REPORT_WATERMARK: usize = 2;
 const RX_WATERMARK: usize = 6;
 const COMMAND_WATERMARK: usize = 8;
@@ -10,9 +12,13 @@ const TRACE_SLOTS: usize = 2 * PORT_COUNT;
 const RECORD_SLOTS: usize = COMMAND_WATERMARK + PORT_COUNT + TRACE_SLOTS;
 type SlotMask = u32;
 const _: () = assert!(RECORD_SLOTS <= SlotMask::BITS as usize);
-const ENCODED_RECORD_BYTES: usize = 168; // includes TPCK escaping
-use heapless::Vec;
-use tekmar_482_firmware::tpck;
+const INVALID_RECORD_BYTES: usize = tpck::raw::INVALID_PREFIX + MAX_BYTES + size_of::<u16>();
+const RECORD_PAYLOAD_BYTES: usize = if INVALID_RECORD_BYTES > MAX_REPLY_BYTES {
+    INVALID_RECORD_BYTES
+} else {
+    MAX_REPLY_BYTES
+};
+const _: () = assert!(RECORD_PAYLOAD_BYTES <= u8::MAX as usize);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Kind {
@@ -28,7 +34,9 @@ pub(super) enum Kind {
 }
 
 struct Record {
-    bytes: Vec<u8, ENCODED_RECORD_BYTES>,
+    payload: [u8; RECORD_PAYLOAD_BYTES],
+    len: u8,
+    ty: u8,
     kind: Kind,
 }
 
@@ -39,7 +47,7 @@ pub(super) struct Output {
     len: usize,
     traces: usize,
     gap: tpck::trace::PendingGap,
-    offset: usize,
+    encoder: tpck::Encoder,
     diagnostic: bool,
 }
 
@@ -51,7 +59,9 @@ impl Output {
             static_cell::ConstStaticCell::new(Output {
                 records: [const {
                     Record {
-                        bytes: Vec::new(),
+                        payload: [0; RECORD_PAYLOAD_BYTES],
+                        len: 0,
+                        ty: 0,
                         kind: Kind::Rx(0),
                     }
                 }; RECORD_SLOTS],
@@ -60,7 +70,7 @@ impl Output {
                 len: 0,
                 traces: 0,
                 gap: tpck::trace::PendingGap::EMPTY,
-                offset: 0,
+                encoder: tpck::Encoder::EMPTY,
                 diagnostic: false,
             });
         QUEUE.take()
@@ -97,17 +107,11 @@ impl Output {
             self.gap.lost(p);
             return;
         }
-        // Invalid frames include a reason, bit count and up to two CRC bytes.
-        let mut data = [0; tpck::raw::INVALID_PREFIX + MAX_BYTES + size_of::<u16>()];
-        let (prefix, tail) = data.split_at_mut(tpck::raw::RX_PREFIX);
+        let mut prefix = [0; tpck::raw::RX_PREFIX];
         prefix[0] = event;
         prefix[1] = p as u8;
         prefix[2..].copy_from_slice(&ms.to_le_bytes());
-        let (meta, rest) = tail.split_at_mut(detail.len());
-        meta.copy_from_slice(detail);
-        rest[..body.len()].copy_from_slice(body);
-        let len = tpck::raw::RX_PREFIX + detail.len() + body.len();
-        self.enqueue(Kind::Trace, tpck::NORMAL_TRACE, &data[..len]);
+        self.enqueue_parts(Kind::Trace, tpck::NORMAL_TRACE, &[&prefix, detail, body]);
     }
     pub(super) fn flush_trace_gap(&mut self, boundary: bool) {
         if (self.traces < TRACE_SLOTS || boundary)
@@ -144,8 +148,8 @@ impl Output {
         }
         kind
     }
-    pub(super) fn capture(&mut self, kind: Kind, data: &[u8], ms: u32, errors: &mut ErrorBook) {
-        let first = usize::from(self.offset != 0);
+    pub(super) fn capture(&mut self, kind: Kind, parts: &[&[u8]], ms: u32, errors: &mut ErrorBook) {
+        let first = usize::from(self.encoder.started());
         if self.len - self.traces >= RX_WATERMARK {
             if matches!(kind, Kind::Rx(_))
                 && let Some(i) = self.order[first..self.len]
@@ -159,10 +163,13 @@ impl Output {
                 return;
             }
         }
-        self.enqueue(kind, tpck::TN4, data);
+        self.enqueue_parts(kind, tpck::TN4, parts);
     }
     pub(super) fn enqueue(&mut self, kind: Kind, ty: u8, data: &[u8]) {
-        let first = usize::from(self.offset != 0);
+        self.enqueue_parts(kind, ty, &[data]);
+    }
+    fn enqueue_parts(&mut self, kind: Kind, ty: u8, parts: &[&[u8]]) {
+        let first = usize::from(self.encoder.started());
         let pos = if let Kind::Overlap(port) = kind {
             self.order[first..self.len]
                 .iter()
@@ -189,8 +196,14 @@ impl Output {
         self.used |= 1 << slot;
         let r = &mut self.records[slot];
         r.kind = kind;
-        r.bytes.clear();
-        tpck::encode(ty, data, |b| r.bytes.push(b).unwrap()).unwrap();
+        r.ty = ty;
+        let mut tail = &mut r.payload[..];
+        for data in parts {
+            let (part, rest) = tail.split_at_mut(data.len());
+            part.copy_from_slice(data);
+            tail = rest;
+        }
+        r.len = (RECORD_PAYLOAD_BYTES - tail.len()) as u8;
         self.order[self.len] = slot as u8;
         for i in (pos.unwrap_or(self.len)..self.len).rev() {
             self.order.swap(i, i + 1);
@@ -212,17 +225,22 @@ impl Output {
             return None;
         }
         let r = &self.records[usize::from(self.order[0])];
-        if self.offset < r.bytes.len() {
+        if !self.encoder.finished() {
             if uart.status(errors, ms) & uart0::THRE == 0 {
                 return None;
             }
-            let end = (self.offset + uart0::FIFO_BYTES).min(r.bytes.len());
-            for &byte in &r.bytes[self.offset..end] {
-                write(uart0::DATA, u32::from(byte));
-            }
-            self.offset = end;
+            self.encoder
+                .write(
+                    r.ty,
+                    &r.payload[..usize::from(r.len)],
+                    uart0::FIFO_BYTES,
+                    |byte| {
+                        write(uart0::DATA, u32::from(byte));
+                    },
+                )
+                .unwrap();
         }
-        if self.offset != r.bytes.len() {
+        if !self.encoder.finished() {
             return None;
         }
         if matches!(r.kind, Kind::Result(_) | Kind::Reboot)
@@ -230,7 +248,7 @@ impl Output {
         {
             return None;
         }
-        self.offset = 0;
+        self.encoder = tpck::Encoder::EMPTY;
         Some(self.remove(0))
     }
 }

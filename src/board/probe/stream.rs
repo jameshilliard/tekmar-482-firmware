@@ -7,7 +7,7 @@ use super::{CCR, Capture, CaptureInput, INPUTS, IR, TC, TIMERS, next_edge_flags,
 use core::cell::RefCell;
 use tekmar_482_firmware::diagnostics::errors::{ALL_SOURCES, ErrorBook, HostError, LineError};
 use tekmar_482_firmware::diagnostics::timing::LinkTiming;
-use tekmar_482_firmware::tn4::{ALL_PORTS_MASK, LAST_PORT, MAX_BYTES, PORT_COUNT};
+use tekmar_482_firmware::tn4::{ALL_PORTS_MASK, LAST_PORT, PORT_COUNT};
 use tekmar_482_firmware::tpck::{raw, trace};
 const MOVE_QUEUE_CAPACITY: usize = 128;
 const NORMAL_MODE: u8 = 0;
@@ -167,15 +167,9 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                 errors.line(p, LineError::RxNoAck, time.millis);
             }
             if raw {
-                let mut data = [0; raw::RX_PREFIX + MAX_BYTES];
-                data[0] = raw::RX;
-                data[1] = p as u8;
-                data[2..raw::RX_PREFIX].copy_from_slice(&time.millis.to_le_bytes());
-                data[raw::RX_PREFIX..raw::RX_PREFIX + frame.bytes.len()]
-                    .copy_from_slice(frame.bytes);
                 out.capture(
                     Kind::Rx(p as u8),
-                    &data[..raw::RX_PREFIX + frame.bytes.len()],
+                    &[&[raw::RX, p as u8], &time.millis.to_le_bytes(), frame.bytes],
                     time.millis,
                     errors,
                 );
@@ -239,18 +233,15 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                 };
                 errors.line(p, code, time.millis);
                 if raw {
-                    let mut data = [0; raw::INVALID_PREFIX + MAX_BYTES + size_of::<u16>()];
-                    data[0] = raw::RX_INVALID;
-                    data[1] = p as u8;
-                    data[2..raw::RX_PREFIX].copy_from_slice(&time.millis.to_le_bytes());
-                    data[raw::RX_PREFIX] = fault.reason;
-                    data[raw::RX_PREFIX + 1..raw::INVALID_PREFIX]
-                        .copy_from_slice(&fault.bits.to_le_bytes());
-                    data[raw::INVALID_PREFIX..raw::INVALID_PREFIX + fault.bytes.len()]
-                        .copy_from_slice(fault.bytes);
+                    let [lo, hi] = fault.bits.to_le_bytes();
                     out.capture(
                         Kind::Invalid(p as u8),
-                        &data[..raw::INVALID_PREFIX + fault.bytes.len()],
+                        &[
+                            &[raw::RX_INVALID, p as u8],
+                            &time.millis.to_le_bytes(),
+                            &[fault.reason, lo, hi],
+                            fault.bytes,
+                        ],
                         time.millis,
                         errors,
                     );

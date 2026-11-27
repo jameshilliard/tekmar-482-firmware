@@ -41,7 +41,7 @@ const FEATURE_LINK_TIMING: u16 = 1 << 14;
 const HEADER_BYTES: usize = 1 + size_of::<u32>();
 const REVISION_MAGIC: &[u8; 8] = b"TK48REV\0";
 const REVISION_BYTES: usize = REVISION_MAGIC.len() + 40; // hexadecimal Git object name
-const MAX_REPLY_BYTES: usize = HEADER_BYTES + crate::normal_read::MAX_RESULT;
+pub const MAX_REPLY_BYTES: usize = HEADER_BYTES + crate::normal_read::MAX_RESULT;
 const _: () = assert!(crate::normal_read::MAX_RESULT >= crate::diagnostics::CAPTURE_BYTES);
 
 const BUILD_LEN: usize = env!("TEKMAR_BUILD_REVISION").len();

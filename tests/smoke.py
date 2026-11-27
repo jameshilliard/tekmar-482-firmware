@@ -21,6 +21,7 @@ from frames import Decoder, encode
 
 PORTS = [(4, 0, 1, 28), (11, 1, 1, 13), (6, 0, 2, 22), (10, 1, 0, 8), (2, 0, 0, 29)]
 TRACE_BURST = 2 * len(PORTS)
+UART_FIFO_BYTES = 16
 CLIENT_STEP_US = 120_000
 PEER_TURNAROUND_US = 30_000
 BITS = "10001001000110000010000010000010000110100101000111000101111"
@@ -496,7 +497,7 @@ def run(path, ram, fast=False, *, normal_reads=False, client_script=None):
                     # More than a second of valid traffic: not backoff time.
                     backoff_after = inject(bytes.fromhex("7ff0003f") + bytes(63), 2, after=end)
                 while burst and next_byte <= clock:
-                    assert len(incoming) < 16, "LPC2146 UART RX FIFO overrun during command burst"
+                    assert len(incoming) < UART_FIFO_BYTES, "LPC2146 UART RX FIFO overrun during command burst"
                     incoming.append(burst.popleft())
                     next_byte += 53 if fast else 1042  # 8N1 character time in us.
                 cpu.mem_write(
@@ -1285,10 +1286,11 @@ def run(path, ram, fast=False, *, normal_reads=False, client_script=None):
     acr = 0
     dlab = False
     dll = dlm = draining = 0
+    tx_space = 0
     entered = False
 
     def read(uc, off, size, user):
-        nonlocal draining, acr, dll, dlm, uart_rx_fault
+        nonlocal draining, acr, dll, dlm, uart_rx_fault, tx_space
         if training and clock >= training[0]:
             at = training.popleft() - training_start
             if at < 170_000:
@@ -1305,8 +1307,11 @@ def run(path, ram, fast=False, *, normal_reads=False, client_script=None):
         if off == 0x14:
             draining = max(0, draining - 1)
             flags, uart_rx_fault = uart_rx_fault, 0
+            empty = draining <= 1 and clock >= trace_resume
+            if empty:
+                tx_space = UART_FIFO_BYTES
             return (
-                (0 if draining > 1 or clock < trace_resume else 0x20)
+                (0x20 if empty else 0)
                 | (0 if draining else 0x40)
                 | bool(incoming)
                 | flags
@@ -1315,7 +1320,7 @@ def run(path, ram, fast=False, *, normal_reads=False, client_script=None):
         return incoming.popleft()
 
     def write(uc, off, size, value, user):
-        nonlocal dlab, dll, dlm, draining, acr
+        nonlocal dlab, dll, dlm, draining, acr, tx_space
         if off == 0x0C:
             dlab = bool(value & 128)
         elif off == 0x20:
@@ -1326,6 +1331,8 @@ def run(path, ram, fast=False, *, normal_reads=False, client_script=None):
             dlm = value
         elif off == 0:
             assert dll + 256 * dlm == (16 if fast else 313)
+            assert tx_space, "UART TX wrote past the available 16-byte FIFO"
+            tx_space -= 1
             draining = 3
             if client_script is not None:
                 client_output.append(value)
