@@ -37,8 +37,8 @@ EDIT_WRITE = bytes.fromhex("6df00007 0018 0300 000409")
 SCENE = bytes.fromhex("2ff00003 07e001")  # 483 scene 8, eight hours.
 STAGE_PURGE = bytes.fromhex("39f00005 abf5018080")
 STAGE_KEY = bytes.fromhex("039f03 abf5018080")
-SERVICE_TEST = bytes.fromhex("b8f431c3 025634")
-SERVICE_KEY = bytes.fromhex("03 b8f431c3 025634")
+SERVICE_CYCLE = bytes.fromhex("b3f431c2 0320")
+SERVICE_KEY = bytes.fromhex("03 b3f431c2 0320")
 RAW_SENDS = (SCENE, bytes.fromhex("21f00002 0401"), bytes.fromhex("31f00005 1ebf100607"),
              bytes.fromhex("01000003 000102"), bytes.fromhex("20000001 01"))
 RAW_READS = ((bytes.fromhex("6d70000b 100000 00008000 00000000"), bytes.fromhex("6e70060a 10007f 90020304050607")),
@@ -831,8 +831,8 @@ def run(path, ram, fast=False, *, normal_reads=False, client_script=None):
                     assert (6, bytes.fromhex("0406f04b54 13f04b54 01")) in actual
                     assert [t[6:] for t in read_traces if t[0] == 1 and t[6] == 4] == [b"\x04\0" + STAGE_PURGE]
                     phase = "normal-service"
-                    exchanges[3].append((SERVICE_TEST, None))
-                    extension(22, SERVICE_KEY)  # A Request must not start a test.
+                    exchanges[3].append((SERVICE_CYCLE, None))
+                    extension(22, SERVICE_KEY)  # Only the Update service may transmit.
                     extension(22, bytes.fromhex("03 b57431c4 cffe6321"), True)
                     extension(22, SERVICE_KEY, True)
             elif method == 0x544bf016:
@@ -845,7 +845,7 @@ def run(path, ram, fast=False, *, normal_reads=False, client_script=None):
                     assert (6, bytes.fromhex("0406f04b54 16f04b54 02")) in actual
                     assert (6, bytes.fromhex("0306f04b54 16f04b54 02")) in actual
                     assert (6, bytes.fromhex("0306f04b54 16f04b54 01")) in actual
-                    assert [t[6:] for t in read_traces if t[0] == 1 and t[6] == 5] == [b"\x05\0" + SERVICE_TEST]
+                    assert [t[6:] for t in read_traces if t[0] == 1 and t[6] == 5] == [b"\x05\0" + SERVICE_CYCLE]
                     extension(11, b"\x00", True)
                     phase = "normal-discover"
                     exchanges[3].append((bytes.fromhex("6d70000b 0000 15 ffffff7f 00000000"), None))

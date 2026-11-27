@@ -254,14 +254,16 @@ these payloads, using the header's declared payload length:
 | Native ID | Exact base payload |
 | --- | --- |
 | 287 CalibrationMode | Mode u8. |
+| 33F CycleLengthRequest | Air-group ID u8, requested cycle length u8. |
 | 357 MixingModuleUpdate | Packed flags and target high bits u8, target low bits u8, pump output u8. |
 | 387 NetworkTestTime | Additional time u16le. |
 | 38F NetworkTestMode | Mode u8, expected duration u16le. |
 
 The gateway preserves the supplied source address and priority. They
-describe the sender, not a destination. The method does not discover
-eligible receivers, interpret the test timer units or start a test on
-connection. It rejects unknown IDs, wrong lengths and extensions. In
+describe the sender, not a destination. For 33F the group ID is not a node
+address, and the requested length stays in wire units. The method does not
+discover eligible receivers, interpret timer units, or send on connection.
+It rejects unknown IDs, wrong lengths and extensions. In
 particular the optional mixing tail is not a known Normal-mode layout;
 use explicitly selected Raw mode to transport an exact captured body
 with that tail unchanged.

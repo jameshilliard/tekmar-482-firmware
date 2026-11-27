@@ -661,6 +661,16 @@ uses a caller-supplied native source and priority, does not add a
 motor-speed byte, and does not assume any device implemented the
 command. Monitor subsequent peer traffic separately for actual state.
 
+**Air-group cycle request.** The SW 07 and SW 11 layouts both define 33F
+as two full octets: group ID and requested length. The indexed SW 11
+reader agrees. Send it through NormalServiceFrame with an explicit
+sender and priority. The length's units and the responding model or
+role are not established. Keep it separate from the observed cycle in
+377 AirGroupMasterStatus; 377 is not a matched reply to 33F.
+The optional 483 comparison checks every bit in the five base service
+layouts against the SW 11 indexed readers, excluding the unresolved
+mixing tail.
+
 **Associating water temperatures.** A MasterPresent slot is a subnet byte
 (control in bits 7:3, bus in 2:0), not a physical gateway port. Slot 0
 advertises the boiler; slots 1 through 7 advertise those numbered mixes.

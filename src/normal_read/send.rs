@@ -88,7 +88,10 @@ impl Send {
             || !matches!(
                 (id, payload),
                 (message::CALIBRATION_MODE, [_])
-                    | (message::NETWORK_TEST_TIME, [_, _])
+                    | (
+                        message::CYCLE_LENGTH_REQUEST | message::NETWORK_TEST_TIME,
+                        [_, _]
+                    )
                     | (
                         message::NETWORK_TEST_MODE | message::MIXING_MODULE_UPDATE,
                         [_, _, _]
@@ -254,6 +257,7 @@ mod tests {
     fn service_frames_preserve_the_header_and_admit_only_known_lengths() {
         for body in [
             &[0x68, 0x74, 0x31, 0xc1, 3][..],
+            &[0xb3, 0xf4, 0x31, 0xc2, 3, 0x20],
             &[0xb5, 0x74, 0x31, 0xc3, 0xcf, 0xfe, 99],
             &[0xb8, 0x74, 0x31, 0xc2, 0x34, 0x12],
             &[0xb8, 0xf4, 0x31, 0xc3, 2, 0x56, 0x34],
@@ -275,6 +279,8 @@ mod tests {
             &[0xb8, 0xf4, 0x31],
             &[0xb8, 0xf4, 0x31, 0xc2, 2, 0x56, 0x34], // length disagrees with header
             &[0xb8, 0xf4, 0x31, 0xc2, 2, 0x56],       // incomplete test mode
+            &[0xb3, 0xf4, 0x31, 0xc1, 3],             // incomplete cycle length
+            &[0xb3, 0xf4, 0x31, 0xc3, 3, 0x20, 0],    // unknown cycle length tail
             &[0xb5, 0x74, 0x31, 0xc4, 0xcf, 0xfe, 99, 0x77], // unknown tail
             &[0x2d, 0xf0, 0, 5, 0x43, 7, 3, 0, 1],    // unguarded BlockUpdate
         ] {
