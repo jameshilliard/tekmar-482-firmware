@@ -706,7 +706,7 @@ class PayloadTests(unittest.TestCase):
             (101901, 1159, "346"), (101901, 1145, "481"),
             (10599181, 1118, "541"), (10599181, 1116, "542"),
             (103301, 1191, "402"), (104103, 1206, "402"),
-            (105801, 1226, "654"), (108402, 0, "671"), (101103, 0, "033"),
+            (105801, 1226, "654"),
         ):
             with self.subTest(number=number, j=j):
                 fields = decode_payload(0x2e7, b"\0\0\x1f" + number.to_bytes(3, "little") + j.to_bytes(2, "little"))
@@ -718,6 +718,29 @@ class PayloadTests(unittest.TestCase):
         self.assertIn(0x22, identify_product(103301).candidate_blocks)
         self.assertIn(0xcd, identify_product(105801).candidate_blocks)
         self.assertEqual(identify_product(108402).candidate_blocks, (0,))
+        for number, model in ((108402, "671"), (101103, "033")):
+            # Missing J permits a unique product match; supported J=0 is corrupt.
+            data = number.to_bytes(3, "little")
+            self.assertEqual(decode_payload(0x2e7, b"\0\0\x07" + data)["model"], model)
+            self.assertNotIn("model", decode_payload(0x2e7, b"\0\0\x1f" + data + bytes(2)))
+
+    def test_legacy_identification_fixes_require_the_matching_wire_product(self):
+        for number, raw_j, j, model in (
+            (10599181, 24068, 1118, "541"), (15041281, 24068, 1118, "541"),
+            (10599181, 23556, 1116, "542"), (15106817, 23556, 1116, "542"),
+            (3006346, 29956, 1141, "161"), (3071882, 30212, 1142, "162"),
+        ):
+            data = number.to_bytes(3, "little") + raw_j.to_bytes(2, "little")
+            fields = decode_payload(0x2e7, b"\0\0\x1f" + data)
+            self.assertEqual((fields["product_number"], fields["j_number"]), (number, raw_j))
+            self.assertEqual((fields["corrected_j_number"], fields["model"]), (j, model))
+        fields = decode(0x2e7, "0000 3f 000000 8904 03")
+        self.assertEqual((fields["product_number"], fields["corrected_product_number"], fields["model"]),
+                         (0, 100102, "537"))
+        for text in ("0000 18 8904", "0000 07 000000", "0000 1f 000000 045e",
+                     "0000 1f 123456 045e"):
+            fields = decode(0x2e7, text)
+            self.assertFalse(set(fields) & {"model", "corrected_product_number", "corrected_j_number"})
 
     def test_registered_addressed_blocks_have_named_report_fields(self):
         registered = {

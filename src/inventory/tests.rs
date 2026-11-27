@@ -1152,6 +1152,54 @@ fn full_walk_is_a_snapshot_with_one_terminator() {
 }
 
 #[test]
+fn normal_identity_corrects_the_five_evidenced_legacy_pairs_only() {
+    let mut inv = Inventory::default();
+    let address = 124u16.to_le_bytes(); // port 0, subnet 1, native node 1
+    let read = |inv: &mut Inventory, method| {
+        u32::from_le_bytes(
+            call(inv, method, 1, &address, 1).unwrap().payload()[7..]
+                .try_into()
+                .unwrap(),
+        )
+    };
+    for (number, j, product, version) in [
+        (10599181u32, 24068u16, 10599181, 111803),
+        (10599181, 23556, 10599181, 111603),
+        (3006346, 29956, 3006346, 114103),
+        (3071882, 30212, 3071882, 114203),
+        (0, 1161, 100102, 116103),
+        (12345, 24068, 12345, 2406803),
+    ] {
+        let [a, b, c, _] = number.to_le_bytes();
+        let [lo, hi] = j.to_le_bytes();
+        observe(
+            &mut inv,
+            0,
+            1,
+            1,
+            0x2e7,
+            &[0, 0, 0x3f, a, b, c, lo, hi, 3],
+            1,
+        );
+        assert_eq!(read(&mut inv, PRODUCT), product);
+        assert_eq!(read(&mut inv, VERSION), version);
+    }
+    // An explicitly zero J invalidates the whole new report, not the last good observation.
+    observe(&mut inv, 0, 1, 1, 0x2e7, &[0, 0, 0x3f, 0, 0, 0, 0, 0, 4], 1);
+    assert_eq!(read(&mut inv, PRODUCT), 12345);
+    assert_eq!(read(&mut inv, VERSION), 2406803);
+    // A changed product cannot borrow the old J. Independent supported fields can fill it later.
+    observe(&mut inv, 0, 1, 1, 0x2e7, &[0, 0, 7, 0, 0, 0], 1);
+    assert_eq!(read(&mut inv, PRODUCT), 0);
+    assert_eq!(read(&mut inv, VERSION), UNKNOWN);
+    observe(&mut inv, 0, 1, 1, 0x2e7, &[0, 0, 0x18, 0x89, 4], 1);
+    assert_eq!(read(&mut inv, PRODUCT), 100102);
+    assert_eq!(read(&mut inv, VERSION), UNKNOWN);
+    observe(&mut inv, 0, 1, 1, 0x2e7, &[0, 0, 0x20, 4], 1);
+    assert_eq!(read(&mut inv, VERSION), 116104);
+}
+
+#[test]
 fn identity_handles_partial_masks_clock_wrap_and_reuse() {
     let mut inv = Inventory::default();
     let start = u32::MAX - 10;

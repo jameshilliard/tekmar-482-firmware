@@ -19,7 +19,7 @@ behavior or compatibility with every serial client's timeout.
 | 000 NullMethod | Reply to an unknown method on the matching response service. |
 | 187 FirmwareRevision, 18F ProtocolVersion | Request returns a little-endian u16; Update is silent. The physical Test button reports both. |
 | 167 DeviceInventory | Full walk, exact lookup, clear one, clear all. No unsolicited inventory report. |
-| 197 DeviceType, 19F DeviceVersion | Read addressed identity from block 0. Ignore writes. |
+| 197 DeviceType, 19F DeviceVersion | Read addressed identity from supported fields of block 0. Apply the documented 537/541/542/161/162 [legacy corrections](tn4-blocks.md#discovering-identities); stock J1196J at `0x6918` just copies the product and computes J x 100 + Z. Ignore writes. |
 | 15F TakingAddress | Report the old and new addresses even with reporting disabled. The stock input dispatcher has no case for this report ID: host Request and Update get an empty NullMethod on the corresponding response service. |
 | 107 NetworkError | Request and read-only Update return the most recently received fault word. With reporting enabled, forward each native 3D7, including repeated values and clears. No source address in tHA. |
 | 10F ReportingState | Request and Update read back the active reporting flag. A Test-mode Report carries the physical DIP position instead. |

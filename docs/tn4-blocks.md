@@ -30,12 +30,24 @@ not proof of the original wiring or of a unique device.
 The [product catalog](../tools/payloads/products.py) uses Tektra and J
 numbers from the 483 SW 11 product table, plus the additional models
 in the [published tHA list](https://www.watts.com/our-story/brands/tekmar/tha).
-It does not infer a model from a J number, a group ID or a master role.
+It does not infer a model from a J number alone, a group ID or a master role.
 Two early thermostat variants share a product number; so do a power
 manager and a user switch. Without a distinguishing J number they
 remain unidentified. For identified models, the 40 SW 11 read tables
 suggest blocks to try; the masks in actual reports establish the
 available data, not these lists.
+
+SW 11's `Block.fixup_device_identification` corrects four early devices
+that transmit a byte-swapped J number. With a matching cataloged product,
+the 541 reports 24068 instead of 1118, the 542 reports 23556 instead of
+1116, the 161 reports 29956 instead of 1141, and the 162 reports 30212
+instead of 1142. The 537 has a different exception: a **reported** product
+of zero together with J1161 means product 100102. A missing product field
+is not zero. A supported J of zero makes the entire identification report
+unusable; a missing J can still leave an unambiguous product number.
+Raw capture and the decoded `product_number` and `j_number` retain the
+reported values. The decoder adds a `corrected_product_number` or
+`corrected_j_number` only where the corresponding quirk applies.
 
 | Block (hex) | Report contents |
 | --- | --- |

@@ -5,6 +5,7 @@ mod air;
 mod broadcast;
 mod codes;
 mod groups;
+mod identity;
 mod line;
 mod outdoor;
 mod reads;
@@ -14,6 +15,7 @@ pub use reads::BlockProbe;
 mod settings;
 mod telemetry;
 use crate::tn4::tx::{Outcome, Request};
+use identity::Identity;
 use settings::{Operation, Setting};
 use telemetry::{Field, Telemetry};
 
@@ -35,7 +37,6 @@ const MODE_REFRESH_SECONDS: u16 = 300;
 const SENSOR_SETUP_SECONDS: u16 = 3600;
 const STEPPED_FAN_PRODUCTS: core::ops::RangeInclusive<u32> = 99201..=99203;
 const MAX_FAN_STEP: u8 = 10;
-const IDENTITY_Z_RADIX: u32 = 100;
 const BLOCK_REQUEST_PAYLOAD_BYTES: usize = 2 + 1 + size_of::<u32>();
 const BLOCK_REQUEST_FRAME_BYTES: usize = tn4::HEADER_BYTES + BLOCK_REQUEST_PAYLOAD_BYTES;
 const UNKNOWN: u32 = u32::MAX;
@@ -45,8 +46,7 @@ struct Device {
     address: u16,
     subnet: u8,
     last_seen: u32,
-    product: u32,
-    version: u32,
+    identity: Identity,
     incarnation: u16,
     identity_delay: u8,
     mode_delay: u16,
@@ -62,8 +62,7 @@ impl Device {
         address: 0,
         subnet: 0,
         last_seen: 0,
-        product: 0,
-        version: 0,
+        identity: Identity::EMPTY,
         incarnation: 0,
         identity_delay: 0,
         mode_delay: 0,
@@ -315,7 +314,13 @@ impl Inventory {
         if expected_subnet != subnet {
             return None;
         }
-        if !present {
+        let identity = match (message, data) {
+            (message::BLOCK_REPORT, [block::DEVICE_INFO, 0, mask, values @ ..]) => {
+                Identity::read(*mask, values)
+            }
+            _ => None,
+        };
+        if !present || identity.is_some_and(|id| row.identity.conflicts(id)) {
             if bus.job.active() && bus.job.address == address {
                 bus.job.fail();
             }
@@ -323,8 +328,6 @@ impl Inventory {
             self.incarnation = self.incarnation.wrapping_add(1);
             *row = Device {
                 incarnation: self.incarnation,
-                product: UNKNOWN,
-                version: UNKNOWN,
                 live: Telemetry::UNKNOWN,
                 ..Device::EMPTY
             };
@@ -386,17 +389,8 @@ impl Inventory {
             };
             bus.reads.discard(node, block::SETPOINT_SETUP);
         }
-        if message == message::BLOCK_REPORT
-            && let [block::DEVICE_INFO, 0, mask, values @ ..] = data
-        {
-            let get = |i| block_byte(*mask, values, i);
-            if let (Some(x), Some(y), Some(z)) = (get(0), get(1), get(2)) {
-                row.product = u32::from_le_bytes([x, y, z, 0]);
-            }
-            if let (Some(lo), Some(hi), Some(z)) = (get(3), get(4), get(5)) {
-                row.version =
-                    u32::from(u16::from_le_bytes([lo, hi])) * IDENTITY_Z_RADIX + u32::from(z);
-            }
+        if let Some(id) = identity {
+            row.identity.merge(id);
         }
         let mut changed = if message == message::BLOCK_REPORT
             && let [block::SENSOR_SETUP, 0, mask, values @ ..] = data
@@ -446,7 +440,7 @@ impl Inventory {
             bus.reads.queue(node, block::SENSOR_SETUP);
             row.sensor_delay = u16::from(PROBE_RETRY_SECONDS);
         }
-        if (row.product == UNKNOWN || row.version == UNKNOWN) && row.identity_delay == 0 {
+        if !row.identity.complete() && row.identity_delay == 0 {
             bus.reads.queue(node, block::DEVICE_INFO);
             row.identity_delay = PROBE_RETRY_SECONDS;
         }
@@ -724,7 +718,7 @@ impl Inventory {
                 || matches!(setting, Setting::HumidityMin | Setting::HumidityMax)
                     && !row.live.has_rh()
                 || setting == Setting::Fan
-                    && STEPPED_FAN_PRODUCTS.contains(&row.product)
+                    && STEPPED_FAN_PRODUCTS.contains(&row.identity.product())
                     && call.service == service::UPDATE
                     && call.body.last().is_some_and(|v| *v > MAX_FAN_STEP)
             {
@@ -828,9 +822,9 @@ impl Inventory {
                 return Answer::Reply(row.live.reply(address, field, call));
             }
             let value = if call.method == PRODUCT {
-                row.product
+                row.identity.product()
             } else {
-                row.version
+                row.identity.version()
             };
             let mut body = [0; 6];
             body[..2].copy_from_slice(&address.to_le_bytes());

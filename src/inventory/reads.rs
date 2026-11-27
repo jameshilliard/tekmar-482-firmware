@@ -185,7 +185,7 @@ impl Inventory {
 impl Device {
     fn needs_probe(&self, id: u8) -> bool {
         match id {
-            block::DEVICE_INFO => self.product == super::UNKNOWN || self.version == super::UNKNOWN,
+            block::DEVICE_INFO => !self.identity.complete(),
             block::SETPOINT_SETUP => self.live.is_setpoint_device(),
             block::SENSOR_SETUP => true,
             block::HEATING_SETUP => self.live.configured(super::Setting::Mode),
