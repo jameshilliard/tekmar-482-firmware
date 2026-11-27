@@ -642,6 +642,16 @@ one of these commands without leaving Normal mode. The 483 registries
 establish the bytes and target mask; they do not establish every
 receiver's behavior or which models accept each operation.
 
+**Air group configuration.** The 483 readers decode `36A` as the
+sender's current and previous group and master flag. The 483 thermostat
+model still reads the configured group from HeatingSetup (block 03).
+A `36A` is not a block report or evidence of a configured HVAC mode.
+For a known matching thermostat path, a new group or master role
+invalidates the firmware's mode cache and queues one addressed setup
+read. Repeated roles, including changes to padding or the
+no-response-required bit alone, do not queue another read. No
+configuration message is transmitted in response.
+
 **Calibration, mixing and network-test commands.** Both 483 decoders
 establish the base byte widths for 287, 357, 387 and 38F. They do not
 associate the mode codes or time words with particular device menus.

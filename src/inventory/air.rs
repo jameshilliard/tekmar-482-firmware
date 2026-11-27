@@ -3,6 +3,8 @@ use super::codes::{demand, setback};
 use crate::tn4::message;
 const INDEXED_GROUPS: usize = 17;
 const GROUP_MASK: u8 = 0x1f;
+const GROUP_MASTER: u8 = 1 << 7;
+const ROLE_MASK: u8 = GROUP_MASK | GROUP_MASTER;
 const MEMBER_COOL: u8 = 1 << 5;
 const MASTER_INHIBIT_SHIFT: u8 = 5;
 const MASTER_INHIBIT_MASK: u8 = 3;
@@ -17,6 +19,43 @@ const WEATHER_SHUTDOWN: u8 = 1 << 7;
 // Local cache bits above the five-bit group number, not tN4 status flags.
 const HEAT_ENABLED: u8 = 1 << 5;
 const COOL_ENABLED: u8 = 1 << 6;
+
+/// Pack the last role and mode confirmation into one byte per device.
+#[derive(Clone, Copy, Default)]
+pub(super) struct ModeEvidence(u8);
+
+impl ModeEvidence {
+    pub const EMPTY: Self = Self(0);
+    // These occupy bits outside ROLE_MASK and are not copied from the wire.
+    const ROLE_OBSERVED: u8 = 1 << 5;
+    const MODE_CONFIRMED: u8 = 1 << 6;
+
+    pub fn confirmed(self) -> bool {
+        self.0 & Self::MODE_CONFIRMED != 0
+    }
+
+    pub fn set_confirmed(&mut self, confirmed: bool) {
+        if confirmed {
+            self.0 |= Self::MODE_CONFIRMED;
+        } else {
+            self.0 &= !Self::MODE_CONFIRMED;
+        }
+    }
+
+    pub fn role_changed(&mut self, data: &[u8]) -> bool {
+        let [role, previous, ..] = data else {
+            return false;
+        };
+        let prior = if self.0 & Self::ROLE_OBSERVED != 0 {
+            self.0
+        } else {
+            *previous
+        } & ROLE_MASK;
+        let current = role & ROLE_MASK;
+        self.0 = (self.0 & Self::MODE_CONFIRMED) | Self::ROLE_OBSERVED | current;
+        prior != current
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Side {

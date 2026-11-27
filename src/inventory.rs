@@ -52,7 +52,7 @@ struct Device {
     incarnation: u16,
     identity_delay: u8,
     mode_delay: u16,
-    mode_valid: bool,
+    mode_evidence: air::ModeEvidence,
     sensor_delay: u16,
     setpoint_setup_delay: u16,
     fan_delay: u8,
@@ -69,7 +69,7 @@ impl Device {
         incarnation: 0,
         identity_delay: 0,
         mode_delay: 0,
-        mode_valid: false,
+        mode_evidence: air::ModeEvidence::EMPTY,
         sensor_delay: 0,
         setpoint_setup_delay: 0,
         fan_delay: 0,
@@ -80,14 +80,16 @@ impl Device {
         self.address != 0 && now.wrapping_sub(self.last_seen) <= DEVICE_TTL_SECONDS
     }
     fn cached_mode(&self, now: u32) -> Option<u8> {
-        if self.mode_valid && now.wrapping_sub(self.last_seen) < u32::from(self.mode_delay) {
+        if self.mode_evidence.confirmed()
+            && now.wrapping_sub(self.last_seen) < u32::from(self.mode_delay)
+        {
             self.live.mode()
         } else {
             None
         }
     }
     fn invalidate_mode(&mut self) {
-        self.mode_valid = false;
+        self.mode_evidence.set_confirmed(false);
         self.live.dirty &= !Field::Mode.mask();
     }
 }
@@ -290,6 +292,19 @@ impl Inventory {
             return None;
         }
         let node = node_index((header >> tn4::NODE_SHIFT) as u8)?;
+        if message == message::AIR_GROUP_CONFIG {
+            let row = &mut bus.devices[node];
+            if row.present(now)
+                && row.subnet == subnet
+                && row.live.configured(Setting::Mode)
+                && row.mode_evidence.role_changed(data)
+            {
+                // The role is a hint; only a HeatingSetup report confirms the setting.
+                row.invalidate_mode();
+                bus.reads.mode_changed(node);
+            }
+            return None;
+        }
         let address = port as u16 * ADDRESS_PORT_SCALE
             + u16::from(subnet & WATER_SUBNET_BUS_MASK) * ADDRESS_BUS_SCALE
             + (NODES - node) as u16;
@@ -323,6 +338,7 @@ impl Inventory {
             row.incarnation = self.incarnation;
             row.invalidate_mode();
             row.mode_delay = 0;
+            row.mode_evidence = air::ModeEvidence::EMPTY;
             row.live.dirty = 0;
             row.address = address;
             row.subnet = subnet;
@@ -479,8 +495,8 @@ impl Inventory {
             && (!changing_mode || bus.job.confirmed_write())
         {
             changed |= row.live.confirm_mode(mode);
-            row.mode_valid = row.live.mode().is_some();
-            row.mode_delay = if row.mode_valid {
+            row.mode_evidence.set_confirmed(row.live.mode().is_some());
+            row.mode_delay = if row.mode_evidence.confirmed() {
                 MODE_REFRESH_SECONDS
             } else {
                 u16::from(PROBE_RETRY_SECONDS)

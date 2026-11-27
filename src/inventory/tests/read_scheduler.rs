@@ -99,6 +99,46 @@ fn mode_hint_bypasses_cache_age_but_temperature_alone_does_not_query_mode() {
 }
 
 #[test]
+fn air_group_configuration_refreshes_only_the_exact_known_peer() {
+    let mut inv = Inventory::new();
+    observe(&mut inv, 0, 0x23, 5, 0x36a, &[0x85, 0x83], 0);
+    assert!(!inv.ports[0].devices[4].present(0));
+    assert!(take(&mut inv, 0, 0).is_none());
+    for port in [0, 1] {
+        observe(
+            &mut inv,
+            port,
+            0x23,
+            5,
+            0x2e7,
+            &[0, 0, 63, 1, 2, 3, 4, 5, 6],
+            0,
+        );
+        observe(&mut inv, port, 0x23, 5, 0x2e7, &[3, 0, 7, 1, 4, 3], 0);
+        observe(&mut inv, port, 0x23, 5, 0x36a, &[0xc3, 0xa3], 0);
+        assert_eq!(inv.ports[port].devices[4].cached_mode(0), Some(1));
+        assert!(take(&mut inv, port, 0).is_none());
+    }
+    observe(&mut inv, 0, 0x2b, 5, 0x36a, &[0x85, 0x83], 0); // Another full subnet.
+    observe(&mut inv, 0, 0x23, 5, 0x36a, &[0x85], 0); // Missing previous role.
+    assert!(take(&mut inv, 0, 1).is_none());
+    for bytes in [&[0x85, 0x83][..], &[0xe5, 0xa3, 0x99]] {
+        observe(&mut inv, 0, 0x23, 5, 0x36a, bytes, 0);
+    }
+    assert_eq!(inv.ports[0].devices[4].cached_mode(0), None);
+    assert_eq!(inv.ports[1].devices[4].cached_mode(0), Some(1));
+    let query = [0x6d, 0x70, 0, 7, 3, 0, 0x23, 0x10, 0, 0, 0];
+    assert_eq!(take(&mut inv, 0, 2), Some(query));
+    assert!(take(&mut inv, 1, 2).is_none());
+    observe(&mut inv, 0, 0x23, 5, 0x2e7, &[3, 0, 7, 1, 4, 5], 0);
+    observe(&mut inv, 0, 0x23, 5, 0x36a, &[0x85, 0x83], 0);
+    assert_eq!(inv.ports[0].devices[4].cached_mode(0), Some(1));
+    assert!(take(&mut inv, 0, 3).is_none());
+    observe(&mut inv, 0, 0x23, 5, 0x36a, &[0x05, 0x85], 0); // Role only.
+    assert_eq!(take(&mut inv, 0, 4), Some(query));
+}
+
+#[test]
 fn idle_enable_transitions_refresh_the_confirmed_mode_not_just_demand() {
     let mut inv = Inventory::new();
     observe(&mut inv, 0, 0, 1, 0x2e7, &[0, 0, 63, 1, 2, 3, 4, 5, 6], 0);
