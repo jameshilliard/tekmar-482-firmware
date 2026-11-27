@@ -36,6 +36,7 @@ const FEATURE_BLOCK_TRANSFERS: u16 = 1 << 10;
 const FEATURE_NORMAL_ANNOUNCE: u16 = 1 << 9;
 const FEATURE_ORDERED_TRACE_GAPS: u16 = 1 << 11;
 const FEATURE_NORMAL_DISCOVER: u16 = 1 << 12;
+const FEATURE_ORDERED_NATIVE_RESULTS: u16 = 1 << 13;
 const HEADER_BYTES: usize = 1 + size_of::<u32>();
 const REVISION_MAGIC: &[u8; 8] = b"TK48REV\0";
 const REVISION_BYTES: usize = REVISION_MAGIC.len() + 40; // hexadecimal Git object name
@@ -182,7 +183,8 @@ impl<'a> Call<'a> {
                     (FEATURE_BLOCK_TRANSFERS
                         | FEATURE_NORMAL_ANNOUNCE
                         | FEATURE_ORDERED_TRACE_GAPS
-                        | FEATURE_NORMAL_DISCOVER)
+                        | FEATURE_NORMAL_DISCOVER
+                        | FEATURE_ORDERED_NATIVE_RESULTS)
                         .to_le_bytes()[1],
                 ],
             ),

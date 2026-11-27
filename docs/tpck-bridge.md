@@ -50,7 +50,7 @@ the request body is empty. All integers are little endian.
 | --- | --- | --- |
 | 00000187 FirmwareRevision | Request, zero or two placeholder bytes | u16 numeric revision, 0 for this unnumbered custom image |
 | 0000018F ProtocolVersion | Request, zero or two placeholder bytes | u16 tHA protocol version, currently 3 |
-| 544BF001 BridgeCapabilities | Request | Three u8 values: version (2), mode (0 Normal, 1 Raw), port count (5). Remaining bytes are one little-endian feature bitmap: bit 0 Raw, 1 ROM update, 2 Normal trace, 3 error reporting, 4 Normal identity read, 5 traffic counters, 7 Normal status read, 9 Normal announcements, 10 Normal bitmap block reads and guarded edits, 11 ordered Normal trace loss notices, 12 Normal subnet discovery. Bits 6 and 8 are retired. |
+| 544BF001 BridgeCapabilities | Request | Three u8 values: version (2), mode (0 Normal, 1 Raw), port count (5). Remaining bytes are one little-endian feature bitmap: bit 0 Raw, 1 ROM update, 2 Normal trace, 3 error reporting, 4 Normal identity read, 5 traffic counters, 7 Normal status read, 9 Normal announcements, 10 Normal bitmap block reads and guarded edits, 11 ordered Normal trace loss notices, 12 Normal subnet discovery, 13 trace-ordered native operation results. Bits 6 and 8 are retired. |
 | 544BF002 SetBridgeMode | Update, mode u8 | Echo mode: 0 Normal, 1 Raw. Busy during an inventory walk, a started transmission, an outstanding host send or a local ACK. Switching modes clears the Normal inventory; returning to Normal also clears the ACK mask. |
 | 544BF003 PortDrops | Request, port u8 | Port u8, valid records dropped u64, invalid records dropped u64. |
 | 544BF004 FirmwareBuild | Request | Build revision without a terminator: 40 lowercase hexadecimal digits or `unversioned` |
@@ -89,7 +89,7 @@ Byte-exact frames (spaces separate fields, not transmitted bytes):
 ProtocolVersion request:   CA 07 06 01 8F010000 0000 9E 35
 ProtocolVersion response:  CA 07 06 04 8F010000 0300 A4 35
 BridgeCapabilities:        CA 05 06 01 01F04B54 9C 35
-Normal capabilities:       CA 0A 06 04 01F04B54 020005BF06 70 35
+Normal capabilities:       CA 0A 06 04 01F04B54 020005BF3E A8 35
 EnterFirmwareUpdate:       CA 05 06 00 05F04B54 9F 35
 Drained before handoff:    CA 05 06 03 05F04B54 A2 35
 ```
@@ -326,6 +326,13 @@ Trace records preserve observation order with respect to each other.
 Host replies and reports may overtake unstarted trace records; use the
 gateway timestamps for native timing, not UART arrival time. Trace mask
 replies delimit the capture: queued older records precede the reply.
+With feature bit 13, the terminal Report of each Normal native operation
+(block read, status read, guarded edit, announcement or discovery) also
+follows all earlier subscribed trace records or their gap notices. Multipart
+progress and ordinary tHA replies need not wait. A host can consume trace
+through completion before reconciling a read with moves, writes and gaps.
+This is a UART ordering guarantee, not a promise that a peer will answer
+or that a future report belongs to the operation.
 Trace has three dedicated slots; a full queue drops new trace records,
 increments the affected port's lifetime drop counter and leaves Normal
 operations running. A gap notice follows the last retained native record

@@ -315,10 +315,11 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                 }
                 if read_active
                     && !matches!(owner[p], NormalTx::HostOperation)
-                    && out.can_receive()
+                    && out.can_dispatch()
                     && let Some(result) = reads[p].take_result(p as u8)
                 {
-                    out.enqueue(Kind::Control, tpck::TRPC, result.payload());
+                    // Subscribers must see older peer frames or their loss before completion.
+                    out.boundary(Kind::Fence, result.payload());
                     inventory.end_native_edit(p, seconds);
                     read_mask &= !(1 << p);
                 }
@@ -780,9 +781,10 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                                 Kind::Control
                             };
                             if matches!(kind, Kind::Fence | Kind::Reboot) {
-                                out.flush_trace_gap(true);
+                                out.boundary(kind, reply.payload());
+                            } else {
+                                out.enqueue(kind, tpck::TRPC, reply.payload());
                             }
-                            out.enqueue(kind, tpck::TRPC, reply.payload());
                         }
                         break 'receive;
                     }

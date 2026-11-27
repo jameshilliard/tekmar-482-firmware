@@ -153,6 +153,7 @@ def run(path, ram, fast=False, *, normal_reads=False):
     mode_services = []
     fault_words = []
     traces = []
+    read_traces = []
     congestion_reports = []
     trace_resume = 0
     trace_check_at = None
@@ -235,7 +236,7 @@ def run(path, ram, fast=False, *, normal_reads=False):
             timers[t][0] = timers[t].get(0, 0) | (1 << (4 + ch))
 
     def gpio_write(uc, off, size, value, data):
-        nonlocal pins, phase, inventory_at, jump_at
+        nonlocal pins, phase, inventory_at, jump_at, trace_resume
         if off in (0x18, 0x1C, 0):
             for p, exchange in enumerate(exchanges):
                 tx = 1 << PORTS[p][3]
@@ -318,7 +319,10 @@ def run(path, ram, fast=False, *, normal_reads=False):
                         end = inject(bytes.fromhex("6e700607 380003 f3 22 ca35"), port=p)
                         end = inject(bytes.fromhex("6e700e07 380003 f3 53 ca35"), port=p, after=end)
                         end = inject(bytes.fromhex("6e700087 380003 f3 99 ca35"), port=p, after=end)
-                        inject(bytes.fromhex("6e700047 380003 f3 11 ca35"), port=p, after=end)
+                        end = inject(bytes.fromhex("6e700047 380003 f3 11 ca35"), port=p, after=end)
+                        # Hold UART TX through the last peer. Its dropped trace
+                        # must be accounted for before the terminal tRPC report.
+                        trace_resume = end + 40_000
                     elif phase == "normal-status":
                         assert p == 3 and ack_seen[p] and not exchange
                         end = inject(bytes.fromhex("17e00045 090108 0102"), port=p)
@@ -581,6 +585,10 @@ def run(path, ram, fast=False, *, normal_reads=False):
         nonlocal trace_resume, trace_check_at
         nonlocal phase, overlap, raw_mode, raw_ack_mask, uptime_offset, retry_isp_at
         if kind == 0xd0:
+            if normal_reads:
+                assert data[1] == (8 if data[0] == 5 else 3)
+                read_traces.append(data)
+                return
             if data[0] == 5:
                 assert phase == "trace-congested" and data == bytes.fromhex("0501 0200000000000000")
                 assert [r[-2] for k, r in traces if k == 0] == [1, 2, 3]
@@ -625,6 +633,10 @@ def run(path, ram, fast=False, *, normal_reads=False):
                     assert phase == "normal-block" and data[0] == 2 and data[5:7] == bytes([3,0])
                     assert data[7] == 0 and int.from_bytes(data[8:12], "little") > 0
                     assert data[12:] == bytes.fromhex("6e700047 380003 f3 11 ca35")
+                    captured = [t[7:] for t in read_traces if t[0] == 0]
+                    lost = sum(int.from_bytes(t[2:], "little") for t in read_traces if t[0] == 5)
+                    assert captured and data[12:] not in captured and lost > 0
+                    assert len(captured) + lost >= 4
                     parts = [d for k, d in actual if k == 6 and d[:7] == bytes.fromhex("020ff04b54 0304")]
                     assert len(parts) == 1 and 0 < int.from_bytes(parts[0][8:12], "little") < int.from_bytes(data[8:12], "little")
                     assert (6, bytes.fromhex("0406f04b54 0ff04b54 01")) in actual
@@ -643,9 +655,12 @@ def run(path, ram, fast=False, *, normal_reads=False):
                     assert data[0] == 2 and data[5:] == bytes([3,1,0])
                     parts = [d for k, d in actual if k == 6 and d[:7] == bytes.fromhex("0210f04b54 0300")]
                     assert [d[11:] for d in parts] == [bytes.fromhex(s) for s in ("17e00605 090108 35ca","17e00e06 0901ff 0405 7e")]
+                    for part in parts:
+                        assert any(t[0] == 0 and t[2:6] == part[7:11] and t[7:] == part[11:] for t in read_traces)
                     assert 0 < int.from_bytes(parts[0][7:11],"little") < int.from_bytes(parts[1][7:11],"little")
                     assert actual.count((6, bytes.fromhex("0406f04b54 0ff04b54 01"))) == 2
                     phase = "edit-guard"
+                    extension(11, b"\x00", True)
                     exchanges[3].extend(((EDIT_READ, None), (EDIT_WRITE, None)))
                     extension(17, EDIT_KEY)  # Request must never mutate.
                     extension(17, EDIT_KEY, True)
@@ -717,6 +732,7 @@ def run(path, ram, fast=False, *, normal_reads=False):
                             assert boot_paths == {3: (1, 1, 0, 0, 0), 4: (0, 0, 0, 0, 0)}
                             phase = "normal-block"
                             peers.update((3,4))
+                            extension(11, b"\x08", True)
                             exchanges[3].append((GROUP_READ, None))
                             extension(15, GROUP_KEY)
                 elif len(body)==4:
@@ -755,7 +771,9 @@ def run(path, ram, fast=False, *, normal_reads=False):
                 assert data[5:] == struct.pack("<HI", 1, 29104)
                 extension(11)
             elif method == 0x544bf00b:
-                if data[0] == 4 and phase == "trace-congested":
+                if normal_reads:
+                    assert data[0] == 3 and (phase, data[5:]) in (("normal-block", b"\x08"), ("edit-guard", b"\x00"))
+                elif data[0] == 4 and phase == "trace-congested":
                     assert data[5:] == b"\x01" + struct.pack("<5Q", 2, 0, 0, 0, 0)
                     assert (6, bytes.fromhex("0407010000 0500")) in actual
                     assert [r[-2] for k, r in traces if k == 0] == [1, 2, 3]
@@ -1192,7 +1210,7 @@ def run(path, ram, fast=False, *, normal_reads=False):
                      line_sends, expected_rx_acks - received_rx_acks, list(wire_log))
     assert actual[:4] == [
         (6, bytes.fromhex(x))
-        for x in ("048f0100000300", "0400000000", "0401f04b54020005bf1e")
+        for x in ("048f0100000300", "0400000000", "0401f04b54020005bf3e")
     ] + [
         (
             6,

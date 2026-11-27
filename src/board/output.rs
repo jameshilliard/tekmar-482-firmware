@@ -69,8 +69,12 @@ impl Output {
         self.len - self.traces < COMMAND_WATERMARK
     }
     pub(super) fn can_dispatch(&self) -> bool {
-        // A trace/mode fence may also have to enqueue an older loss marker.
+        // A UART boundary may also have to enqueue an older trace loss marker.
         self.len - self.traces + usize::from(self.gap.pending()) < COMMAND_WATERMARK
+    }
+    pub(super) fn boundary(&mut self, kind: Kind, reply: &[u8]) {
+        self.flush_trace_gap(true);
+        self.enqueue(kind, tpck::TRPC, reply);
     }
     pub(super) fn can_diagnose(&self) -> bool {
         !self.diagnostic && self.can_report()
