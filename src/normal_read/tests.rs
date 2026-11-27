@@ -229,6 +229,40 @@ fn guarded_edit_checks_the_entire_baseline_and_never_retries_a_write() {
 }
 
 #[test]
+fn guarded_edit_never_updates_an_address_taken_or_vacated_after_admission() {
+    let vacated = [0x7e, 0x79, 0x30, 0x82, 0x12, 0x21];
+    let taken = [0x7e, 0x71, 0x28, 0x42, 0x43, 0x03];
+    for moved in [vacated, taken] {
+        for (guard_sent, update_queued) in [(false, false), (true, false), (true, true)] {
+            let mut edit = BlockEdit::parse(&EDIT, 0).unwrap();
+            if guard_sent {
+                edit.sent(Outcome::Ack);
+            }
+            if update_queued {
+                edit.observe(&MODE);
+                assert!(edit.writing());
+            }
+            edit.observe(&moved);
+            edit.observe(&MODE);
+            assert!(edit.frame(2).is_none());
+            assert_eq!(
+                &edit.take_result(2).unwrap().payload()[5..],
+                &[2, 5, if guard_sent { 0 } else { 0xff }, 0xff]
+            );
+        }
+    }
+    let mut edit = BlockEdit::parse(&EDIT, 0).unwrap();
+    edit.sent(Outcome::NoAck);
+    edit.observe(&MODE);
+    edit.observe(&vacated[..5]);
+    edit.observe(&[0x7e, 0x79, 0x30, 0x82, 0x43, 0x21]);
+    assert!(edit.writing());
+    edit.sent(Outcome::Ack);
+    edit.observe(&taken);
+    assert_eq!(&edit.take_result(2).unwrap().payload()[5..], &[2, 0, 1, 0]);
+}
+
+#[test]
 fn malformed_unsupported_or_wrong_instance_edits_do_not_reach_the_bus() {
     for (offset, value) in [
         (1, 0),

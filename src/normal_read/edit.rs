@@ -1,7 +1,7 @@
 //! Guard a single addressed block update with a fresh, exact peer baseline.
 use super::{Query, TX_NOT_SENT, TX_PIN_UNAVAILABLE, WINDOW_MS, outcome_byte};
 use crate::tn4::{
-    HEADER_BYTES, NODE_MASK, message,
+    self, HEADER_BYTES, NODE_MASK, message,
     tx::{Outcome, Request},
 };
 use crate::trpc::{Reply, method};
@@ -18,6 +18,7 @@ enum End {
     Expired = 2,
     BaselineFailed = 3,
     UpdateUnavailable = 4,
+    TargetMoved = 5,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -150,6 +151,12 @@ impl BlockEdit {
         }
     }
     pub(super) fn observe(&mut self, body: &[u8]) {
+        if matches!(self.phase, Phase::Read | Phase::Listening | Phase::Write)
+            && self.address_changed(body)
+        {
+            self.phase = Phase::Done(End::TargetMoved);
+            return;
+        }
         if matches!(self.phase, Phase::Listening | Phase::Write)
             && self.query.matching_bit(body).is_some()
         {
@@ -160,6 +167,18 @@ impl BlockEdit {
                 Phase::Done(End::Changed)
             };
         }
+    }
+    fn address_changed(&self, body: &[u8]) -> bool {
+        let [a, b, c, d, old_subnet, old_node, ..] = body else {
+            return false;
+        };
+        let header = u32::from_be_bytes([*a, *b, *c, *d]);
+        let subnet = (header >> tn4::SUBNET_SHIFT) as u8;
+        let node = (header >> tn4::NODE_SHIFT) as u8 & NODE_MASK;
+        (header >> tn4::MESSAGE_SHIFT) & tn4::MESSAGE_MASK == message::TAKING_ADDRESS
+            && node != 0
+            && ((self.query.subnet, self.node) == (*old_subnet, *old_node & NODE_MASK)
+                || (self.query.subnet, self.node) == (subnet, node))
     }
     pub(super) fn unavailable(&mut self) {
         match self.phase {

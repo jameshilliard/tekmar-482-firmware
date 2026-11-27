@@ -153,7 +153,9 @@ and deadline with Normal reads. The gateway sends an addressed `2D7`,
 waits for a fresh matching `2E7`, and compares the support mask and **every
 baseline byte**, including siblings the user did not edit. A mismatch, even
 one observed while waiting to acquire the line for the update, retires the
-transaction without writing. An exact match permits one class-1, source-zero
+transaction without writing. A valid TakingAddress on that port cancels
+an unsent edit if either address matches its target, regardless of which
+devices are in the stock inventory. An exact match permits one class-1, source-zero
 `2DF` addressed to that node. Unlike a read, a write that loses arbitration
 is **not** retried. Once the write is driving the line, its actual completion
 is reported even if the admission deadline elapses. This is not a lock on the
@@ -161,10 +163,12 @@ remote device: a physical edit can still race the final transmission.
 
 The one terminal Report is `port:u8 end:u8 guard_tx:u8 update_tx:u8`.
 End 0 means update attempted (not applied), 1 baseline changed, 2 expired
-before the update, 3 guard transmission failed, 4 update TX pin unavailable.
+before the update, 3 guard transmission failed, 4 update TX pin unavailable,
+5 target address changed.
 TX: 00 ACK, 01 no ACK, 02 arbitration lost, 03 echo mismatch, 04 bad end,
 05 missed timing, FE pin unavailable, FF no completed attempt. For ends 1,
-2 and 3, update_tx is FF. Admission, a link ACK, and the guard's matching
+2, 3 and 5, update_tx is FF. End 5 can precede the guard transmission.
+Admission, a link ACK, and the guard's matching
 report **are not write confirmation**. After a possibly delivered update,
 start a separate NormalBlockRead and compare the edited fields. Do not
 automatically resubmit an edit after a host timeout.
