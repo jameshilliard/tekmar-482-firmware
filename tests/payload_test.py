@@ -168,7 +168,10 @@ class PayloadTests(unittest.TestCase):
         sample = IoReport.read_discovery(r)
         self.assertEqual((sample.kind, sample.count, sample.label, sample.value, r.remaining),
                          (None, 9, bytes.fromhex("410042ff0000"), 0x1234, b"\xca\x35"))
+        self.assertIsNone(sample.label_text)
         self.assertEqual(decode_payload(0x1f5, payload)["extension_hex"], "ca35")
+        printable = decode(0x1f5, "43a5 ff 09 410042000000 01 0100")
+        self.assertEqual((printable["label_text"], printable["label_hex"]), ("AB", "410042000000"))
         for mid, width in ((0x1f2, 6), (0x1f3, 6), (0x1f5, 13)):
             for n in range(width):
                 self.assertIn("truncated", decode_payload(mid, payload[:n]))

@@ -551,6 +551,10 @@ report remains telemetry, not the 1F3 service. A 1F5 discovery reply
 contains a current sample as well as metadata; a 1F3 or 1F2 omits the
 count and label rather than clearing them. Keep all six label bytes,
 including embedded zero and non-ASCII bytes, and any trailing extension.
+The SW 11 indexed reader removes NUL bytes for display; expose that view
+as `label_text` only when the result is nonempty printable ASCII. The
+original bytes remain available as `label_hex`, independent of any
+model's terminal name.
 A positive consistent count must be met by distinct IDs from the same
 sender and payload endpoint in one discovery exchange. A partial reply,
 a count change, and a link ACK do not prove a channel disappeared.
@@ -572,6 +576,12 @@ The 483 terminal-reference tables cover models 553 (channels 0..5), 557
 proof a relay is active. For example, 654 channels 1, 2 and 3 are all
 marked `Mod`; they remain three distinct IDs. The wire label is separate.
 These services provide reads and observations, not a generic I/O write.
+
+A physical 553 returned a six-channel directory: four relay channels and
+two unused channels. Its addressed sensor blocks independently reported
+both external inputs off. This confirms the directory and label layout on
+that model but supplies no sample for interpreting analog or temperature
+I/O words.
 
 Humidity query 322 carries
 a subnet and four-byte little-endian selector. The 483 calls it
