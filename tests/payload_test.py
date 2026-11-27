@@ -360,6 +360,23 @@ class PayloadTests(unittest.TestCase):
                           fan.delay_raw, fan.purge_raw, fan.heating_purge_raw, fan.cooling_purge_raw),
                          (46, None, 19, 20, 21, None))
 
+    def test_thermostat_equipment_monitors_keep_their_distinct_register_layouts(self):
+        product = identify_product(105102)
+        self.assertTrue({0x1b, *range(0x99, 0x9f), 0xa1, 0xa2, 0xa8} <= set(product.candidate_blocks))
+        self.assertFalse({0x1c, 0x9f, 0xa0}.intersection(product.candidate_blocks))
+        relays = decode(0x2e7, "1b00 17 01fe00 49 02 99")
+        self.assertEqual((relays["heat_stage1_output"], relays["heat_stage2_output"],
+                          relays["cool_stage1_output"], relays["fan1_output"]), (1, 254, 0, 2))
+        self.assertNotIn("cool_stage2_output", relays)
+        self.assertNotIn("fan2_output", relays)
+        self.assertEqual(decode(0x2e7, "1c00 03 ffff")["heat_stage1_accumulated_time"], 65535)
+        self.assertEqual(decode(0x2e7, "9900 03 0000")["w1_heat_hours"], 0)
+        self.assertNotIn("w1_heat_hours", decode(0x2e7, "9900 02 ab"))
+        air_filter = decode(0x2e7, "0a00 0d 81 3412")
+        self.assertNotIn("filter_replacement_interval", air_filter)
+        self.assertEqual(air_filter["time_since_filter_replacement"], 0x1234)
+        self.assertEqual(decode(0x2e7, "a800 01 01")["onboard_humidity_sensor_enabled"], 1)
+
     def test_thermostat_selector_uses_setup_and_revision_not_reported_demand(self):
         for m in Mode:
             self.assertEqual(decode_payload(0x2e7, b"\x03\x00\x01" + bytes([m]))["mode_setting_name"],

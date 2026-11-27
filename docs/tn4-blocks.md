@@ -152,6 +152,28 @@ for the 557. Do not infer a running stage or use a reported
 floor-cooling option as proof of compressor capability. These blocks
 have no applicable 483 field editor. Unknown values remain raw.
 
+### Thermostat equipment monitors
+
+| Block (hex) | Readback |
+| --- | --- |
+| `0A` | Filter replacement interval and time since replacement, as two little-endian u16 words. These are separate from total fan runtime. |
+| `1B` | One u8 each for heat stages 1 and 2, cool stages 1 and 2, and fans 1 and 2. Keep the reported octets; they are not the air-group demand bits or the device's physical I/O directory. |
+| `1C..21` | One little-endian u16 accumulator per output, in the same order as `1B`. The older 483 layout calls these accumulated time. Keep the raw word. |
+| `98` | Heat-pump selector u8 and hours u16. Select instances using the available mask in `97` where supplied, not the enabled mask. |
+| `99..A2` | One u16 hours counter each for W1 heat, W1 cool, W2 heat, W2 cool, Y1 heat, Y1 cool, Y2 heat, Y2 cool, humidification and dehumidification. These are not aliases of the `1C..21` stage counters. |
+| `A8` | Internal humidity sensor selection (0 off, 1 on). Not a humidity sample or an `A3` humidifier/dehumidifier enable setting. |
+
+The [557 user manual](https://www.watts.com/dfsmedia/0533dbba17714b1ab581ab07a4cbb521/81749-source/557-ul-01)
+describes distinct terminal operating hours and air-filter maintenance.
+An addressed scan of a physical 553 returned `0A` and `A8`, and four
+supported relay fields in `1B`: both heat stages, first cool and first fan.
+`99..9E` and `A1/A2` returned both bytes. `9F`, `A0` and the older `1C`
+answered with zero masks. An advertised counter can still be zero. Its
+presence says nothing about whether that output is wired or operating.
+Read counters only when needed, and do not infer deltas, rollover, or
+active outputs from incomplete or unrelated reports. No filter or sensor
+selection edit is established in the 483 writers.
+
 ## Selecting Instances
 
 A single `2D7` request can select several nodes on the same subnet. Each
