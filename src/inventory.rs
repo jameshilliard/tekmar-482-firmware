@@ -1,4 +1,5 @@
 //! Normal-mode inventory. Bus addresses, not product numbers, identify entries.
+use crate::report_cursor::ReportCursor;
 use crate::tn4::{self, block, message, snowmelt};
 use crate::trpc::{BridgeError, Call, GatewayVersion, Reply, method, service};
 mod air;
@@ -126,7 +127,7 @@ pub struct Inventory {
     network_error: u16,
     error_reports: heapless::Deque<u16, NETWORK_ERROR_REPORT_CAPACITY>,
     mode_reads: mode_reads::ModeReads,
-    next_slot: usize,
+    report_cursor: ReportCursor,
 }
 
 impl Default for Inventory {
@@ -162,7 +163,7 @@ impl Inventory {
             network_error: 0,
             error_reports: heapless::Deque::new(),
             mode_reads: mode_reads::ModeReads::EMPTY,
-            next_slot: 0,
+            report_cursor: ReportCursor::START,
         }
     }
 }
@@ -713,21 +714,16 @@ impl Inventory {
         if let Some(report) = self.groups.next_report(now) {
             return Some(report);
         }
-        for _ in 0..SLOTS {
-            let i = self.next_slot;
-            self.next_slot = if i + 1 == SLOTS { 0 } else { i + 1 };
-            let p = &mut self.ports[i / NODES];
-            let node = i % NODES;
-            if p.pending & (1 << node) == 0 {
-                continue;
-            }
+        let banks = self.ports.each_ref().map(|p| p.pending);
+        self.report_cursor.select(&banks, |(port, node)| {
+            let p = &mut self.ports[port];
             let row = &mut p.devices[node];
             let r = if row.present(now) {
                 // Do not send a new mode Report ahead of an older explicit reply.
                 if row.live.dirty & Field::Mode.mask() != 0
                     && self.mode_reads.ready_for(row.address)
                 {
-                    continue;
+                    return None;
                 }
                 row.live.report(row.address)
             } else {
@@ -737,11 +733,8 @@ impl Inventory {
             if row.live.dirty == 0 {
                 p.pending &= !(1 << node);
             }
-            if r.is_some() {
-                return r;
-            }
-        }
-        None
+            r
+        })
     }
 
     pub fn walking(&self) -> bool {

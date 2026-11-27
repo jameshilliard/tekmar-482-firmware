@@ -1534,6 +1534,29 @@ fn reported_air_targets(inv: &mut Inventory, now: u32) -> [Option<[u8; 2]>; 2] {
 }
 
 #[test]
+fn sparse_reports_rotate_across_ports_and_clear_expired_slots() {
+    let mut inv = Inventory::new();
+    inv.set_reporting(true, 0);
+    for (port, address, node, last_seen) in
+        [(0, 23u16, 22, 1), (2, 2011, 10, 160), (4, 4002, 1, 160)]
+    {
+        let p = &mut inv.ports[port];
+        p.devices[node].address = address;
+        p.devices[node].last_seen = last_seen;
+        p.devices[node].live.dirty = Field::Attributes.mask() | Field::Temperature.mask();
+        p.pending |= 1 << node;
+    }
+    for (method, address) in [(0x1f, 2011u16), (0x1f, 4002), (0x37, 2011), (0x37, 4002)] {
+        let reply = inv.next_report(160).unwrap();
+        assert_eq!(reply.payload()[..5], [2, method, 1, 0, 0]);
+        assert_eq!(reply.payload()[5..7], address.to_le_bytes());
+    }
+    assert_eq!(inv.ports[0].pending, 0);
+    assert!(!inv.has_reports());
+    assert!(inv.next_report(160).is_none());
+}
+
+#[test]
 fn master_and_member_target_selection_matches_stock_report_bodies() {
     // Rows and columns are disabled, enabled, demand only, enabled + demand.
     let selection = [[0, 2, 0, 2], [1, 0, 1, 2], [0, 2, 0, 2], [1, 1, 1, 1]];
