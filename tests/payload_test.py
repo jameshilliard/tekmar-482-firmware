@@ -182,6 +182,10 @@ class PayloadTests(unittest.TestCase):
         fan = FanDuctStatus.read(r)
         self.assertEqual((fan.fan1, fan.fan2, fan.flags, r.remaining), (1, 2, 0xe9, b"\xca"))
         self.assertEqual(fan.fields()["coil_temp"], "unavailable")
+        self.assertEqual(fan.duct_temperature_f, 69.6)
+        self.assertIsNone(fan.coil_temperature_f)
+        self.assertEqual(SlabStatus.read(Reader(bytes.fromhex("01 2a 0606"))).temperature_f, 69.2)
+        self.assertIsNone(SlabStatus.read(Reader(bytes.fromhex("01 2a 0080"))).temperature_f)
         for status in range(256):
             self.assertEqual(SlabStatus.read(Reader(bytes([status, 42, 0, 6]))).primary, status < 2)
         r = Reader(bytes.fromhex("02 81 00 3412 22 00ff 00 39 ca35"))
@@ -204,6 +208,20 @@ class PayloadTests(unittest.TestCase):
             t = TargetTable.from_report(model, T.FAN, decode(0x2e7, "0900 07 00 09 0b"))
             self.assertEqual((t.value(TargetSlot.WAKE), t.value(TargetSlot.UNOCCUPIED), t.value(TargetSlot.OCCUPIED)),
                              (0, 9, 11) if model == "553" else (0, 90, None))
+
+    def test_target_bounds_match_the_representable_settings(self):
+        for target, model, raw, physical, step in (
+            (T.HEAT, "532", 41, 20.5, 0.5), (T.FAN, "544", 8, 80, 10),
+            (T.HUMIDIFY, "553", 0, 0, 1), (T.DEHUMIDIFY, "557", 80, 80, 1),
+        ):
+            self.assertEqual(target.step(model), step)
+            self.assertEqual(target.encode_value(physical, model), raw)
+            self.assertEqual(target.physical_value(raw, model), physical)
+        self.assertEqual(T.HEAT.bounds("532"), (0.5, 127))
+        with self.assertRaises(ValueError):
+            T.FAN.encode_value(85, "544")
+        with self.assertRaises(ValueError):
+            T.HUMIDIFY.encode_value(19, "553")
 
     def test_fan_and_humidity_enable_need_the_actual_setup_bytes(self):
         for data, enabled in (("00", None), ("01 00", None), ("01 10", True), ("02 04", True),
