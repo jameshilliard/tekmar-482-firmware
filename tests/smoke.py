@@ -576,6 +576,11 @@ def run(path, ram, fast=False, *, normal_reads=False):
         nonlocal trace_resume, trace_check_at
         nonlocal phase, overlap, raw_mode, raw_ack_mask, uptime_offset, retry_isp_at
         if kind == 0xd0:
+            if data[0] == 5:
+                assert phase == "trace-congested" and data == bytes.fromhex("0501 0200000000000000")
+                assert [r[-2] for k, r in traces if k == 0] == [1, 2, 3]
+                traces.append((data[0], data[1:]))
+                return
             assert data[1] == 0 and int.from_bytes(data[2:6], "little") and not raw_mode
             traces.append((data[0], data[6:]))
             if phase == "trace-invalid":
@@ -734,6 +739,7 @@ def run(path, ram, fast=False, *, normal_reads=False):
                     assert data[5:] == b"\x01" + struct.pack("<5Q", 2, 0, 0, 0, 0)
                     assert (6, bytes.fromhex("0407010000 0500")) in actual
                     assert [r[-2] for k, r in traces if k == 0] == [1, 2, 3]
+                    assert [r for k, r in traces if k == 5] == [bytes.fromhex("01 0200000000000000")]
                     phase = "trace-reporting"
                     send(0)
                 elif data[0] == 4:
@@ -1150,7 +1156,7 @@ def run(path, ram, fast=False, *, normal_reads=False):
                      line_sends, expected_rx_acks - received_rx_acks, list(wire_log))
     assert actual[:4] == [
         (6, bytes.fromhex(x))
-        for x in ("048f0100000300", "0400000000", "0401f04b54020005bf06")
+        for x in ("048f0100000300", "0400000000", "0401f04b54020005bf0e")
     ] + [
         (
             6,

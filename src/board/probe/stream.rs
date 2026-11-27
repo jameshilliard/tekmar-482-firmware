@@ -485,8 +485,9 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
         // Several TPCK frames can arrive back-to-back at the negotiated baud.
         // Empty the 16-byte UART FIFO, but return to the line timers after
         // dispatching one command even if more bytes are already available.
+        out.flush_trace_gap(false);
         'receive: for _ in 0..uart0::FIFO_BYTES {
-            if reboot || !out.can_receive() {
+            if reboot || !out.can_dispatch() {
                 break 'receive;
             }
             baud.poll(now[0], &mut decoder);
@@ -748,22 +749,22 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                                 }
                             };
                             reboot = reply.after_drain == AfterDrain::EnterRom;
-                            out.enqueue(
-                                if reboot {
-                                    Kind::Reboot
-                                } else if matches!(
-                                    call.method,
-                                    method::NORMAL_TRACE
-                                        | method::SET_BRIDGE_MODE
-                                        | method::ERROR_REPORTING
-                                ) {
-                                    Kind::Fence
-                                } else {
-                                    Kind::Control
-                                },
-                                tpck::TRPC,
-                                reply.payload(),
-                            );
+                            let kind = if reboot {
+                                Kind::Reboot
+                            } else if matches!(
+                                call.method,
+                                method::NORMAL_TRACE
+                                    | method::SET_BRIDGE_MODE
+                                    | method::ERROR_REPORTING
+                            ) {
+                                Kind::Fence
+                            } else {
+                                Kind::Control
+                            };
+                            if matches!(kind, Kind::Fence | Kind::Reboot) {
+                                out.flush_trace_gap(true);
+                            }
+                            out.enqueue(kind, tpck::TRPC, reply.payload());
                         }
                         break 'receive;
                     }

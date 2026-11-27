@@ -36,6 +36,7 @@ pub(super) struct Output {
     used: u16,
     len: usize,
     traces: usize,
+    gap: tpck::trace::PendingGap,
     offset: usize,
     diagnostic: bool,
 }
@@ -55,6 +56,7 @@ impl Output {
                 used: 0,
                 len: 0,
                 traces: 0,
+                gap: tpck::trace::PendingGap::EMPTY,
                 offset: 0,
                 diagnostic: false,
             });
@@ -65,6 +67,10 @@ impl Output {
     }
     pub(super) fn can_receive(&self) -> bool {
         self.len - self.traces < COMMAND_WATERMARK
+    }
+    pub(super) fn can_dispatch(&self) -> bool {
+        // A trace/mode fence may also have to enqueue an older loss marker.
+        self.len - self.traces + usize::from(self.gap.pending()) < COMMAND_WATERMARK
     }
     pub(super) fn can_diagnose(&self) -> bool {
         !self.diagnostic && self.can_report()
@@ -78,8 +84,10 @@ impl Output {
         body: &[u8],
         errors: &mut ErrorBook,
     ) {
+        self.flush_trace_gap(false);
         if self.traces == TRACE_SLOTS {
             errors.line(p, LineError::TraceDrop, ms);
+            self.gap.lost(p);
             return;
         }
         // Invalid frames include a reason, bit count and up to two CRC bytes.
@@ -93,7 +101,18 @@ impl Output {
         rest[..body.len()].copy_from_slice(body);
         let len = tpck::raw::RX_PREFIX + detail.len() + body.len();
         self.enqueue(Kind::Trace, tpck::NORMAL_TRACE, &data[..len]);
-        self.traces += 1;
+    }
+    pub(super) fn flush_trace_gap(&mut self, boundary: bool) {
+        if (self.traces < TRACE_SLOTS || boundary)
+            && let Some(data) = self.gap.take()
+        {
+            let kind = if self.traces < TRACE_SLOTS {
+                Kind::Trace
+            } else {
+                Kind::Fence
+            };
+            self.enqueue(kind, tpck::NORMAL_TRACE, &data);
+        }
     }
     fn lost(kind: Kind, ms: u32, errors: &mut ErrorBook) {
         let (p, code) = match kind {
@@ -170,7 +189,9 @@ impl Output {
             self.order.swap(i, i + 1);
         }
         self.len += 1;
-        if kind == Kind::Diagnostic {
+        if kind == Kind::Trace {
+            self.traces += 1;
+        } else if kind == Kind::Diagnostic {
             self.diagnostic = true;
         }
     }

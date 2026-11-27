@@ -50,7 +50,7 @@ the request body is empty. All integers are little endian.
 | --- | --- | --- |
 | 00000187 FirmwareRevision | Request, zero or two placeholder bytes | u16 numeric revision, 0 for this unnumbered custom image |
 | 0000018F ProtocolVersion | Request, zero or two placeholder bytes | u16 tHA protocol version, currently 3 |
-| 544BF001 BridgeCapabilities | Request | Three u8 values: version (2), mode (0 Normal, 1 Raw), port count (5). Remaining bytes are one little-endian feature bitmap: bit 0 Raw, 1 ROM update, 2 Normal trace, 3 error reporting, 4 Normal identity read, 5 traffic counters, 7 Normal status read, 9 Normal announcements, 10 Normal bitmap block reads and guarded edits. Bits 6 and 8 are retired. |
+| 544BF001 BridgeCapabilities | Request | Three u8 values: version (2), mode (0 Normal, 1 Raw), port count (5). Remaining bytes are one little-endian feature bitmap: bit 0 Raw, 1 ROM update, 2 Normal trace, 3 error reporting, 4 Normal identity read, 5 traffic counters, 7 Normal status read, 9 Normal announcements, 10 Normal bitmap block reads and guarded edits, 11 ordered Normal trace loss notices. Bits 6 and 8 are retired. |
 | 544BF002 SetBridgeMode | Update, mode u8 | Echo mode: 0 Normal, 1 Raw. Busy during an inventory walk, a started transmission, an outstanding host send or a local ACK. Switching modes clears the Normal inventory; returning to Normal also clears the ACK mask. |
 | 544BF003 PortDrops | Request, port u8 | Port u8, valid records dropped u64, invalid records dropped u64. |
 | 544BF004 FirmwareBuild | Request | Build revision without a terminator: 40 lowercase hexadecimal digits or `unversioned` |
@@ -294,14 +294,16 @@ Enabling trace does not change reporting, reset inventory or permit raw
 Send. It is off at boot and on entry to Raw. A serial disconnect is not
 detectable; an independent host can always clear the trace mask in Normal.
 
-TPCK type D0 is gateway-to-host only. Its common prefix is event u8, port
-u8, gateway uptime in ms u32 (little endian, wraps). After the prefix:
+TPCK type D0 is gateway-to-host only. For 00, 01 and 04 the prefix is
+event u8, port u8, gateway uptime in ms u32 (little endian, wraps).
+Event 05 contains just the event byte and its data; it has no timestamp.
 
 | Event | Data | Meaning |
 | --- | --- | --- |
 | 00 Rx | flags u8, complete native body | Peer frame; bit 0 means link ACK observed, bit 1 early start (not passed to the Normal inventory). Gateway TX echo is excluded. |
 | 01 Tx | origin u8, outcome u8, intended native body | One gateway attempt at completion, including an arbitration loss before a retry. Origins: 0 setting transaction, 1 broadcast, 2 line discovery, 3 native read (background or explicit). Outcome 0 link ACK, 1 no ACK, 2 arbitration lost, 3 echo mismatch, 4 bad end, 5 missed timing. A failed attempt need not have put the complete body on the bus. |
 | 04 RxInvalid | reason u8, bit count u16, captured bits | Same reason and bit packing as Raw RxInvalid. Not a valid peer update. |
+| 05 Gap | affected port mask u8, dropped record count u64 little endian | One or more earlier trace records were dropped. The count is a total across the indicated ports; directions and individual counts are unknown. |
 
 Trace records preserve observation order with respect to each other.
 Host replies and reports may overtake unstarted trace records; use the
@@ -309,7 +311,13 @@ gateway timestamps for native timing, not UART arrival time. Trace mask
 replies delimit the capture: queued older records precede the reply.
 Trace has three dedicated slots; a full queue drops new trace records,
 increments the affected port's lifetime drop counter and leaves Normal
-operations running. Counters do not include Raw-mode drops. Restrict the
+operations running. A gap notice follows the last retained native record
+and precedes the next retained native record or trace-mask reply, including
+when traffic stops. For example, `05 05 03 00 00 00 00 00 00 00` means
+three lost records across ports 0 and 2. The notice itself is not a drop.
+Do not infer continued device identity across a gap. The mask and counter
+reply still supplies independent lifetime totals per port. Counters do
+not include Raw-mode drops. Restrict the
 port mask or use a higher negotiated baud on busy installations.
 
 ## Error reporting
