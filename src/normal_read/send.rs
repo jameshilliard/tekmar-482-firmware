@@ -1,9 +1,11 @@
 //! Normal operations that return the link outcome without collecting application replies.
 use super::{Query, TX_NOT_SENT, TX_PIN_UNAVAILABLE, WINDOW_MS, outcome_byte};
 use crate::tn4::{
-    block, message,
+    block,
+    message::{self, payload_bytes::STAGE_SELECTION},
     tx::{Outcome, Request},
 };
+use crate::tpck::trace;
 use crate::trpc::{Reply, method};
 
 const MAX_CLOCK_BYTES: usize = 6; // five date/time fields and optional DST mode
@@ -20,6 +22,7 @@ enum Phase {
 enum Body {
     Announcement(u32, heapless::Vec<u8, MAX_CLOCK_BYTES>),
     IdentityProbe(u8),
+    Stage(u32, [u8; STAGE_SELECTION]),
 }
 
 pub struct Send {
@@ -60,8 +63,28 @@ impl Send {
         })
     }
 
-    pub(super) fn is_discovery(&self) -> bool {
-        matches!(self.body, Body::IdentityProbe(_))
+    pub(super) fn stage(key: &[u8], start: u32) -> Option<Self> {
+        let (id, payload) = key.split_first_chunk::<2>()?;
+        let id = u32::from(u16::from_le_bytes(*id));
+        let &[subnet, level, a, b, c] = payload else {
+            return None;
+        };
+        if !message::is_stage_command(id) || (a | b | c) == 0 {
+            return None;
+        }
+        Some(Self {
+            body: Body::Stage(id, [subnet, level, a, b, c]),
+            start,
+            phase: Phase::Queued,
+        })
+    }
+
+    pub(super) fn trace_origin(&self) -> u8 {
+        match self.body {
+            Body::Announcement(..) => trace::BROADCAST,
+            Body::IdentityProbe(_) => trace::DISCOVERY,
+            Body::Stage(..) => trace::STAGE_COMMAND,
+        }
     }
 
     pub(super) fn queued(&self) -> bool {
@@ -76,6 +99,7 @@ impl Send {
                 Request::gateway(port, message::NETWORK_INIT_REQUEST, data)
             }
             Body::Announcement(id, data) => Request::gateway_class_zero(port, *id, data),
+            Body::Stage(id, data) => Request::gateway_class_zero(port, *id, data),
             Body::IdentityProbe(subnet) => Query {
                 nodes: super::ALL_NODES,
                 subnet: *subnet,
@@ -107,10 +131,10 @@ impl Send {
             return None;
         };
         self.phase = Phase::Idle;
-        let method = if self.is_discovery() {
-            method::NORMAL_DISCOVER
-        } else {
-            method::NORMAL_ANNOUNCE
+        let method = match self.body {
+            Body::Announcement(..) => method::NORMAL_ANNOUNCE,
+            Body::IdentityProbe(_) => method::NORMAL_DISCOVER,
+            Body::Stage(..) => method::NORMAL_STAGE_COMMAND,
         };
         Some(Reply::report(method, &[port, result]))
     }
@@ -158,6 +182,43 @@ mod tests {
             &[0x1f, 3, 0, 1, 0, 0, 0, 0, 0],
         ] {
             assert!(Send::announcement(bad, 0).is_none(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn stage_commands_admit_only_the_seven_exact_nonempty_wire_selectors() {
+        for (key, header) in [
+            ([0x5f, 3], [0x35, 0xf0, 0, 5]),
+            ([0x97, 3], [0x39, 0x70, 0, 5]),
+            ([0x9f, 3], [0x39, 0xf0, 0, 5]),
+            ([0xa7, 3], [0x3a, 0x70, 0, 5]),
+            ([0xaf, 3], [0x3a, 0xf0, 0, 5]),
+            ([0xb7, 3], [0x3b, 0x70, 0, 5]),
+            ([0xbf, 3], [0x3b, 0xf0, 0, 5]),
+        ] {
+            let payload = [0xab, 0xf5, 1, 0x80, 0x80];
+            let mut a = Send::stage(&[key.as_slice(), &payload].concat(), 0).unwrap();
+            let body = [header.as_slice(), &payload].concat();
+            assert_eq!(a.frame(1), Request::new(1, &body));
+            assert_eq!(a.trace_origin(), trace::STAGE_COMMAND);
+            a.sent(Outcome::ArbitrationLost);
+            a.sent(Outcome::Ack);
+            assert!(a.frame(1).is_none());
+            assert_eq!(
+                a.take_result(1).unwrap().payload(),
+                &[2, 0x15, 0xf0, 0x4b, 0x54, 1, 2]
+            );
+            assert!(a.take_result(1).is_none());
+        }
+        for bad in [
+            &[0x9f][..],
+            &[0x9f, 3, 0xab, 0xf5, 1, 0x80],
+            &[0x9f, 3, 0xab, 0xf5, 1, 0x80, 0x80, 0],
+            &[0x9f, 3, 0xab, 0xf5, 0, 0, 0],
+            &[0x67, 3, 0xab, 0xf5, 1, 0x80, 0x80], // a StageHeatDemand report
+            &[0xff, 2, 0xab, 0xf5, 1, 0x80, 0x80], // a scene
+        ] {
+            assert!(Send::stage(bad, 0).is_none(), "{bad:?}");
         }
     }
 

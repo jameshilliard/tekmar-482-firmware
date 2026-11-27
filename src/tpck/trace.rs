@@ -9,6 +9,7 @@ pub const SETTING: u8 = 0;
 pub const BROADCAST: u8 = 1;
 pub const DISCOVERY: u8 = 2;
 pub const PROBE: u8 = 3;
+pub const STAGE_COMMAND: u8 = 4;
 
 /// Consecutive unqueued observations, retired only when their marker can be enqueued.
 #[derive(Default)]

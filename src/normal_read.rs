@@ -62,6 +62,9 @@ impl NormalOperation {
             method::NORMAL_DISCOVER => Send::discovery(key, now)
                 .map(Self::Send)
                 .ok_or(BridgeError::InvalidRequest),
+            method::NORMAL_STAGE_COMMAND => Send::stage(key, now)
+                .map(Self::Send)
+                .ok_or(BridgeError::InvalidRequest),
             _ => Err(BridgeError::InvalidRequest),
         }
     }
@@ -77,8 +80,7 @@ impl NormalOperation {
     pub fn trace_origin(&self) -> u8 {
         use crate::tpck::trace;
         match self {
-            Self::Send(r) if r.is_discovery() => trace::DISCOVERY,
-            Self::Send(_) => trace::BROADCAST,
+            Self::Send(r) => r.trace_origin(),
             Self::Edit(r) if r.writing() => trace::SETTING,
             _ => trace::PROBE,
         }

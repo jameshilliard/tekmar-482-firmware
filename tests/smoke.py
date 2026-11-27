@@ -35,6 +35,8 @@ TIMING_STALL_US = 4_000
 EDIT_READ = bytes.fromhex("6d70000b 030000 00008000 00000000")
 EDIT_WRITE = bytes.fromhex("6df00007 0018 0300 000409")
 SCENE = bytes.fromhex("2ff00003 07e001")  # 483 scene 8, eight hours.
+STAGE_PURGE = bytes.fromhex("39f00005 abf5018080")
+STAGE_KEY = bytes.fromhex("039f03 abf5018080")
 RAW_SENDS = (SCENE, bytes.fromhex("21f00002 0401"), bytes.fromhex("31f00005 1ebf100607"),
              bytes.fromhex("01000003 000102"), bytes.fromhex("20000001 01"))
 RAW_READS = ((bytes.fromhex("6d70000b 100000 00008000 00000000"), bytes.fromhex("6e70060a 10007f 90020304050607")),
@@ -802,6 +804,26 @@ def run(path, ram, fast=False, *, normal_reads=False, client_script=None):
                     assert announced == {2: 1, 3: 0}  # no ACK vs. ACK
                     assert actual.count((6, bytes.fromhex("0306f04b54 12f04b54 01"))) == 2
                     assert (6, bytes.fromhex("0406f04b54 12f04b54 02")) in actual
+                    phase = "normal-stage"
+                    exchanges[3].append((STAGE_PURGE, None))
+                    extension(11, b"\x08", True)
+                    extension(21, STAGE_KEY)  # read must not send
+                    extension(21, bytes.fromhex("039f03 abf5000000"), True)
+                    extension(21, STAGE_KEY, True)
+            elif method == 0x544bf015:
+                assert phase == "normal-stage"
+                if data[0] == 3:
+                    assert data[5:] == STAGE_KEY
+                    extension(21, bytes.fromhex("03bf03 ab00000080"), True)
+                    extension(19, bytes.fromhex("0315"))  # cross-operation contention
+                else:
+                    assert data[0] == 2 and data[5:] == bytes([3,0])
+                    assert (6, bytes.fromhex("0406f04b54 15f04b54 02")) in actual
+                    assert (6, bytes.fromhex("0306f04b54 15f04b54 02")) in actual
+                    assert (6, bytes.fromhex("0306f04b54 15f04b54 01")) in actual
+                    assert (6, bytes.fromhex("0406f04b54 13f04b54 01")) in actual
+                    assert [t[6:] for t in read_traces if t[0] == 1 and t[6] == 4] == [b"\x04\0" + STAGE_PURGE]
+                    extension(11, b"\x00", True)
                     phase = "normal-discover"
                     exchanges[3].append((bytes.fromhex("6d70000b 0000 15 ffffff7f 00000000"), None))
                     extension(19, bytes.fromhex("0315"), True)  # Only Request may probe.
@@ -816,7 +838,7 @@ def run(path, ram, fast=False, *, normal_reads=False, client_script=None):
                     assert data[0] == 2 and data[6:] == b"\0"
                     assert (6, bytes.fromhex("0306f04b54 13f04b54 02")) in actual
                     assert (6, bytes.fromhex("0406f04b54 13f04b54 02")) in actual
-                    assert (6, bytes.fromhex("0406f04b54 13f04b54 01")) in actual
+                    assert actual.count((6, bytes.fromhex("0406f04b54 13f04b54 01"))) == 2
                     phase = "normal-silent"
                     exchanges[4].append((bytes.fromhex("6d70000b 3412 00 01000000 00000000"), None))
                     extension(15, bytes.fromhex("0400 01000000 3412 0000"))
@@ -921,7 +943,10 @@ def run(path, ram, fast=False, *, normal_reads=False, client_script=None):
                     phase = "snow-wait"
                     line_progress()
                 elif normal_reads:
-                    assert data[0] == 3 and (phase, data[5:]) in (("normal-block", b"\x08"), ("edit-guard", b"\x00"))
+                    assert data[0] == 3 and (phase, data[5:]) in (
+                        ("normal-block", b"\x08"), ("edit-guard", b"\x00"),
+                        ("normal-stage", b"\x08"), ("normal-discover", b"\x00"),
+                    )
                 elif data[0] == 4 and phase == "trace-congested":
                     assert data[5:] == b"\x01" + struct.pack("<5Q", 2, 0, 0, 0, 0)
                     assert (6, bytes.fromhex("0407010000 0c00")) in actual
@@ -1369,13 +1394,13 @@ def run(path, ram, fast=False, *, normal_reads=False, client_script=None):
         assert boot_port_checked
         assert phase == "normal-complete" and not traces and not any(exchanges), (phase, actual[-8:])
         assert received_rx_acks == expected_rx_acks and observed_flags == expected_flags
-        print(f"ARM Normal: offline counters, addressed reads, multipart status, guarded writes, per-port announcements, silent peer, snow inventory, missed deadline; untouched stack {free} bytes")
+        print(f"ARM Normal: offline counters, addressed reads, multipart status, guarded writes, announcements, stage control, silent peer, snow inventory, missed deadline; untouched stack {free} bytes")
         return
     assert entered, (clock, phase, [len(x) for x in exchanges], results, actual[-10:],
                      line_sends, expected_rx_acks - received_rx_acks, list(wire_log))
     assert actual[:4] == [
         (6, bytes.fromhex(x))
-        for x in ("048f0100000300", "0400000000", "0401f04b54020005bf7e")
+        for x in ("048f0100000300", "0400000000", "0401f04b54020005bffe")
     ] + [
         (
             6,

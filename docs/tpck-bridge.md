@@ -53,7 +53,7 @@ the request body is empty. All integers are little endian.
 | --- | --- | --- |
 | 00000187 FirmwareRevision | Request, zero or two placeholder bytes | u16 numeric revision, 0 for this unnumbered custom image |
 | 0000018F ProtocolVersion | Request, zero or two placeholder bytes | u16 tHA protocol version, currently 3 |
-| 544BF001 BridgeCapabilities | Request | Three u8 values: version (2), mode (0 Normal, 1 Raw), port count (5). Remaining bytes are one little-endian feature bitmap: bit 0 Raw, 1 ROM update, 2 Normal trace, 3 error reporting, 4 Normal identity read, 5 traffic counters, 7 Normal status read, 9 Normal announcements, 10 Normal bitmap block reads and guarded edits, 11 ordered Normal trace loss notices, 12 Normal subnet discovery, 13 trace-ordered native operation results, 14 link timing. Bits 6 and 8 are retired. |
+| 544BF001 BridgeCapabilities | Request | Three u8 values: version (2), mode (0 Normal, 1 Raw), port count (5). Remaining bytes are one little-endian feature bitmap: bit 0 Raw, 1 ROM update, 2 Normal trace, 3 error reporting, 4 Normal identity read, 5 traffic counters, 7 Normal status read, 9 Normal announcements, 10 Normal bitmap block reads and guarded edits, 11 ordered Normal trace loss notices, 12 Normal subnet discovery, 13 trace-ordered native operation results, 14 link timing, 15 Normal stage commands. Bits 6 and 8 are retired. |
 | 544BF002 SetBridgeMode | Update, mode u8 | Echo mode: 0 Normal, 1 Raw. Busy during an inventory walk, a started transmission, an outstanding host send or a local ACK. Switching modes clears the Normal inventory; returning to Normal also clears the ACK mask. |
 | 544BF003 PortDrops | Request, port u8 | Port u8, valid records dropped u64, invalid records dropped u64. |
 | 544BF004 FirmwareBuild | Request | Build revision without a terminator: 40 lowercase hexadecimal digits or `unversioned` |
@@ -73,6 +73,7 @@ the request body is empty. All integers are little endian.
 | 544BF012 NormalAnnounce | Update, Report | Send one known native announcement on one physical port; report the transmit outcome. |
 | 544BF013 NormalDiscover | Request, Report | Send one read-only identity probe on one subnet; report the link outcome, not an inventory. |
 | 544BF014 LinkTiming | Request, empty or port u8 | Read service loop timing or a physical port's transmit timing, in either mode. No bus transmission. |
+| 544BF015 NormalStageCommand | Update, Report | Attempt an explicitly targeted native staged demand, purge or output override on one physical port. Normal only. |
 
 Version 2 event counts start at zero at boot, survive mode changes and
 saturate at 2^64-1 instead of wrapping. Subtract snapshots from the same
@@ -221,6 +222,28 @@ trace. They do not change modes or reporting and never manufacture a group,
 zone or thermostat state report. The stock tHA group and DateTime methods
 retain their distinct all-port behavior.
 
+## Normal stage commands
+
+With feature bit 15, **Update** `544BF015` takes
+`port:u8 id:u16le subnet:u8 stage_level:u8 nodes:u24le`, exactly eight
+bytes. The seven IDs are `35F` (staged heat demand request), `397/39F`
+(end/start purge), `3A7/3B7` (start/end override on), and `3BF/3AF`
+(start/end override off). The subnet is native, not the physical port
+or a decimal tHA address. Bit 7 selects the stage and bits 6:0 carry
+the raw output level. Bits 0 through 23 of the nonzero node mask select
+nodes 1 through 24. Zero selection, extra bytes, and other message IDs
+are rejected.
+
+The admitted Update echoes the exact request. The gateway uses source
+0/0 and class 0, and shares the one-operation-per-port slot with reads,
+edits, discovery and announcements. Its terminal Report and ten-second
+send window use the [announcement outcome rules](#normal-announcements),
+including one attempt without an arbitration retry. The stage command
+does not change modes, reporting, or the gateway's cached plant state.
+A link ACK cannot identify which selected nodes received the message or
+confirm that any output changed; a subsequent `367` is independent
+equipment telemetry, not the terminal for this operation.
+
 ## Normal status reads
 
 Request `544BF010` takes `port:u8 filter:u8 subnet:u8 node:u8 id:u16 args...`.
@@ -344,7 +367,7 @@ Event 05 contains just the event byte and its data; it has no timestamp.
 | Event | Data | Meaning |
 | --- | --- | --- |
 | 00 Rx | flags u8, complete native body | Peer frame; bit 0 means link ACK observed, bit 1 early start (not passed to the Normal inventory). Gateway TX echo is excluded. |
-| 01 Tx | origin u8, outcome u8, intended native body | One gateway attempt at completion, including an arbitration loss before a retry. Origins: 0 setting transaction, 1 broadcast, 2 line discovery, 3 native read (background or explicit). Outcome 0 link ACK, 1 no ACK, 2 arbitration lost, 3 echo mismatch, 4 bad end, 5 missed timing. A failed attempt need not have put the complete body on the bus. |
+| 01 Tx | origin u8, outcome u8, intended native body | One gateway attempt at completion, including an arbitration loss before a retry. Origins: 0 setting transaction, 1 broadcast, 2 line discovery, 3 native read (background or explicit), 4 explicit stage command. Outcome 0 link ACK, 1 no ACK, 2 arbitration lost, 3 echo mismatch, 4 bad end, 5 missed timing. A failed attempt need not have put the complete body on the bus. |
 | 04 RxInvalid | reason u8, bit count u16, captured bits | Same reason and bit packing as Raw RxInvalid. Not a valid peer update. |
 | 05 Gap | affected port mask u8, dropped record count u64 little endian | One or more earlier trace records were dropped. The count is a total across the indicated ports; directions and individual counts are unknown. |
 

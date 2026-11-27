@@ -710,6 +710,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                                     | method::NORMAL_BLOCK_READ
                                     | method::NORMAL_BLOCK_EDIT
                                     | method::NORMAL_ANNOUNCE
+                                    | method::NORMAL_STAGE_COMMAND
                                     | method::NORMAL_DISCOVER
                                     | method::NORMAL_STATUS_READ,
                                     _,
@@ -723,7 +724,9 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                                     [p @ 0..=LAST_PORT, key @ ..],
                                 )
                                 | (
-                                    method::NORMAL_BLOCK_EDIT | method::NORMAL_ANNOUNCE,
+                                    method::NORMAL_BLOCK_EDIT
+                                    | method::NORMAL_ANNOUNCE
+                                    | method::NORMAL_STAGE_COMMAND,
                                     service::UPDATE,
                                     [p @ 0..=LAST_PORT, key @ ..],
                                 ) => match NormalOperation::parse(call.method, key, time.millis) {
@@ -751,6 +754,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                                     method::NORMAL_BLOCK_READ
                                     | method::NORMAL_BLOCK_EDIT
                                     | method::NORMAL_ANNOUNCE
+                                    | method::NORMAL_STAGE_COMMAND
                                     | method::NORMAL_DISCOVER
                                     | method::NORMAL_STATUS_READ,
                                     _,

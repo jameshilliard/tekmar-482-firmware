@@ -637,6 +637,10 @@ stage bit 1, output level 117. The level is a seven-bit wire value,
 not necessarily a percentage. Zero selects no node. A command is not
 a `367` StageHeatDemand report, and a link ACK cannot say which of
 several selected nodes received or acted on it.
+Use [NormalStageCommand](tpck-bridge.md#normal-stage-commands) to send
+one of these commands without leaving Normal mode. The 483 registries
+establish the bytes and target mask; they do not establish every
+receiver's behavior or which models accept each operation.
 
 **Associating water temperatures.** A MasterPresent slot is a subnet byte
 (control in bits 7:3, bus in 2:0), not a physical gateway port. Slot 0

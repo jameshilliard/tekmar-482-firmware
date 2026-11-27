@@ -30,6 +30,19 @@ pub const TAKING_ADDRESS: u32 = 0x3e7;
 pub const MASTER_QUERY: u32 = 0x3f7;
 pub const MASTER_PRESENT: u32 = 0x3ff;
 
+pub const fn is_stage_command(id: u32) -> bool {
+    matches!(
+        id,
+        STAGE_HEAT_DEMAND_REQUEST
+            | END_PURGE
+            | START_PURGE
+            | START_OVERRIDE_ON
+            | END_OVERRIDE_OFF
+            | END_OVERRIDE_ON
+            | START_OVERRIDE_OFF
+    )
+}
+
 /// A provable, single native destination, not the sender in the frame header.
 pub fn single_destination(id: u32, payload: &[u8]) -> Option<[u8; 2]> {
     let (subnet, mask) = match (id, payload) {
@@ -41,16 +54,9 @@ pub fn single_destination(id: u32, payload: &[u8]) -> Option<[u8; 2]> {
             const BLOCK_NODES: u32 = u32::MAX >> 1; // bit 31 is padding
             (*subnet, u32::from_le_bytes([*a, *b, *c, *d]) & BLOCK_NODES)
         }
-        (
-            STAGE_HEAT_DEMAND_REQUEST
-            | END_PURGE
-            | START_PURGE
-            | START_OVERRIDE_ON
-            | END_OVERRIDE_OFF
-            | END_OVERRIDE_ON
-            | START_OVERRIDE_OFF,
-            [subnet, _, a, b, c, ..],
-        ) => (*subnet, u32::from_le_bytes([*a, *b, *c, 0])),
+        (id, [subnet, _, a, b, c, ..]) if is_stage_command(id) => {
+            (*subnet, u32::from_le_bytes([*a, *b, *c, 0]))
+        }
         _ => return None,
     };
     mask.is_power_of_two()
@@ -67,4 +73,5 @@ pub mod payload_bytes {
     pub const RH_REPORT_PREFIX: usize = 6; // followed by the declared sensor bytes
     pub const AIR_GROUP_MEMBER_STATUS: usize = 8;
     pub const AIR_GROUP_MASTER_STATUS: usize = 13;
+    pub const STAGE_SELECTION: usize = 5; // subnet, stage/level, 24-node mask
 }
