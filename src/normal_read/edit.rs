@@ -1,7 +1,7 @@
 //! Guard a single addressed block update with a fresh, exact peer baseline.
 use super::{Query, TX_NOT_SENT, TX_PIN_UNAVAILABLE, WINDOW_MS, outcome_byte};
 use crate::tn4::{
-    HEADER_BYTES, message,
+    HEADER_BYTES, NODE_MASK, message,
     tx::{Outcome, Request},
 };
 use crate::trpc::{Reply, method};
@@ -48,6 +48,7 @@ pub(super) fn layout(block: u16) -> Option<(usize, u8)> {
 
 pub struct BlockEdit {
     query: Query,
+    node: u8,
     support: u8,
     before: heapless::Vec<u8, MAX_FIELDS>,
     proposed: heapless::Vec<u8, MAX_FIELDS>,
@@ -60,7 +61,10 @@ pub struct BlockEdit {
 impl BlockEdit {
     pub(super) fn parse(key: &[u8], start: u32) -> Option<Self> {
         let (q, rest) = key.split_at_checked(QUERY_BYTES)?;
-        let query = Query::parse(q)?;
+        let &[subnet, node @ 1..=NODE_MASK, lo, hi, mask, selector] = q else {
+            return None;
+        };
+        let query = Query::new(subnet, 1 << (node - 1), [lo, hi], mask, selector)?;
         let &[support, len, ref fields @ ..] = rest else {
             return None;
         };
@@ -93,6 +97,7 @@ impl BlockEdit {
         }
         Some(Self {
             query,
+            node,
             support,
             before: heapless::Vec::from_slice(before).ok()?,
             proposed: heapless::Vec::from_slice(proposed).ok()?,
@@ -114,7 +119,7 @@ impl BlockEdit {
             Phase::Write => {
                 let mut payload = [0; TARGET_PREFIX + MAX_FIELDS];
                 payload[0] = self.query.subnet;
-                payload[1] = self.query.node;
+                payload[1] = self.node;
                 payload[2..TARGET_PREFIX].copy_from_slice(&self.query.block);
                 let end = TARGET_PREFIX + self.proposed.len();
                 payload[TARGET_PREFIX..end].copy_from_slice(&self.proposed);
@@ -141,7 +146,9 @@ impl BlockEdit {
         }
     }
     pub(super) fn observe(&mut self, body: &[u8]) {
-        if matches!(self.phase, Phase::Listening | Phase::Write) && self.query.matches(body) {
+        if matches!(self.phase, Phase::Listening | Phase::Write)
+            && self.query.matching_bit(body).is_some()
+        {
             let report = &body[HEADER_BYTES + 2..]; // after block ID
             self.phase = if report[0] == self.support && report[1..] == self.before[..] {
                 Phase::Write

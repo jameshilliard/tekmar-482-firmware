@@ -88,9 +88,9 @@ impl NormalOperation {
             Self::Announce(r) => r.frame(port),
         }
     }
-    pub fn sent(&mut self, outcome: Outcome) {
+    pub fn sent(&mut self, outcome: Outcome, now: u32) {
         match self {
-            Self::Block(r) => r.sent(outcome),
+            Self::Block(r) => r.sent(outcome, now),
             Self::Status(r) => r.sent(outcome),
             Self::Edit(r) => r.sent(outcome),
             Self::Announce(r) => r.sent(outcome),
@@ -120,10 +120,7 @@ impl NormalOperation {
         publish: impl FnOnce(&Reply) -> bool,
     ) -> bool {
         match self {
-            Self::Block(r) => {
-                r.observe(body, now);
-                true
-            }
+            Self::Block(r) => r.observe(port, body, now, publish),
             Self::Status(r) => r.observe(port, body, now, publish),
             Self::Announce(_) => true,
             Self::Edit(r) => {
@@ -149,6 +146,8 @@ enum Status {
     Expired = 1,
     PinUnavailable = 2,
     LinkFault = 3,
+    More = 4,
+    ControlFull = 5,
 }
 
 #[cfg(test)]
@@ -165,7 +164,7 @@ enum Phase {
 
 #[derive(Clone, Copy)]
 pub struct Query {
-    node: u8,
+    nodes: u32,
     subnet: u8,
     block: [u8; 2],
     selector_mask: u8,
@@ -174,21 +173,29 @@ pub struct Query {
 
 impl Query {
     pub fn parse(body: &[u8]) -> Option<Self> {
-        let &[
-            subnet,
-            node @ 1..=NODE_MASK,
-            lo,
-            hi,
-            selector_mask,
-            selector,
-        ] = body
-        else {
+        let &[subnet, a, b, c, d, lo, hi, selector_mask, selector] = body else {
             return None;
         };
-        (selector & !selector_mask == 0).then_some(Self {
-            node,
+        Self::new(
             subnet,
-            block: [lo, hi],
+            u32::from_le_bytes([a, b, c, d]),
+            [lo, hi],
+            selector_mask,
+            selector,
+        )
+    }
+
+    fn new(
+        subnet: u8,
+        nodes: u32,
+        block: [u8; 2],
+        selector_mask: u8,
+        selector: u8,
+    ) -> Option<Self> {
+        (nodes != 0 && nodes <= u32::MAX >> 1 && selector & !selector_mask == 0).then_some(Self {
+            nodes,
+            subnet,
+            block,
             selector_mask,
             selector,
         })
@@ -198,26 +205,29 @@ impl Query {
         let mut data = [0; 11]; // block, subnet, node bitmap, little-endian u32 argument
         data[..2].copy_from_slice(&self.block);
         data[2] = self.subnet;
-        data[3..7].copy_from_slice(&(1u32 << (self.node - 1)).to_le_bytes());
+        data[3..7].copy_from_slice(&self.nodes.to_le_bytes());
         data[7] = self.selector;
         Request::gateway(port, message::BLOCK_REQUEST, &data)
     }
 
-    fn matches(self, body: &[u8]) -> bool {
+    fn matching_bit(self, body: &[u8]) -> Option<u32> {
         let [a, b, c, d, lo, hi, support, data @ ..] = body else {
-            return false;
+            return None;
         };
         let header = u32::from_be_bytes([*a, *b, *c, *d]);
+        let node = (header >> tn4::NODE_SHIFT) as u8 & NODE_MASK;
+        let bit = 1u32 << node.checked_sub(1)?;
         let count = support.count_ones() as usize;
         let span = (u8::BITS - support.leading_zeros()) as usize;
-        (header >> tn4::MESSAGE_SHIFT) & tn4::MESSAGE_MASK == message::BLOCK_REPORT
+        ((header >> tn4::MESSAGE_SHIFT) & tn4::MESSAGE_MASK == message::BLOCK_REPORT
             && (header >> tn4::SUBNET_SHIFT) as u8 == self.subnet
-            && (header >> tn4::NODE_SHIFT) as u8 & NODE_MASK == self.node
+            && self.nodes & bit != 0
             && (header as usize & tn4::PAYLOAD_MASK as usize) + HEADER_BYTES == body.len()
             && [*lo, *hi] == self.block
             && (data.len() == count || data.len() >= span)
             && (self.selector_mask == 0
-                || support & 1 != 0 && data[0] & self.selector_mask == self.selector)
+                || support & 1 != 0 && data[0] & self.selector_mask == self.selector))
+            .then_some(bit)
     }
 }
 
@@ -234,7 +244,7 @@ impl BlockRead {
     pub const EMPTY: Self = Self {
         phase: Phase::Idle,
         query: Query {
-            node: 0,
+            nodes: 0,
             subnet: 0,
             block: [0; 2],
             selector_mask: 0,
@@ -265,14 +275,17 @@ impl BlockRead {
     pub fn frame(&self, port: u8) -> Option<Request> {
         self.queued().then(|| self.query.frame(port)).flatten()
     }
-    pub fn sent(&mut self, outcome: Outcome) {
+    pub fn sent(&mut self, outcome: Outcome, now: u32) {
         if self.queued() {
             if outcome != Outcome::ArbitrationLost {
                 self.tx = outcome_byte(outcome);
             }
             self.phase = match outcome {
                 Outcome::ArbitrationLost => Phase::Queued,
-                Outcome::Ack | Outcome::NoAck => Phase::Listening,
+                Outcome::Ack | Outcome::NoAck => {
+                    self.stamp = now;
+                    Phase::Listening
+                }
                 _ => Phase::Done(Status::LinkFault),
             }
         }
@@ -290,13 +303,30 @@ impl BlockRead {
             self.phase = Phase::Done(Status::Expired);
         }
     }
-    pub fn observe(&mut self, body: &[u8], now: u32) {
-        if self.phase == Phase::Listening && self.query.matches(body) {
-            self.stamp = now;
+    pub fn observe(
+        &mut self,
+        port: u8,
+        body: &[u8],
+        now: u32,
+        publish: impl FnOnce(&Reply) -> bool,
+    ) -> bool {
+        if self.phase != Phase::Listening {
+            return true;
+        }
+        let Some(bit) = self.query.matching_bit(body) else {
+            return true;
+        };
+        self.query.nodes &= !bit;
+        self.stamp = now;
+        if self.query.nodes == 0 {
             self.body[..body.len()].copy_from_slice(body);
             self.len = body.len() as u8;
             self.phase = Phase::Done(Status::Report);
+        } else if !publish(&self.result(port, Status::More, body)) {
+            self.phase = Phase::Done(Status::ControlFull);
+            return false;
         }
+        true
     }
     /// Retire only when the caller can put the terminal event in the control FIFO.
     pub fn take_result(&mut self, port: u8) -> Option<Reply> {
@@ -304,18 +334,20 @@ impl BlockRead {
             return None;
         };
         self.phase = Phase::Idle;
+        Some(self.result(port, status, &self.body[..usize::from(self.len)]))
+    }
+    fn result(&self, port: u8, status: Status, body: &[u8]) -> Reply {
         let mut data = [0; MAX_RESULT];
         data[0] = port;
         data[1] = status as u8;
         data[2] = self.tx;
-        let len = if status == Status::Report {
+        let len = if matches!(status, Status::Report | Status::More) {
             data[3..BLOCK_PREFIX].copy_from_slice(&self.stamp.to_le_bytes());
-            let len = usize::from(self.len);
-            data[BLOCK_PREFIX..BLOCK_PREFIX + len].copy_from_slice(&self.body[..len]);
-            BLOCK_PREFIX + len
+            data[BLOCK_PREFIX..BLOCK_PREFIX + body.len()].copy_from_slice(body);
+            BLOCK_PREFIX + body.len()
         } else {
             3
         };
-        Some(Reply::report(method::NORMAL_BLOCK_READ, &data[..len]))
+        Reply::report(method::NORMAL_BLOCK_READ, &data[..len])
     }
 }

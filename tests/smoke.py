@@ -22,6 +22,8 @@ PORTS = [(4, 0, 1, 28), (11, 1, 1, 13), (6, 0, 2, 22), (10, 1, 0, 8), (2, 0, 0, 
 BITS = "10001001000110000010000010000010000110100101000111000101111"
 BODY = bytes.fromhex("12300001a5")
 EDIT_KEY = bytes.fromhex("030018 0300 0000 07 03 010409 000409")
+GROUP_KEY = bytes.fromhex("0300 01008000 3800 0703")
+GROUP_READ = bytes.fromhex("6d70000b 3800 00 01008000 03000000")
 EDIT_READ = bytes.fromhex("6d70000b 030000 00008000 00000000")
 EDIT_WRITE = bytes.fromhex("6df00007 0018 0300 000409")
 SCENE = bytes.fromhex("2ff00003 07e001")  # 483 scene 8, eight hours.
@@ -295,6 +297,7 @@ def run(path, ram, fast=False, *, normal_reads=False):
                         line_progress()
                         continue
                     if not exchange:
+                        assert wire != protected_bits(GROUP_READ) + "0" * tail, "duplicate group read"
                         assert wire != protected_bits(EDIT_WRITE) + "0" * tail, "unexpected duplicate or stale edit"
                         assert wire != protected_bits(SCENE) + "0" * tail, "unrequested scene copy"
                         assert not raw_mode and not phase.startswith("line-") and phase != "cycle-read", (p, phase, wire)
@@ -311,7 +314,10 @@ def run(path, ram, fast=False, *, normal_reads=False):
                         inventory_at = inject(bytes.fromhex("6e700609 00003f 828301 2301 04"), after=end)
                     elif phase == "normal-block":
                         assert p == 3 and ack_seen[p] and not exchange
-                        inject(bytes.fromhex("6e700607 380003 f3 22 ca35"), port=p)
+                        end = inject(bytes.fromhex("6e700607 380003 f3 22 ca35"), port=p)
+                        end = inject(bytes.fromhex("6e700e07 380003 f3 53 ca35"), port=p, after=end)
+                        end = inject(bytes.fromhex("6e700087 380003 f3 99 ca35"), port=p, after=end)
+                        inject(bytes.fromhex("6e700047 380003 f3 11 ca35"), port=p, after=end)
                     elif phase == "normal-status":
                         assert p == 3 and ack_seen[p] and not exchange
                         end = inject(bytes.fromhex("17e00045 090108 0102"), port=p)
@@ -592,20 +598,25 @@ def run(path, ram, fast=False, *, normal_reads=False):
             elif method == 0x544bf00f:
                 if phase == "normal-silent":
                     if data[0] == 4:
-                        assert data[5:] == bytes.fromhex("040001 3412 0000")
+                        assert data[5:] == bytes.fromhex("0400 01000000 3412 0000")
                     else:
                         assert data[0] == 2 and data[5:] == bytes([4,1,0])
                         phase = "normal-complete"
                         cpu.emu_stop()
                 elif data[0] == 4:
                     assert phase == "normal-block"
-                    assert data[5:] == bytes.fromhex("030018 3800 0703")
-                    extension(15, bytes.fromhex("030018 3800 0703"))  # busy, not a second query
+                    assert data[5:] == GROUP_KEY
+                    extension(15, GROUP_KEY)  # busy, not a second query
                     extension(2, b"\x01", True)  # changing mode cannot abandon the read
+                elif data[5:7] == bytes([3,4]):
+                    assert phase == "normal-block" and data[0] == 2 and data[7] == 0
+                    assert data[12:] == bytes.fromhex("6e700607 380003 f3 22 ca35")
                 else:
                     assert phase == "normal-block" and data[0] == 2 and data[5:7] == bytes([3,0])
                     assert data[7] == 0 and int.from_bytes(data[8:12], "little") > 0
-                    assert data[12:] == bytes.fromhex("6e700607 380003 f3 22 ca35")
+                    assert data[12:] == bytes.fromhex("6e700047 380003 f3 11 ca35")
+                    parts = [d for k, d in actual if k == 6 and d[:7] == bytes.fromhex("020ff04b54 0304")]
+                    assert len(parts) == 1 and 0 < int.from_bytes(parts[0][8:12], "little") < int.from_bytes(data[8:12], "little")
                     assert (6, bytes.fromhex("0406f04b54 0ff04b54 01")) in actual
                     assert (6, bytes.fromhex("0306f04b54 02f04b54 01")) in actual, (actual[-10:], list(wire_log))
                     phase = "normal-status"
@@ -615,7 +626,7 @@ def run(path, ram, fast=False, *, normal_reads=False):
                 assert phase == "normal-status"
                 if data[0] == 4:
                     assert data[5:] == bytes.fromhex("03010018 7f01 010208ff")
-                    extension(15, bytes.fromhex("030018 0000 0000"))
+                    extension(15, bytes.fromhex("0300 00008000 0000 0000"))
                 elif data[5:7] == bytes([3,0]):
                     assert data[0] == 2
                 else:
@@ -663,7 +674,7 @@ def run(path, ram, fast=False, *, normal_reads=False):
                     assert (6, bytes.fromhex("0406f04b54 12f04b54 02")) in actual
                     phase = "normal-silent"
                     exchanges[4].append((bytes.fromhex("6d70000b 3412 00 01000000 00000000"), None))
-                    extension(15, bytes.fromhex("040001 3412 0000"))
+                    extension(15, bytes.fromhex("0400 01000000 3412 0000"))
             elif method == 0x544bf00e:
                 body=data[5:]
                 assert data[0]==4
@@ -681,8 +692,8 @@ def run(path, ram, fast=False, *, normal_reads=False):
                             assert boot_paths == {3: (1, 1, 0, 0, 0), 4: (0, 0, 0, 0, 0)}
                             phase = "normal-block"
                             peers.update((3,4))
-                            exchanges[3].append((bytes.fromhex("6d70000b 3800 00 00008000 03000000"), None))
-                            extension(15, bytes.fromhex("030018 3800 0703"))
+                            exchanges[3].append((GROUP_READ, None))
+                            extension(15, GROUP_KEY)
                 elif len(body)==4:
                     capacity,used=struct.unpack("<HH",body)
                     assert 0<used<=capacity
@@ -1139,7 +1150,7 @@ def run(path, ram, fast=False, *, normal_reads=False):
                      line_sends, expected_rx_acks - received_rx_acks, list(wire_log))
     assert actual[:4] == [
         (6, bytes.fromhex(x))
-        for x in ("048f0100000300", "0400000000", "0401f04b54020005bf03")
+        for x in ("048f0100000300", "0400000000", "0401f04b54020005bf06")
     ] + [
         (
             6,

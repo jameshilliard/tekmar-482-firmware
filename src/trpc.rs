@@ -31,7 +31,7 @@ const FEATURE_NORMAL_IDENTITY: u8 = 1 << 4;
 const FEATURE_TRAFFIC_COUNTS: u8 = 1 << 5;
 const FEATURE_NORMAL_STATUS_READ: u8 = 1 << 7;
 // Feature bits 8 and above continue in subsequent little-endian octets.
-const FEATURE_BLOCK_TRANSFERS: u16 = 1 << 8;
+const FEATURE_BLOCK_TRANSFERS: u16 = 1 << 10;
 const FEATURE_NORMAL_ANNOUNCE: u16 = 1 << 9;
 const HEADER_BYTES: usize = 1 + size_of::<u32>();
 const REVISION_MAGIC: &[u8; 8] = b"TK48REV\0";

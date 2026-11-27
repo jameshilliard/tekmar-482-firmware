@@ -1,5 +1,5 @@
 use super::*;
-const KEY: [u8; 6] = [0x12, 1, 0x38, 0, 7, 3];
+const KEY: [u8; 9] = [0x12, 1, 0, 0, 0, 0x38, 0, 7, 3];
 const REPLY: [u8; 9] = [0x6e, 0x71, 0x28, 0x45, 0x38, 0, 3, 0xf3, 0xca];
 
 #[test]
@@ -15,10 +15,10 @@ fn fresh_peer_only_after_transmit_with_selector_and_valid_layout() {
             &[0x6d, 0x70, 0, 11, 0x38, 0, 0x12, 1, 0, 0, 0, 3, 0, 0, 0]
         )
     );
-    slot.sent(Outcome::ArbitrationLost);
-    slot.observe(&REPLY, 51);
+    slot.sent(Outcome::ArbitrationLost, 51);
+    slot.observe(2, &REPLY, 51, |_| panic!());
     assert!(slot.take_result(2).is_none() && slot.queued());
-    slot.sent(Outcome::NoAck);
+    slot.sent(Outcome::NoAck, 53);
     for (i, byte) in [
         (0, 0x6f),
         (1, 0x72),
@@ -36,11 +36,14 @@ fn fresh_peer_only_after_transmit_with_selector_and_valid_layout() {
         if i == 6 && byte == 0x81 {
             other[7] = 1;
         }
-        slot.observe(&other, 54);
+        slot.observe(2, &other, 54, |_| panic!());
         assert!(slot.take_result(2).is_none());
     }
-    assert!(!q.matches(&[0x6e, 0x71, 0x28, 0x46, 0x38, 0, 0x81, 3, 4, 5]));
-    slot.observe(&REPLY, 56);
+    assert!(
+        q.matching_bit(&[0x6e, 0x71, 0x28, 0x46, 0x38, 0, 0x81, 3, 4, 5])
+            .is_none()
+    );
+    slot.observe(2, &REPLY, 56, |_| panic!());
     assert!(!slot.admit(q, 57));
     let result = slot.take_result(2).unwrap();
     assert_eq!(
@@ -53,12 +56,12 @@ fn fresh_peer_only_after_transmit_with_selector_and_valid_layout() {
 
 #[test]
 fn expiry_failures_and_maximum_extension_never_produce_cached_data() {
-    let q = Query::parse(&[0x12, 1, 0xcd, 0xab, 0, 0]).unwrap();
+    let q = Query::parse(&[0x12, 1, 0, 0, 0, 0xcd, 0xab, 0, 0]).unwrap();
     for bad in [
         &KEY[..5],
-        &[0, 0, 0, 0, 0, 0],
-        &[0, 32, 0, 0, 0, 0],
-        &[0, 1, 0, 0, 7, 8],
+        &[0, 0, 0, 0, 0, 0, 0, 0, 0],
+        &[0, 1, 0, 0, 128, 0, 0, 0, 0],
+        &[0, 1, 0, 0, 0, 0, 0, 7, 8],
     ] {
         assert!(Query::parse(bad).is_none());
     }
@@ -66,12 +69,12 @@ fn expiry_failures_and_maximum_extension_never_produce_cached_data() {
     for outcome in [None, Some(Outcome::Ack), Some(Outcome::NoAck)] {
         assert!(slot.admit(q, u32::MAX - 3));
         if let Some(outcome) = outcome {
-            slot.sent(outcome);
+            slot.sent(outcome, u32::MAX - 3);
         }
         slot.expire(WINDOW_MS - 5);
         assert!(slot.take_result(0).is_none());
         slot.expire(WINDOW_MS - 4);
-        slot.sent(Outcome::Ack);
+        slot.sent(Outcome::Ack, 0);
         assert_eq!(
             &slot.take_result(0).unwrap().payload()[5..],
             &[0, 1, outcome.map_or(0xff, outcome_byte)]
@@ -81,14 +84,61 @@ fn expiry_failures_and_maximum_extension_never_produce_cached_data() {
     slot.unavailable();
     assert_eq!(&slot.take_result(0).unwrap().payload()[5..], &[0, 2, 0xfe]);
     assert!(slot.admit(q, 0));
-    slot.sent(Outcome::Late);
+    slot.sent(Outcome::Late, 0);
     assert_eq!(&slot.take_result(0).unwrap().payload()[5..], &[0, 3, 5]);
     let mut max = [0xca; MAX_BYTES];
     max[..7].copy_from_slice(&[0x6e, 0x71, 0x20, 0x7f, 0xcd, 0xab, 0xff]);
     assert!(slot.admit(q, 0));
-    slot.sent(Outcome::Ack);
-    slot.observe(&max, 9);
+    slot.sent(Outcome::Ack, 0);
+    slot.observe(4, &max, 9, |_| panic!());
     assert_eq!(&slot.take_result(4).unwrap().payload()[12..], &max);
+}
+
+#[test]
+fn group_progress_deduplicates_logical_nodes_and_bounds_silent_peers() {
+    let q = Query::parse(&[0x12, 1, 0x80, 0, 0x40, 0x38, 0, 7, 3]).unwrap();
+    let mut slot = BlockRead::EMPTY;
+    assert!(slot.admit(q, 0));
+    assert_eq!(
+        slot.frame(2),
+        Request::new(
+            2,
+            &[
+                0x6d, 0x70, 0, 11, 0x38, 0, 0x12, 1, 0x80, 0, 0x40, 3, 0, 0, 0
+            ]
+        )
+    );
+    slot.sent(Outcome::NoAck, WINDOW_MS - 1);
+    let mut second = REPLY;
+    second[2] = 0x24;
+    second[3] = 5; // node 16
+    let mut last = REPLY;
+    last[2] = 0x27;
+    last[3] = 0xc5; // node 31
+    for (n, frame) in [REPLY, second].into_iter().enumerate() {
+        let now = (2 + n as u32) * (WINDOW_MS - 1);
+        slot.expire(now);
+        assert!(slot.observe(2, &frame, now, |part| {
+            assert_eq!(&part.payload()[5..8], &[2, 4, 1]);
+            assert_eq!(&part.payload()[8..12], &now.to_le_bytes());
+            assert_eq!(&part.payload()[12..], &frame);
+            true
+        }));
+        let mut alias = frame;
+        alias[2] ^= 8;
+        slot.observe(2, &alias, now + 1, |_| panic!("duplicate node"));
+        assert!(slot.take_result(2).is_none());
+    }
+    slot.expire(3 * (WINDOW_MS - 1) + WINDOW_MS);
+    slot.observe(2, &last, 4 * WINDOW_MS, |_| panic!("after expiry"));
+    assert_eq!(&slot.take_result(2).unwrap().payload()[5..], &[2, 1, 1]);
+
+    assert!(slot.admit(q, 0));
+    slot.sent(Outcome::Ack, 0);
+    assert!(!slot.observe(2, &last, 10, |_| false));
+    slot.observe(2, &second, 11, |_| panic!("after control overflow"));
+    assert_eq!(&slot.take_result(2).unwrap().payload()[5..], &[2, 5, 0]);
+    assert!(slot.take_result(2).is_none());
 }
 
 const EDIT: [u8; 14] = [0x12, 1, 3, 0, 0, 0, 7, 3, 1, 4, 9, 0, 4, 9];

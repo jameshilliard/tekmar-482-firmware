@@ -29,11 +29,11 @@ fn main() {
             assert_eq!(action, "edit");
             let mut slot = slot.unwrap_or_else(|_| panic!("rejected {key}"));
             assert_eq!(slot.frame(0), Request::new(0, &hex(query)), "{key}");
-            slot.sent(Outcome::NoAck);
+            slot.sent(Outcome::NoAck, 0);
             let _ = slot.observe(0, &hex(report), 1, |_| panic!("unexpected status frame"));
             assert!(slot.single_attempt(), "{key}");
             assert_eq!(slot.frame(0), Request::new(0, &hex(update)), "{key}");
-            slot.sent(Outcome::Ack);
+            slot.sent(Outcome::Ack, 0);
             assert_eq!(&slot.take_result(0).unwrap().payload()[5..], &[0, 0, 1, 0]);
         }
         checked += 1;

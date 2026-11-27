@@ -25,7 +25,7 @@ pub enum LineError {
     RawValidDrop,
     RawInvalidDrop,
     TraceDrop,
-    StatusReadDrop,
+    NativeReadDrop,
 }
 
 impl LineError {
@@ -54,7 +54,7 @@ pub enum HostError {
     AddressNoticeDrop,
 }
 
-const LINE_KEYS: usize = LineError::StatusReadDrop as usize;
+const LINE_KEYS: usize = LineError::NativeReadDrop as usize;
 const HOST_KEYS: usize =
     HostError::AddressNoticeDrop as usize - HostError::UartOverrun as usize + 1;
 const KEYS: usize = PORT_COUNT * LINE_KEYS + HOST_KEYS;
@@ -182,7 +182,7 @@ mod tests {
             [1, 2, 255, 255, 255, 255, 1, 0, 0, 0, 0, 0, 0, 0]
         );
         assert!(e.read(5, 2).is_none() && e.read(1, 0x80).is_none() && e.read(6, 1).is_none());
-        e.line(4, LineError::StatusReadDrop, 10);
+        e.line(4, LineError::NativeReadDrop, 10);
         assert_eq!(&e.read(4, 0x12).unwrap()[6..], &1u64.to_le_bytes());
         assert!(e.next_report().is_none());
         e.set_mask(0x23);

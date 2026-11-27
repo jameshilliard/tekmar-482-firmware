@@ -50,7 +50,7 @@ the request body is empty. All integers are little endian.
 | --- | --- | --- |
 | 00000187 FirmwareRevision | Request, zero or two placeholder bytes | u16 numeric revision, 0 for this unnumbered custom image |
 | 0000018F ProtocolVersion | Request, zero or two placeholder bytes | u16 tHA protocol version, currently 3 |
-| 544BF001 BridgeCapabilities | Request | Three u8 values: version (2), mode (0 Normal, 1 Raw), port count (5). Remaining bytes are one little-endian feature bitmap: bit 0 Raw, 1 ROM update, 2 Normal trace, 3 error reporting, 4 Normal identity read, 5 traffic counters, 7 Normal status read, 8 Normal block transfers, 9 Normal announcements. Bit 6 is retired. |
+| 544BF001 BridgeCapabilities | Request | Three u8 values: version (2), mode (0 Normal, 1 Raw), port count (5). Remaining bytes are one little-endian feature bitmap: bit 0 Raw, 1 ROM update, 2 Normal trace, 3 error reporting, 4 Normal identity read, 5 traffic counters, 7 Normal status read, 9 Normal announcements, 10 Normal bitmap block reads and guarded edits. Bits 6 and 8 are retired. |
 | 544BF002 SetBridgeMode | Update, mode u8 | Echo mode: 0 Normal, 1 Raw. Busy during an inventory walk, a started transmission, an outstanding host send or a local ACK. Switching modes clears the Normal inventory; returning to Normal also clears the ACK mask. |
 | 544BF003 PortDrops | Request, port u8 | Port u8, valid records dropped u64, invalid records dropped u64. |
 | 544BF004 FirmwareBuild | Request | Build revision without a terminator: 40 lowercase hexadecimal digits or `unversioned` |
@@ -64,7 +64,7 @@ the request body is empty. All integers are little endian.
 | 544BF00C ErrorReporting | Request, Update, Report | Both modes. Read/replace the source mask, read one error counter, or receive changed counters (below). |
 | 544BF00D NormalIdentity | Request, port/subnet/node | Queues a read of identity block 00 in Normal mode. The native reply, not the gateway acknowledgement, identifies the device. |
 | 544BF00E TrafficCounts | Request | Read gateway-owned traffic totals or enumerate native paths, in either mode. See below. |
-| 544BF00F NormalBlockRead | Request, Report | Read a block on one physical port and receive the matching native frame on the control channel. Normal only. |
+| 544BF00F NormalBlockRead | Request, Report | Read a block on one physical port and receive each selected peer's native frame via the control channel. Normal only. |
 | 544BF010 NormalStatusRead | Request, Report | Solicit native status, including multipart replies, without changing mode or trace configuration. |
 | 544BF011 NormalBlockEdit | Update, Report | Compare an addressed block with the host's baseline and send at most one native block update. Does not select Raw mode. |
 | 544BF012 NormalAnnounce | Update, Report | Send one known native announcement on one physical port; report the transmit outcome. |
@@ -88,32 +88,39 @@ Byte-exact frames (spaces separate fields, not transmitted bytes):
 ProtocolVersion request:   CA 07 06 01 8F010000 0000 9E 35
 ProtocolVersion response:  CA 07 06 04 8F010000 0300 A4 35
 BridgeCapabilities:        CA 05 06 01 01F04B54 9C 35
-Normal, all eight features: CA 09 06 04 01F04B54 020005FF A9 35
+Normal capabilities:       CA 0A 06 04 01F04B54 020005BF06 70 35
 EnterFirmwareUpdate:       CA 05 06 00 05F04B54 9F 35
 Drained before handoff:    CA 05 06 03 05F04B54 A2 35
 ```
 
 ## Addressed Normal reads
 
-Send Request `544BF00F` with `port:u8 subnet:u8 node:u8 block:u16
-selector_mask:u8 selector:u8`. Node is 1..31. For a plain block both
+With capability bit 10, send Request `544BF00F` with `port:u8 subnet:u8
+node_mask:u32 block:u16 selector_mask:u8 selector:u8`. Select nodes 1..31
+with bits 0..30. An empty bitmap or set padding bit 31 is invalid. For a plain block both
 selector bytes are zero. For an indexed block the selector must fit its
 mask: for example, `07 03` selects schedule 3 ignoring the other flags in
 its first data byte. The gateway sends only a class-1, source-zero
-`2D7`, with a one-node bitmap and a little-endian u32 selector argument.
+`2D7`, with the entire bitmap and a little-endian u32 selector argument.
 The request cannot send an update or change trace, mode or reporting.
 
-An immediate Response:Request repeats the seven request bytes if admitted.
+An immediate Response:Request repeats the ten request bytes if admitted.
 One read fits on each port; an overlap gets BridgeError Busy and no terminal
 event of its own. A busy port or silent peer does not block the host's other
 tRPC commands. Queued settings take priority over reads; admission does not
 guarantee the line becomes available before the ten-second gateway deadline.
 
-Each admitted read produces exactly one Report on the same method, via the
-control FIFO independently of trace and report subscriptions. On success its
-body is `port:u8 00 tx:u8 gateway_ms:u32 native_header_and_payload`. On failure
-it is exactly `port:u8 status:u8 tx:u8`: 1 deadline expired, 2 TX pin unavailable,
-3 link fault. TX records the actual request outcome using the codes below.
+Each distinct matching node produces one Report on the same method, via the
+control FIFO independently of trace and report subscriptions. Its body is
+`port:u8 status:u8 tx:u8 gateway_ms:u32 native_header_and_payload`.
+Status 4 means more nodes remain; 0 includes the last frame and completes
+the read. All parts carry the same actual transmit outcome. The gateway waits
+up to ten seconds to acquire the line, then ten seconds for each next distinct
+peer. Duplicates, including a change to the header's node flag, do not extend it.
+A failed terminal has exactly three bytes, `port:u8 status:u8 tx:u8`:
+1 expired (earlier parts still valid), 2 TX pin unavailable, 3 link fault,
+5 control FIFO full (evidence lost, not a silent peer). Every admitted
+request has exactly one terminal. No per-node completion packet is needed.
 No response packet or temperature is synthesized. An ACK or
 missing ACK by itself is not decisive: after transmission the receiver waits
 for a valid on-time `2E7` from that subnet/node, with the requested block,
@@ -130,8 +137,9 @@ an outstanding read. Timeouts never cause a retry after a completed frame.
 
 ## Guarded block edits
 
-When feature bit 8 is present, send **Update** `544BF011` with the seven
-NormalBlockRead selector bytes, followed by `support:u8 old_len:u8
+When feature bit 10 is present, send **Update** `544BF011` with
+`port:u8 subnet:u8 node:u8 block:u16 selector_mask:u8 selector:u8`,
+always exactly one node (1..31), followed by `support:u8 old_len:u8
 old_fields[old_len] new_fields[remaining]`. Fields are positional. Use the
 support mask and all old bytes from the addressed peer, and a documented
 [block writer](tn4-blocks.md). The gateway rejects read-only blocks, wrong
@@ -195,7 +203,7 @@ Filter 0 requires zero subnet/node and follows the first matching peer; filter
 1 selects the specified native subnet and five-bit node, including node zero.
 The filter selects the **reporter**, not the I/O payload address or snowmelt
 zone number. Admission echoes the complete request. Block and status reads
-share one slot per physical port and the same ten-second window. Background
+share one slot per physical port. Status reads have ten seconds from admission. Background
 probes on that port wait; normal settings, other ports and host requests keep
 running. No trace subscription is required.
 
@@ -218,7 +226,7 @@ body is `port end tx`: end 1 complete, 2 deadline (retain partial data), 3
 control FIFO full (result is unreliable), 4 transmit fault. TX is 00 link ACK,
 01 no ACK, 03 echo mismatch, 04 bad end, 05 missed timing, FE no TX pin or FF
 no completed attempt. A link ACK alone never completes a query. On FIFO loss
-the gateway increments the port's 64-bit status-read-drop counter and reserves
+the gateway increments the port's 64-bit native-read-drop counter and reserves
 the terminal until the FIFO can accept it; it never silently declares success.
 
 ## Traffic counters
@@ -324,7 +332,7 @@ selection; a subsequent host can read or replace it without switching modes.
 | --- | --- |
 | Port 0..4: receive | 01 stuffing, 02 CRC, 03 CRC delimiter, 04 bad end, 05 valid frame without link ACK (can include own echo), 06 early start, 07 onset of stuck dominant, 08 local link response drive fault |
 | Port 0..4: transmit | 09 no ACK, 0A arbitration lost, 0B echo mismatch, 0C bad end, 0D missed timing, 0E pin unavailable |
-| Port 0..4: output loss | 0F Raw valid record dropped, 10 Raw invalid record dropped, 11 Normal trace dropped, 12 Normal status part dropped. The first three match PortDrops and NormalTrace. |
+| Port 0..4: output loss | 0F Raw valid record dropped, 10 Raw invalid record dropped, 11 Normal trace dropped, 12 Normal block or status part dropped. The first three match PortDrops and NormalTrace. |
 | Gateway (5) | 80 UART overrun, 81 parity, 82 framing, 83 break, 84 TPCK checksum, 85 TPCK framing, 86 new SOF interrupting a partial packet, 87 pending address-change notice evicted |
 
 Counters start at boot, not at subscription. Enabling does not replay old

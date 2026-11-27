@@ -196,7 +196,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                             true
                         })
                     {
-                        errors.line(p, LineError::StatusReadDrop, time.millis);
+                        errors.line(p, LineError::NativeReadDrop, time.millis);
                     }
                     if let Some(moved) = inventory.observe(p, frame.bytes, seconds) {
                         if moves.is_full() {
@@ -445,7 +445,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                     match core::mem::replace(&mut owner[p], NormalTx::Idle) {
                         NormalTx::Setting => inventory.command_sent(p, result),
                         NormalTx::Probe(probe) => inventory.probe_sent(probe, time.millis),
-                        NormalTx::HostOperation => reads[p].sent(result),
+                        NormalTx::HostOperation => reads[p].sent(result, time.millis),
                         NormalTx::Discovery(probe) => inventory.line(p).finished(probe),
                         _ => {}
                     }
