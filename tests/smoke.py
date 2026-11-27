@@ -150,6 +150,7 @@ def run(path, ram, fast=False, *, normal_reads=False):
     wire_log = deque(maxlen=12)
     clock_frame = bytes.fromhex("71f00005 1b52 05190c")
     clock_ports = set()
+    mode_services = []
     fault_words = []
     traces = []
     congestion_reports = []
@@ -349,6 +350,9 @@ def run(path, ram, fast=False, *, normal_reads=False):
                         phase = "clock"
                         for line in exchanges:
                             line.appendleft((clock_frame, None))
+                        # Two independent readers join the pending mode write's peer readback.
+                        call(0x127, bytes.fromhex("0100"))
+                        call(0x127, bytes.fromhex("01000000"))
                         call(0x1a7, bytes(7))  # Request is silent.
                         call(0x1a7, bytes(7), True)
                         incoming.extend(bytes.fromhex("ca0c0600a7010000dc07061a020a1be435"))
@@ -882,8 +886,16 @@ def run(path, ram, fast=False, *, normal_reads=False):
                 else:
                     assert data[0] == 3
                     phase = "await-setpoint-setup"
-            elif method == 0x127 and data[0] == 3:
+            elif method == 0x127 and phase == "clock":
                 assert not setting_exchange and data[5:] == bytes.fromhex("010001")
+                mode_services.append(data[0])
+                if len(mode_services) == 3:
+                    assert sorted(mode_services) == [3, 4, 4]
+                    phase = "hot-mode-read"
+                    call(0x127, bytes.fromhex("0100"))
+            elif method == 0x127 and phase == "hot-mode-read":
+                # No simulated peer reply: this must come from the confirmed mode.
+                assert data == bytes.fromhex("0427010000 010001")
                 query = bytes.fromhex("6d700007 0700 00 00008000")
                 setting_exchange.extend([
                     (bytes.fromhex("6d700007 0d00 00 00008000"),

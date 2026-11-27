@@ -3,7 +3,7 @@
 use super::codes::{mode, setback, setpoint};
 const MAX_PERCENT: u16 = 100;
 const UNAVAILABLE_BYTE: u16 = super::codes::UNAVAILABLE as u16;
-const COMMAND_TIMEOUT_SECONDS: u32 = 10;
+pub(super) const COMMAND_TIMEOUT_SECONDS: u32 = 10;
 const WORD_PAIR_MASK: u8 = 0b11;
 const ALL_TARGET_WORD_BYTES: u8 = 0x3f;
 const TARGET_WORD_LO_BYTES: u8 = 0x15;
@@ -165,7 +165,6 @@ impl Operation {
     ) -> Option<Self> {
         let (&addr, tail) = call.body.split_first_chunk::<2>()?;
         let (selector, write) = match (setting, call.service, tail) {
-            (Setting::Mode, service::REQUEST, [] | [_] | [_, 0]) => (0, None),
             (Setting::Mode, service::UPDATE, [v] | [v, 0]) => (0, Some(u16::from(*v))),
             (Setting::HumidityMin | Setting::HumidityMax, service::REQUEST, [] | [_]) => (0, None),
             (Setting::HumidityMin | Setting::HumidityMax, service::UPDATE, [v]) => {
@@ -245,19 +244,23 @@ impl Operation {
     pub(super) fn terminal(&self) -> bool {
         matches!(self.step, Step::Done(_))
     }
-    pub(super) fn expire(&mut self, now: u32) -> bool {
+    pub(super) fn expire(&mut self, now: u32) {
         // Bound bus occupancy even when the line never becomes idle.
         if self.active()
             && !self.terminal()
             && now.wrapping_sub(self.since) >= COMMAND_TIMEOUT_SECONDS
         {
             self.fail();
-            return true;
         }
-        false
     }
-    pub(super) fn mode_read_node(&self) -> Option<usize> {
-        (self.setting == Setting::Mode && self.write.is_none()).then(|| usize::from(self.node - 1))
+    pub(super) fn changing_mode(&self, address: u16) -> bool {
+        self.active()
+            && !self.terminal()
+            && self.setting == Setting::Mode
+            && self.address == address
+    }
+    pub(super) fn confirmed_write(&self) -> bool {
+        matches!(self.step, Step::Done(v) if v < UNAVAILABLE_BYTE)
     }
     pub(super) fn take_frame(&mut self, port: u8) -> Option<Request> {
         let block = self.block;

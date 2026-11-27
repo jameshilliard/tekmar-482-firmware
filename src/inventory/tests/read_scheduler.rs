@@ -181,17 +181,16 @@ fn mode_reads_always_reply_but_only_changes_or_a_new_subscription_report() {
         )
     };
     report(&mut inv, 1);
-    inv.set_reporting(true);
+    inv.set_reporting(true, 0);
     report(&mut inv, 1);
     push(&mut inv, 1);
     for _ in 0..2 {
-        assert!(call(&mut inv, 0x127, 1, &[24, 0], 0).is_none());
-        expect_block_read(&mut inv, 3);
-        report(&mut inv, 1);
         assert_eq!(
-            inv.command_reply(0).unwrap().payload(),
+            call(&mut inv, 0x127, 1, &[24, 0], 0).unwrap().payload(),
             &[4, 0x27, 1, 0, 0, 24, 0, 1]
         );
+        assert!(!inv.has_command(0));
+        report(&mut inv, 1);
         assert!(inv.next_report(0).is_none());
     }
     report(&mut inv, 0);
@@ -199,8 +198,8 @@ fn mode_reads_always_reply_but_only_changes_or_a_new_subscription_report() {
     report(&mut inv, 1);
     report(&mut inv, 0); // coalesced before the pending report left the cache
     assert!(inv.next_report(0).is_none());
-    inv.set_reporting(false);
-    inv.set_reporting(true);
+    inv.set_reporting(false, 0);
+    inv.set_reporting(true, 0);
     report(&mut inv, 0);
     push(&mut inv, 0);
 }
@@ -209,14 +208,15 @@ fn mode_reads_always_reply_but_only_changes_or_a_new_subscription_report() {
 fn an_expired_mode_request_keeps_its_failure_and_recovers_from_one_read_only_probe() {
     let mut inv = Inventory::new();
     observe(&mut inv, 0, 0, 1, 0x2e7, &[0, 0, 63, 1, 2, 3, 4, 5, 6], 0);
-    inv.set_reporting(true);
+    inv.set_reporting(true, 0);
     observe(&mut inv, 0, 0, 1, 0x2e7, &[3, 0, 1, 1], 0);
     assert_eq!(inv.next_report(0).unwrap().payload()[7], 1);
+    observe(&mut inv, 0, 0, 2, 0x2df, &[0, 1, 3, 0, 0, 2, 3], 1);
     assert!(call(&mut inv, 0x127, 1, &[24, 0], 1).is_none());
-    expect_block_read(&mut inv, 3);
-    inv.command_expire(0, 11);
+    assert_eq!(take(&mut inv, 0, 1_000).unwrap()[4], 3);
+    inv.tick(11);
     assert_eq!(
-        inv.command_reply(0).unwrap().payload(),
+        inv.next_mode_reply().unwrap().payload(),
         &[4, 0x27, 1, 0, 0, 24, 0, 0xff]
     );
     assert!(inv.next_report(11).is_none());

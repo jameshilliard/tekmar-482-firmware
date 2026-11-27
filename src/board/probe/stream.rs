@@ -113,7 +113,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
     let mut read_mask = 0u8;
     let mut uart = super::super::UartRx::default();
     let mut stuck = [false; PORT_COUNT];
-    inventory.set_reporting(panel.borrow().reporting_at_boot());
+    inventory.set_reporting(panel.borrow().reporting_at_boot(), 0);
     let mut bus = Receivers::start();
     let mut decoder = tpck::Decoder::default();
     let out = Output::take();
@@ -319,6 +319,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                     && let Some(result) = reads[p].take_result(p as u8)
                 {
                     out.enqueue(Kind::Control, tpck::TRPC, result.payload());
+                    inventory.end_native_edit(p, seconds);
                     read_mask &= !(1 << p);
                 }
                 if (foreground || host_read || discovery.is_some() || inventory.has_reads(p))
@@ -579,6 +580,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                             }
                             let busy = !moves.is_empty()
                                 || inventory.walking()
+                                || inventory.has_mode_requests()
                                 || read_mask != 0
                                 || (0..PORT_COUNT).any(|p| {
                                     inventory.has_command(p) || inventory.has_broadcast(p)
@@ -635,7 +637,19 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                                     [p @ 0..=LAST_PORT, key @ ..],
                                 ) => match NormalOperation::parse(call.method, key, time.millis) {
                                     Err(e) => call.error(e),
-                                    Ok(slot) if read_mask & (1 << *p) == 0 => {
+                                    Ok(slot)
+                                        if read_mask & (1 << *p) == 0
+                                            && slot.heating_edit_target().is_none_or(
+                                                |(subnet, node)| {
+                                                    inventory.begin_native_mode_edit(
+                                                        usize::from(*p),
+                                                        subnet,
+                                                        node,
+                                                        seconds,
+                                                    )
+                                                },
+                                            ) =>
+                                    {
                                         reads[usize::from(*p)] = slot;
                                         read_mask |= 1 << *p;
                                         call.ok(call.body)
@@ -775,6 +789,13 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                 }
                 Ok(None) => break,
             }
+        }
+        if !raw
+            && !reboot
+            && out.can_receive()
+            && let Some(reply) = inventory.next_mode_reply()
+        {
+            out.enqueue(Kind::Control, tpck::TRPC, reply.payload());
         }
         if !raw
             && !reboot

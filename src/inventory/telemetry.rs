@@ -154,8 +154,8 @@ impl Telemetry {
     pub(super) fn is_setpoint_device(&self) -> bool {
         self.attributes & Self::SETPOINT_DEVICE != 0
     }
-    pub(super) fn mode_known(&self) -> bool {
-        self.mode != UNAVAILABLE
+    pub(super) fn mode(&self) -> Option<u8> {
+        (self.mode != UNAVAILABLE).then_some(self.mode)
     }
     pub(super) fn setback(&self) -> u8 {
         self.setback
@@ -276,6 +276,15 @@ impl Telemetry {
     pub(super) fn forget_mode_report(&mut self) {
         self.reported_mode = None;
     }
+    pub(super) fn confirm_mode(&mut self, mode: u8) -> u16 {
+        self.mode = mode;
+        if self.reported_mode == Some(mode) {
+            self.dirty &= !Field::Mode.mask();
+            0
+        } else {
+            Field::Mode.mask()
+        }
+    }
     pub(super) fn missing_target(&self, id: u8) -> bool {
         match id {
             block::HEAT_SETPOINTS | block::COOL_SETPOINTS => {
@@ -312,18 +321,6 @@ impl Telemetry {
             return 0;
         };
         match *block {
-            block::HEATING_SETUP if self.configured(Setting::Mode) => {
-                let Some(mode) = block_byte(*mask, values, 0) else {
-                    return 0;
-                };
-                self.mode = mode;
-                if self.reported_mode == Some(mode) {
-                    self.dirty &= !Field::Mode.mask();
-                    0
-                } else {
-                    Field::Mode.mask()
-                }
-            }
             block::HEAT_SETPOINTS
             | block::COOL_SETPOINTS
             | block::SLAB_SETPOINTS

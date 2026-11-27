@@ -112,9 +112,9 @@ flag if it misses the drive window. Raw never generates an error flag,
 including when receive ACKs are enabled; it reports malformed input
 and send outcomes to the host instead.
 
-Stock settings often reply from cache. This implementation reads the device
-for supported setting operations, so a response can take longer, report
-the value the device actually retained, or indicate a busy port.
+Stock settings often reply from cache. This implementation can answer a
+configured-mode read from peer-confirmed state. Setting writes always start
+with a native read and return the value the device actually retained.
 
 **Targeted reads.** Status frames queue reads for missing identity, mode,
 setpoints or setup on the source port. Repeated requests for the same device
@@ -139,13 +139,27 @@ optional reads for two minutes after WaterCycleStart (`0x68e4`). Those are
 stock cache policies, not tHA operations. This firmware keeps the native
 arbitration and error recovery without imposing those cross-port delays.
 
-An explicit ModeSetting Request still gets its own fresh response. With
-reporting enabled, the first confirmed mode and subsequent changes take
-precedence over routine readings for that device. Repeated unchanged setup
-blocks do not produce duplicate mode Reports. A timed-out read returns FF;
-while the same thermostat is present the gateway queues one read-only check.
-A subsequent peer confirmation can then restore the mode, even if unchanged,
-without waiting for a host poll. A failed write is never replayed this way.
+**ModeSetting reads.** J1196J reads the stored mode byte at device record
+offset 0x11 (0x93b4 -> 0x9338 -> 0x27dc). In this firmware a Request can
+reply immediately if the same thermostat has confirmed block 03 in the
+last five minutes. A change hint, an addressed heating-setup write or an
+address change invalidates the sample. Neither a write's baseline nor a
+link ACK confirms its outcome. Use NormalBlockRead to explicitly request
+fresh native evidence regardless of cache age.
+
+Requests for an unconfirmed mode share a targeted read. They do not reserve
+the port; a silent thermostat cannot hold another thermostat's confirmed
+reply. Every accepted Request gets its own Response:Request, including when
+reporting is disabled. Joined reads share the first request's ten-second
+deadline. If the queue is full the gateway returns Busy instead of silently
+dropping a reply. On timeout it returns FF and queues one read-only recovery
+for the same device. Later peer evidence restores subscribers without
+replaying a write.
+
+Enabling reporting publishes current confirmed modes once. Subsequent mode
+changes take precedence over routine readings for that thermostat but do not
+overtake its older explicit mode replies. Unchanged setup blocks don't
+produce duplicate Reports.
 
 **Live room setpoints.** An eligible air-group status updates the target
 cache directly. A member supplies its enabled side; a master with both
@@ -402,8 +416,9 @@ also supported when its support mask agrees. Do not write an extended
 or ambiguous layout or half a word. After a change, return the target
 actually read back, not the value in the host request.
 
-Normal mode accepts one native setting operation per physical port. A
-Request sends an addressed 2D7 and waits for a matching 2E7 from the same
+Normal mode accepts one exclusive setting operation per physical port. Apart
+from ModeSetting reads as described above, a supported setting Request
+sends an addressed 2D7 and waits for a matching 2E7 from the same
 port, subnet and node. An Update first does the same read. For mode it
 changes byte 0, preserving heating cycle rate and air-group ID. For heat
 and cool, the five positional bytes are the native setback values. With

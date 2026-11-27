@@ -68,6 +68,12 @@ impl NormalOperation {
     pub fn single_attempt(&self) -> bool {
         matches!(self, Self::Send(_)) || matches!(self, Self::Edit(r) if r.writing())
     }
+    pub fn heating_edit_target(&self) -> Option<(u8, u8)> {
+        match self {
+            Self::Edit(edit) => edit.heating_target(),
+            _ => None,
+        }
+    }
     pub fn trace_origin(&self) -> u8 {
         use crate::tpck::trace;
         match self {

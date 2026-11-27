@@ -7,6 +7,7 @@ mod codes;
 mod groups;
 mod identity;
 mod line;
+mod mode_reads;
 mod outdoor;
 mod reads;
 pub use broadcast::Broadcast;
@@ -50,6 +51,7 @@ struct Device {
     incarnation: u16,
     identity_delay: u8,
     mode_delay: u16,
+    mode_valid: bool,
     sensor_delay: u16,
     setpoint_setup_delay: u16,
     fan_delay: u8,
@@ -66,6 +68,7 @@ impl Device {
         incarnation: 0,
         identity_delay: 0,
         mode_delay: 0,
+        mode_valid: false,
         sensor_delay: 0,
         setpoint_setup_delay: 0,
         fan_delay: 0,
@@ -74,6 +77,17 @@ impl Device {
     };
     fn present(&self, now: u32) -> bool {
         self.address != 0 && now.wrapping_sub(self.last_seen) <= DEVICE_TTL_SECONDS
+    }
+    fn cached_mode(&self, now: u32) -> Option<u8> {
+        if self.mode_valid && now.wrapping_sub(self.last_seen) < u32::from(self.mode_delay) {
+            self.live.mode()
+        } else {
+            None
+        }
+    }
+    fn invalidate_mode(&mut self) {
+        self.mode_valid = false;
+        self.live.dirty &= !Field::Mode.mask();
     }
 }
 
@@ -85,6 +99,16 @@ struct Port {
     devices: [Device; NODES],
     pending: u32,
     job: Operation,
+    native_mode_edit: Option<(u8, u8)>,
+}
+
+impl Port {
+    fn mode_target(&self, subnet: u8, node: u8, now: u32) -> Option<usize> {
+        let index = usize::from(node.checked_sub(1)?);
+        let row = self.devices.get(index)?;
+        (row.present(now) && row.subnet == subnet && row.live.configured(Setting::Mode))
+            .then_some(index)
+    }
 }
 
 pub struct Inventory {
@@ -101,6 +125,7 @@ pub struct Inventory {
     setbacks: bool,
     network_error: u16,
     error_reports: heapless::Deque<u16, NETWORK_ERROR_REPORT_CAPACITY>,
+    mode_reads: mode_reads::ModeReads,
     next_slot: usize,
 }
 
@@ -126,6 +151,7 @@ impl Inventory {
                     devices: [Device::EMPTY; NODES],
                     pending: 0,
                     job: Operation::IDLE,
+                    native_mode_edit: None,
                 }
             }; PORTS],
             walk: [0; SLOTS],
@@ -135,6 +161,7 @@ impl Inventory {
             setbacks: false,
             network_error: 0,
             error_reports: heapless::Deque::new(),
+            mode_reads: mode_reads::ModeReads::EMPTY,
             next_slot: 0,
         }
     }
@@ -206,6 +233,16 @@ impl Inventory {
         let subnet = (header >> tn4::SUBNET_SHIFT) as u8;
         let bus = self.ports.get_mut(port)?;
         bus.link.peer(message);
+        if message == message::BLOCK_UPDATE {
+            // The header names the writer; the setting belongs to the payload's destination.
+            if let [dest_subnet, dest_node, block::HEATING_SETUP, 0, _, ..] = data
+                && let Some(i) = bus.mode_target(*dest_subnet, *dest_node, now)
+            {
+                bus.devices[i].invalidate_mode();
+                bus.reads.mode_changed(i);
+            }
+            return None;
+        }
         if message == message::WATER_CYCLE_START {
             // Native plant telemetry, not a tHA report or a bus lock.
             return None;
@@ -241,6 +278,7 @@ impl Inventory {
         }
         if message == message::MASTER_PRESENT {
             if bus.subnet.replace(subnet).is_some_and(|old| old != subnet) {
+                self.mode_reads.forget_port(port);
                 if bus.job.active() {
                     bus.job.fail();
                 }
@@ -267,6 +305,8 @@ impl Inventory {
                 old: previous.address,
                 new: address,
             };
+            self.mode_reads.forget(moved.old);
+            self.mode_reads.forget(bus.devices[node].address);
             if bus.job.active() && [moved.old, bus.devices[node].address].contains(&bus.job.address)
             {
                 bus.job.fail();
@@ -280,6 +320,8 @@ impl Inventory {
             bus.pending &= !(1 << old | 1 << node);
             let row = &mut bus.devices[node];
             row.incarnation = self.incarnation;
+            row.invalidate_mode();
+            row.mode_delay = 0;
             row.live.dirty = 0;
             row.address = address;
             row.subnet = subnet;
@@ -321,6 +363,7 @@ impl Inventory {
             _ => None,
         };
         if !present || identity.is_some_and(|id| row.identity.conflicts(id)) {
+            self.mode_reads.forget(row.address);
             if bus.job.active() && bus.job.address == address {
                 bus.job.fail();
             }
@@ -377,6 +420,9 @@ impl Inventory {
                 )
         {
             row.live.mark_setpoint_device();
+            row.invalidate_mode();
+            self.mode_reads
+                .sample(address, row.incarnation, codes::UNAVAILABLE);
         }
         if message == message::BLOCK_REPORT
             && let [block::SETPOINT_SETUP, 0, mask, values @ ..] = data
@@ -406,6 +452,7 @@ impl Inventory {
         } else {
             row.live.observe(message, data)
         };
+        let changing_mode = bus.job.changing_mode(address);
         if bus.job.active() && bus.job.address == address {
             if matches!(
                 bus.job.setting,
@@ -416,6 +463,23 @@ impl Inventory {
             } else if message == message::BLOCK_REPORT {
                 bus.job.sample(address, subnet, data, &row.live);
             }
+        }
+        if message == message::BLOCK_REPORT
+            && let [block::HEATING_SETUP, 0, mask, values @ ..] = data
+            && let Some(mode) = block_byte(*mask, values, 0)
+            && row.live.configured(Setting::Mode)
+            && bus.native_mode_edit != Some((subnet, node as u8 + 1))
+            && (!changing_mode || bus.job.confirmed_write())
+        {
+            changed |= row.live.confirm_mode(mode);
+            row.mode_valid = row.live.mode().is_some();
+            row.mode_delay = if row.mode_valid {
+                MODE_REFRESH_SECONDS
+            } else {
+                u16::from(PROBE_RETRY_SECONDS)
+            };
+            bus.reads.discard(node, block::HEATING_SETUP);
+            self.mode_reads.sample(address, row.incarnation, mode);
         }
         if !self.setbacks {
             changed &= !Field::Setback.mask();
@@ -452,25 +516,14 @@ impl Inventory {
             }
             let hint_changed = before != row.live.mode_hint();
             if row.live.configured(Setting::Mode) && (row.mode_delay == 0 || hint_changed) {
-                if row.live.mode_known() && hint_changed {
+                row.invalidate_mode();
+                if row.live.mode().is_some() && hint_changed {
                     bus.reads.mode_changed(node);
                 } else {
                     bus.reads.queue(node, block::HEATING_SETUP);
                 }
-                row.mode_delay = if row.live.mode_known() {
-                    MODE_REFRESH_SECONDS
-                } else {
-                    u16::from(PROBE_RETRY_SECONDS)
-                };
+                row.mode_delay = u16::from(PROBE_RETRY_SECONDS);
             }
-        }
-        if message == message::BLOCK_REPORT
-            && let [block::HEATING_SETUP, 0, mask, values @ ..] = data
-            && block_byte(*mask, values, 0).is_some()
-            && row.live.mode_known()
-        {
-            row.mode_delay = MODE_REFRESH_SECONDS;
-            bus.reads.discard(node, block::HEATING_SETUP);
         }
         if message == message::SLAB_STATUS && row.live.missing_target(block::SLAB_SETPOINTS) {
             bus.reads.queue(node, block::SLAB_SETPOINTS);
@@ -499,6 +552,7 @@ impl Inventory {
     }
 
     pub fn reset(&mut self) {
+        self.mode_reads = mode_reads::ModeReads::EMPTY;
         self.air_groups = air::AirGroups::EMPTY;
         self.groups = groups::Groups::EMPTY;
         self.broadcasts = broadcast::Broadcasts::EMPTY;
@@ -510,6 +564,7 @@ impl Inventory {
             port.devices.fill(Device::default());
             port.pending = 0;
             port.job = Operation::IDLE;
+            port.native_mode_edit = None;
         }
         self.remaining = 0;
         self.error_reports.clear();
@@ -519,7 +574,45 @@ impl Inventory {
     pub fn has_command(&self, p: usize) -> bool {
         self.ports[p].job.active()
     }
+    pub fn has_mode_requests(&self) -> bool {
+        self.mode_reads.pending()
+    }
+    pub fn next_mode_reply(&mut self) -> Option<Reply> {
+        self.mode_reads.next()
+    }
+    pub fn begin_native_mode_edit(&mut self, p: usize, subnet: u8, node: u8, now: u32) -> bool {
+        let bus = &mut self.ports[p];
+        if let Some(i) = bus.mode_target(subnet, node, now) {
+            if bus.job.changing_mode(bus.devices[i].address) {
+                return false;
+            }
+            bus.devices[i].invalidate_mode();
+        }
+        bus.native_mode_edit = Some((subnet, node));
+        true
+    }
+    pub fn end_native_edit(&mut self, p: usize, now: u32) {
+        let bus = &mut self.ports[p];
+        if let Some((subnet, node)) = bus.native_mode_edit.take()
+            && let Some(i) = bus.mode_target(subnet, node, now)
+        {
+            bus.reads.mode_changed(i);
+        }
+    }
     pub fn tick(&mut self, now: u32) {
+        self.mode_reads.expire(now, |address, incarnation| {
+            let bus = &mut self.ports[usize::from(address / ADDRESS_PORT_SCALE)];
+            if let Some((i, row)) = bus.devices.iter_mut().enumerate().find(|(_, row)| {
+                row.address == address
+                    && row.incarnation == incarnation
+                    && row.present(now)
+                    && row.live.configured(Setting::Mode)
+            }) {
+                // The unavailable reply is final. Only peer evidence can restore a subscriber.
+                row.live.forget_mode_report();
+                bus.reads.mode_changed(i);
+            }
+        });
         for port in &mut self.ports {
             port.link.tick(now);
         }
@@ -546,22 +639,7 @@ impl Inventory {
         self.ports[p].job.terminal()
     }
     pub fn command_expire(&mut self, p: usize, now: u32) {
-        let port = &mut self.ports[p];
-        if port.job.expire(now)
-            && let Some(node) = port.job.mode_read_node()
-        {
-            let row = &mut port.devices[node];
-            if row.present(now)
-                && row.address == port.job.address
-                && row.live.configured(Setting::Mode)
-            {
-                // Preserve the failed request's unavailable reply. One background
-                // read can restore subscribers from fresh peer evidence, even
-                // when the confirmed setting is the same as the last report.
-                row.live.forget_mode_report();
-                port.reads.mode_changed(node);
-            }
-        }
+        self.ports[p].job.expire(now);
     }
     pub fn command_frame(&mut self, p: usize) -> Option<Request> {
         self.ports[p].job.take_frame(p as u8)
@@ -579,11 +657,15 @@ impl Inventory {
         Some(reply)
     }
 
-    pub fn set_reporting(&mut self, on: bool) {
+    pub fn set_reporting(&mut self, on: bool, now: u32) {
         if on && !self.reporting {
             for port in &mut self.ports {
-                for row in &mut port.devices {
+                for (i, row) in port.devices.iter_mut().enumerate() {
                     row.live.forget_mode_report();
+                    if row.present(now) && row.cached_mode(now).is_some() {
+                        row.live.dirty |= Field::Mode.mask();
+                        port.pending |= 1 << i;
+                    }
                 }
             }
         }
@@ -635,6 +717,12 @@ impl Inventory {
             }
             let row = &mut p.devices[node];
             let r = if row.present(now) {
+                // Do not send a new mode Report ahead of an older explicit reply.
+                if row.live.dirty & Field::Mode.mask() != 0
+                    && self.mode_reads.ready_for(row.address)
+                {
+                    continue;
+                }
                 row.live.report(row.address)
             } else {
                 row.live.dirty = 0;
@@ -707,7 +795,7 @@ impl Inventory {
                 .handle(call, now, self.reporting, &mut self.broadcasts);
         }
         if let Some(setting) = Setting::from_method(call.method) {
-            let Some((&a, _)) = call.body.split_first_chunk::<2>() else {
+            let Some((&a, tail)) = call.body.split_first_chunk::<2>() else {
                 return Answer::Silent;
             };
             let address = u16::from_le_bytes(a);
@@ -719,12 +807,30 @@ impl Inventory {
             };
             let Some((i, row)) = bus
                 .devices
-                .iter()
+                .iter_mut()
                 .enumerate()
                 .find(|(_, r)| r.address == address && r.present(now))
             else {
                 return Answer::Silent;
             };
+            if setting == Setting::Mode && call.service == service::REQUEST {
+                if !matches!(tail, [] | [_] | [_, 0]) {
+                    return Answer::Silent;
+                }
+                let cached = if row.live.configured(setting) {
+                    row.cached_mode(now)
+                } else {
+                    Some(codes::UNAVAILABLE)
+                };
+                return self.mode_reads.request(
+                    call,
+                    address,
+                    row.incarnation,
+                    cached,
+                    now,
+                    || bus.reads.mode_changed(i),
+                );
+            }
             let Some(mut op) = Operation::begin(
                 call,
                 setting,
@@ -749,13 +855,21 @@ impl Inventory {
             {
                 op.fail();
             }
-            return settings::accept(&mut bus.job, op, call);
+            let changes_mode = setting == Setting::Mode && !op.terminal();
+            if changes_mode && bus.native_mode_edit == Some((row.subnet, i as u8 + 1)) {
+                return Answer::Reply(call.error(BridgeError::Busy));
+            }
+            let answer = settings::accept(&mut bus.job, op, call);
+            if changes_mode && matches!(answer, Answer::Silent) {
+                row.invalidate_mode();
+            }
+            return answer;
         }
         match call.method {
             method::REPORTING_STATE | method::SETBACK_ENABLE => {
                 match (call.service, call.body) {
                     (service::UPDATE, [v]) if call.method == method::REPORTING_STATE => {
-                        self.set_reporting(*v != 0)
+                        self.set_reporting(*v != 0, now)
                     }
                     (service::UPDATE, [v]) => {
                         self.setbacks = *v != 0;
@@ -806,6 +920,11 @@ impl Inventory {
             return Answer::Reply(call.error(BridgeError::Busy));
         }
         if call.method == INVENTORY && call.service == service::UPDATE {
+            if address == 0 {
+                self.mode_reads.forget_all();
+            } else {
+                self.mode_reads.forget(address);
+            }
             for p in &mut self.ports {
                 if p.job.active() && (address == 0 || address == p.job.address) {
                     p.job.fail();

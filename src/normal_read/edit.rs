@@ -110,6 +110,10 @@ impl BlockEdit {
     pub(super) fn writing(&self) -> bool {
         self.phase == Phase::Write
     }
+    pub(super) fn heating_target(&self) -> Option<(u8, u8)> {
+        (self.query.block == [crate::tn4::block::HEATING_SETUP, 0])
+            .then_some((self.query.subnet, self.node))
+    }
     pub(super) fn queued(&self) -> bool {
         matches!(self.phase, Phase::Read | Phase::Write)
     }

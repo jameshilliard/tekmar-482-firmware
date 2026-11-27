@@ -1,5 +1,6 @@
 use super::*;
 use crate::uptime::Sample;
+mod mode_requests;
 mod read_scheduler;
 
 #[test]
@@ -7,7 +8,7 @@ fn network_error_preserves_events_and_reads_latest_even_before_the_queue_drains(
     let mut inv = Inventory::new();
     observe(&mut inv, 2, 9, 0, 0x3d7, &[0xc6, 0xa5], 0);
     assert!(!inv.has_reports());
-    inv.set_reporting(true);
+    inv.set_reporting(true, 0);
     assert!(!inv.has_reports()); // No synthetic alarm on enable.
     for (port, body) in [(1, [0x8f, 0xe1]), (4, [0x8f, 0xe1]), (1, [0, 0x80])] {
         observe(&mut inv, port, 9, 0, 0x3d7, &body, 0);
@@ -34,7 +35,7 @@ fn network_error_preserves_events_and_reads_latest_even_before_the_queue_drains(
     assert_eq!(inv.next_report(0).unwrap().payload()[5..], [0, 0]);
     assert!(!inv.has_reports());
     observe(&mut inv, 0, 0, 1, 0x3d7, &[0xc7, 0], 0);
-    inv.set_reporting(false);
+    inv.set_reporting(false, 0);
     assert!(!inv.has_reports());
     assert_eq!(
         call(&mut inv, 0x107, 0, &[0, 0], 0).unwrap().payload(),
@@ -220,7 +221,7 @@ fn discovery_rearms_only_after_a_sampled_loss_and_recovery() {
 #[test]
 fn clock_update_admission_and_native_boundaries() {
     let mut inv = Inventory::new();
-    inv.set_reporting(true);
+    inv.set_reporting(true, 0);
     let update = |inv: &mut Inventory, b: &[u8]| {
         let reply = call(inv, 0x1a7, 0, b, 0).unwrap();
         assert_eq!(&reply.payload()[..5], &[3, 0xa7, 1, 0, 0]);
@@ -292,7 +293,7 @@ fn outdoor_source_precedence_expiry_and_unsent_values() {
     );
     observe(&mut inv, 4, 0, 0, 0x32f, &[0xe9, 0xb], 0);
     assert!(inv.stale_broadcast(0, queued, 0)); // same word, actual sensor now owns it
-    inv.set_reporting(true);
+    inv.set_reporting(true, 0);
     observe(&mut inv, 4, 0, 0, 0x32f, &[0x48, 6, 0, 0], 1);
     assert!(inv.stale_broadcast(0, queued, 1));
     assert!(inv.next_broadcast(1, 1).is_none()); // don't displace the actual sensor
@@ -320,9 +321,9 @@ fn outdoor_source_precedence_expiry_and_unsent_values() {
 #[test]
 fn outdoor_request_captures_one_response_per_line_without_extending_a_sample() {
     let mut inv = Inventory::new();
-    inv.set_reporting(true);
+    inv.set_reporting(true, u32::MAX - 100);
     observe(&mut inv, 4, 0, 0, 0x32f, &[0x23, 5], u32::MAX - 100);
-    inv.set_reporting(false);
+    inv.set_reporting(false, u32::MAX - 100);
     assert!(!inv.has_reports());
     observe(&mut inv, 2, 1, 0, 0x327, &[7], 550);
     assert!(!inv.has_broadcast(0));
@@ -390,8 +391,16 @@ fn taking_address_is_report_only_and_follows_the_known_device() {
     );
     call(&mut inv, 0x127, 1, &[102, 0], 2);
     assert_eq!(
-        inv.command_frame(0),
-        Request::new(0, &[0x6d, 0x70, 0, 7, 3, 0, 9, 0, 0, 64, 0])
+        inv.next_probe(
+            0,
+            Sample {
+                seconds: 2,
+                millis: 2000
+            }
+        )
+        .unwrap()
+        .body(),
+        [0x6d, 0x70, 0, 7, 3, 0, 9, 0, 0, 64, 0]
     );
     assert!(move_to(&mut inv, 0, [9, 23], 153).is_none()); // Expired.
     for service in [0, 1] {
@@ -444,7 +453,7 @@ fn group_read_is_global_and_an_expired_enable_is_not_a_stop_report() {
     observe(&mut inv, 4, 79, 0, 0x20f, &[1, 16], initial);
     assert!(!inv.has_reports());
     assert_eq!(read(&mut inv, 1, 38), 1); // 59 seconds across wrap.
-    inv.set_reporting(true);
+    inv.set_reporting(true, 38);
     observe(&mut inv, 2, 14, 0, 0x20f, &[1, 1], 38);
     assert_eq!(
         inv.next_report(38).unwrap().payload(),
@@ -467,7 +476,7 @@ fn group_read_is_global_and_an_expired_enable_is_not_a_stop_report() {
     );
     assert!((0..5).all(|p| !inv.has_broadcast(p)));
     observe(&mut inv, 0, 0, 0, 0x20f, &[12, 16], 100);
-    inv.set_reporting(false);
+    inv.set_reporting(false, 100);
     assert!(!inv.has_reports());
     assert_eq!(read(&mut inv, 12, 100), 1);
     inv.reset();
@@ -509,7 +518,7 @@ fn schedule_events_echo_the_stock_two_bit_code_not_the_role_or_request_value() {
     observe(&mut inv, 0, 0, 24, 0x2f7, &[0x84, 1, 60], 0);
     assert!(call(&mut inv, 0x17f, 1, &[1, 0, 0], 0).is_none());
     observe(&mut inv, 0, 0, 24, 0x36f, &[0; 8], 0);
-    inv.set_reporting(true);
+    inv.set_reporting(true, 0);
     for flags in 0..=255 {
         let code = flags / 64;
         observe(&mut inv, 0, 0, 24, 0x2f7, &[flags, 1, 60], 1);
@@ -696,7 +705,7 @@ fn slab_requires_enabled_floor_sensor_and_preserves_maximum_in_all_slot_updates(
             &[3, 0x4f, 1, 0, 0, 24, 0, 0, 41]
         );
     }
-    inv.set_reporting(true);
+    inv.set_reporting(true, 0);
     observe(&mut inv, 0, 0, 1, 0x26f, &[1, 44, 10, 0], 1);
     assert!(
         core::iter::from_fn(|| inv.next_report(1))
@@ -836,7 +845,7 @@ fn device_targets_follow_application_and_setback_not_heat_setpoint_slots() {
 #[test]
 fn setpoint_identification_withdraws_pending_thermostat_reports_and_writes() {
     let mut inv = Inventory::new();
-    inv.set_reporting(true);
+    inv.set_reporting(true, 0);
     observe(&mut inv, 0, 0, 1, 0x36f, &[0; 8], 0);
     assert!(call(&mut inv, 0x127, 0, &[24, 0, 2], 0).is_none());
     expect_block_read(&mut inv, 3);
@@ -908,7 +917,7 @@ fn setpoint_status_refreshes_addressed_setup_without_probing_on_every_report() {
 #[test]
 fn device_target_reports_coalesce_with_their_own_slot_and_sentinel() {
     let mut inv = Inventory::new();
-    inv.set_reporting(true);
+    inv.set_reporting(true, 0);
     let status = |i: &mut Inventory, slot: u8, target: u16| {
         let [a, b] = target.to_le_bytes();
         observe(
@@ -1102,7 +1111,7 @@ fn setpoints_resolve_current_preserve_slots_and_report_observed_values() {
             &[24, 0, slot, 88]
         );
     }
-    inv.set_reporting(true);
+    inv.set_reporting(true, 0);
     observe(&mut inv, 0, 0, 1, 0x2e7, &[6, 0, 31, 10, 11, 12, 13, 14], 0);
     assert_eq!(
         inv.next_report(0).unwrap().payload(),
@@ -1127,9 +1136,14 @@ fn unsupported_ambiguous_and_abandoned_operations_never_generate_an_update() {
         assert_eq!(inv.command_reply(0).unwrap().payload()[7], out);
     }
     begin(&mut inv);
-    assert!(call(&mut inv, 0x127, 1, &[24, 0], start).is_some()); // Same port busy.
+    assert!(call(&mut inv, 0x127, 1, &[24, 0], start).is_none()); // Wait for peer confirmation.
     inv.command_expire(0, 7);
     assert_eq!(inv.command_reply(0).unwrap().payload()[7], 255);
+    inv.tick(7);
+    assert_eq!(
+        inv.next_mode_reply().unwrap().payload(),
+        &[4, 0x27, 1, 0, 0, 24, 0, 255]
+    );
     begin(&mut inv);
     observe(&mut inv, 0, 0, 1, 0x2e7, &[3, 0, 7, 2, 3, 9], start);
     observe(&mut inv, 0, 0, 2, 0x3e7, &[0, 1], start);
@@ -1440,7 +1454,7 @@ fn master_and_member_target_selection_matches_stock_report_bodies() {
             for h in 0..4 {
                 for c in 0..4 {
                     let mut inv = Inventory::new();
-                    inv.set_reporting(true);
+                    inv.set_reporting(true, 0);
                     let master = [
                         group | gate << 5,
                         0,
@@ -1493,7 +1507,7 @@ fn master_and_member_target_selection_matches_stock_report_bodies() {
 #[test]
 fn air_targets_preserve_slot_aliases_sentinels_and_mode_gates() {
     let mut inv = Inventory::new();
-    inv.set_reporting(true);
+    inv.set_reporting(true, 0);
     call(&mut inv, 0x16f, 0, &[1], 0);
     for (id, body) in [
         (0x2e7, &[5, 0, 31, 10, 20, 30, 40, 50][..]), // Before the active setback is known.
