@@ -110,6 +110,10 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
     static ERRORS: static_cell::ConstStaticCell<ErrorBook> =
         static_cell::ConstStaticCell::new(ErrorBook::EMPTY);
     let errors = ERRORS.take();
+    #[unsafe(link_section = ".bss.traffic")]
+    static TRAFFIC: static_cell::ConstStaticCell<diagnostics::traffic::Traffic> =
+        static_cell::ConstStaticCell::new(diagnostics::traffic::Traffic::EMPTY);
+    let traffic = TRAFFIC.take();
     let mut uart = super::super::UartRx::default();
     let mut stuck = [false; PORT_COUNT];
     inventory.set_reporting(panel.borrow().reporting_at_boot());
@@ -145,6 +149,9 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
             panel.borrow_mut().observe(p);
             if !matches!(frame.trailer, Trailer::Ack | Trailer::NoAck) {
                 return;
+            }
+            if !sending[p].as_ref().is_some_and(Attempt::started) {
+                traffic.received(p, frame.bytes);
             }
             if frame.trailer == Trailer::NoAck {
                 errors.line(p, LineError::RxNoAck, time.millis);
@@ -198,6 +205,9 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                 }
             }
             if let Some(fault) = bus.rx[p].take_failure() {
+                if !sending[p].as_ref().is_some_and(Attempt::started) {
+                    traffic.invalid(p);
+                }
                 let code = match fault.reason {
                     raw::invalid::STUFFING => LineError::Stuffing,
                     raw::invalid::CRC => LineError::Crc,
@@ -360,6 +370,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                 let Some((result, fault_at)) = result else {
                     continue;
                 };
+                traffic.transmitted(p, attempt.body(), result);
                 if let Some(code) = LineError::from_outcome(result) {
                     errors.line(p, code, time.millis);
                 }
@@ -528,6 +539,9 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                                 || sending.iter().any(Option::is_some)
                                 || response.iter().any(LinkResponse::busy);
                             let reply = match (call.method, call.service, call.body) {
+                                (method::TRAFFIC_COUNTS, service::REQUEST, _) => {
+                                    traffic.read(&call)
+                                }
                                 (
                                     method::SET_BRIDGE_MODE,
                                     service::UPDATE,
@@ -633,7 +647,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                                 (
                                     method::SET_BRIDGE_MODE
                                     | method::PORT_DROPS
-                                    | method::PANEL..=method::NORMAL_IDENTITY,
+                                    | method::PANEL..=method::TRAFFIC_COUNTS,
                                     _,
                                     _,
                                 ) => call.error(BridgeError::InvalidRequest),

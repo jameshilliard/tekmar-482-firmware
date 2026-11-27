@@ -28,6 +28,7 @@ const FEATURE_ROM_UPDATE: u8 = 1 << 1;
 const FEATURE_NORMAL_TRACE: u8 = 1 << 2;
 const FEATURE_ERROR_REPORTING: u8 = 1 << 3;
 const FEATURE_NORMAL_IDENTITY: u8 = 1 << 4;
+const FEATURE_TRAFFIC_COUNTS: u8 = 1 << 5;
 const HEADER_BYTES: usize = 1 + size_of::<u32>();
 const REVISION_MAGIC: &[u8; 8] = b"TK48REV\0";
 const REVISION_BYTES: usize = REVISION_MAGIC.len() + 40; // hexadecimal Git object name
@@ -167,7 +168,8 @@ impl<'a> Call<'a> {
                         | FEATURE_ROM_UPDATE
                         | FEATURE_NORMAL_TRACE
                         | FEATURE_ERROR_REPORTING
-                        | FEATURE_NORMAL_IDENTITY,
+                        | FEATURE_NORMAL_IDENTITY
+                        | FEATURE_TRAFFIC_COUNTS,
                 ],
             ),
             (REQUEST, FIRMWARE_BUILD) if self.body.is_empty() => {

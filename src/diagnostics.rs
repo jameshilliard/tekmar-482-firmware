@@ -3,6 +3,7 @@
 use crate::tn4::PORT_COUNT;
 
 pub mod errors;
+pub mod traffic;
 
 pub const CAPTURE_BYTES: usize =
     (2 + PORT_COUNT) * size_of::<u32>() + PORT_COUNT * size_of::<u64>();

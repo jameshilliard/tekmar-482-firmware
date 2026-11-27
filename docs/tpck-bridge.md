@@ -50,7 +50,7 @@ the request body is empty. All integers are little endian.
 | --- | --- | --- |
 | 00000187 FirmwareRevision | Request, zero or two placeholder bytes | u16 numeric revision, 0 for this unnumbered custom image |
 | 0000018F ProtocolVersion | Request, zero or two placeholder bytes | u16 tHA protocol version, currently 3 |
-| 544BF001 BridgeCapabilities | Request | Four u8 values: extension wire version (2), current mode (0 Normal, 1 Raw), port count (5), feature flags (bit 0 bidirectional Raw, bit 1 ROM update, bit 2 Normal trace, bit 3 error reporting) |
+| 544BF001 BridgeCapabilities | Request | Four u8 values: version (2), mode (0 Normal, 1 Raw), port count (5), flags (bit 0 Raw, 1 ROM update, 2 Normal trace, 3 error reporting, 4 Normal identity read, 5 traffic counters). |
 | 544BF002 SetBridgeMode | Update, mode u8 | Echo mode: 0 Normal, 1 Raw. Busy during an inventory walk, a started transmission, an outstanding host send or a local ACK. Switching modes clears the Normal inventory; returning to Normal also clears the ACK mask. |
 | 544BF003 PortDrops | Request, port u8 | Port u8, valid records dropped u64, invalid records dropped u64. |
 | 544BF004 FirmwareBuild | Request | Build revision without a terminator: 40 lowercase hexadecimal digits or `unversioned` |
@@ -62,6 +62,8 @@ the request body is empty. All integers are little endian.
 | 544BF00A CaptureCounters | Request | Two timer readings in microseconds (u32), five edge counts (u64), five last capture ticks (u32); both port arrays in physical port order. |
 | 544BF00B NormalTrace | Request, empty; Update, port mask u8 | Normal only. Request returns the mask and five cumulative u64 trace-drop counts in port order. Update replaces the mask and echoes it; zero stops tracing. |
 | 544BF00C ErrorReporting | Request, Update, Report | Both modes. Read/replace the source mask, read one error counter, or receive changed counters (below). |
+| 544BF00D NormalIdentity | Request, port/subnet/node | Queues a read of identity block 00 in Normal mode. The native reply, not the gateway acknowledgement, identifies the device. |
+| 544BF00E TrafficCounts | Request | Read gateway-owned traffic totals or enumerate native paths, in either mode. See below. |
 
 Version 2 event counts start at zero at boot, survive mode changes and
 saturate at 2^64-1 instead of wrapping. Subtract snapshots from the same
@@ -82,10 +84,35 @@ Byte-exact frames (spaces separate fields, not transmitted bytes):
 ProtocolVersion request:   CA 07 06 01 8F010000 0000 9E 35
 ProtocolVersion response:  CA 07 06 04 8F010000 0300 A4 35
 BridgeCapabilities:        CA 05 06 01 01F04B54 9C 35
-Normal, all four features: CA 09 06 04 01F04B54 0200050F B9 35
+Normal, all six features:  CA 09 06 04 01F04B54 0200053F E9 35
 EnterFirmwareUpdate:       CA 05 06 00 05F04B54 9F 35
 Drained before handoff:    CA 05 06 03 05F04B54 A2 35
 ```
+
+## Traffic counters
+
+Counters run from boot without a host, a subscription, or a trace mask. They
+survive reconnects and mode switches, but not a reset. All counts are
+saturating little-endian u64. `counts` below is four such values in order:
+valid peer RX, gateway TX with link ACK, gateway TX completed without ACK,
+and other failed TX attempts. An arbitration retry counts as another attempt.
+TX ACK does not mean the device applied a command.
+
+| Request body | Response body (little endian) |
+| --- | --- |
+| Empty | Directory capacity and used entries (two u16). |
+| Port (u8) | Same port, counts, invalid peer RX, valid RX without a directory slot, TX without an attributed slot (three more u64). |
+| Index (u16) | Same index, path (port/subnet/node, three u8), counts. Indices are stable from zero up to but not including used. |
+| Path (three u8) | Same path, present (u8, 0 or 1), counts. An unknown path returns zeros without creating an entry. |
+
+An RX path is the valid native header's source with the low five node bits.
+Locally transmitted echoes are not received peer frames. Invalid frames are
+counted only per bus. A TX path is the destination of an explicitly
+single-node block request or block update. Broadcasts, multi-target requests
+and messages without a verified unicast destination remain in the port totals.
+Unsent requests do not count. Up to 256 distinct paths are retained without
+eviction; if the directory fills, bus totals and previously registered paths
+continue counting.
 
 ## Raw records
 

@@ -352,6 +352,9 @@ def run(path, ram, fast=False):
                     if phase == "isp-after-flag":
                         phase = "enter-update"
                         extension(10)
+                        extension(14)
+                        extension(14, b"\0")
+                        extension(14, bytes.fromhex("000018"))
                         for p in range(5):
                             extension(3, bytes([p]))
                     extension(5, update=True)
@@ -535,6 +538,19 @@ def run(path, ram, fast=False):
                 extension(12)
                 extension(12, bytes.fromhex("0584"))
                 extension(12, b"\x24", True)  # port 2 and gateway
+            elif method == 0x544bf00e:
+                body=data[5:]
+                assert data[0]==4
+                if len(body)==4:
+                    capacity,used=struct.unpack("<HH",body)
+                    assert 0<used<=capacity
+                elif len(body)==57:
+                    port,rx,acked,no_ack,failed,invalid_count,_,_=struct.unpack("<B7Q",body)
+                    assert port==0 and rx and acked and invalid_count
+                else:
+                    assert len(body)==36 and body[:4]==bytes.fromhex("00001801")
+                    assert sum(struct.unpack_from("<4Q",body,4))>0
+                actual.pop()
             elif method == 0x544bf00c:
                 if data[0] == 2:
                     source, code, ms, count = struct.unpack("<BBIQ", data[5:])
@@ -956,7 +972,7 @@ def run(path, ram, fast=False):
                      line_sends, expected_rx_acks - received_rx_acks, list(wire_log))
     assert actual[:4] == [
         (6, bytes.fromhex(x))
-        for x in ("048f0100000300", "0400000000", "0401f04b540200051f")
+        for x in ("048f0100000300", "0400000000", "0401f04b540200053f")
     ] + [
         (
             6,
