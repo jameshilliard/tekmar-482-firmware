@@ -4,6 +4,7 @@ use crate::tpck::raw::invalid;
 pub mod block;
 pub mod message;
 mod response;
+pub(crate) mod snowmelt;
 pub mod tx;
 pub use response::LinkResponse;
 

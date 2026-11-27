@@ -1,5 +1,5 @@
 //! Normal-mode inventory. Bus addresses, not product numbers, identify entries.
-use crate::tn4::{self, block, message};
+use crate::tn4::{self, block, message, snowmelt};
 use crate::trpc::{BridgeError, Call, GatewayVersion, Reply, method, service};
 mod air;
 mod broadcast;
@@ -329,6 +329,12 @@ impl Inventory {
             return Some(moved);
         }
         let required = match message {
+            snowmelt::REPORT
+                if snowmelt::status(data).is_some_and(|(_, pairs)| !pairs.is_empty()) =>
+            {
+                // Presence only. These words are not thermostat temperature, mode or demand.
+                0
+            }
             message::SETPOINT_STATUS => message::payload_bytes::SETPOINT_STATUS,
             message::FAN_DUCT_STATUS => message::payload_bytes::FAN_DUCT_STATUS,
             message::SLAB_STATUS => message::payload_bytes::SLAB_STATUS,

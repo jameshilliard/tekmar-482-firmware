@@ -225,6 +225,15 @@ def run(path, ram, fast=False, *, normal_reads=False):
             end = inject(bytes.fromhex("6e700609 00003f 010000 0100 00"), port=3, after=end)
             exchanges[3].append((bytes.fromhex("6d700007 0900 00 00008000"), None))
             inject(bytes.fromhex("65f00605 0000000000"), port=3, after=end)
+        elif phase == "snow-wait" and any(body == master for body, _ in line_sends[4]):
+            # A snow status is the first addressed evidence on port 4.
+            # Its sensor number is unrelated to header node 22.
+            phase = "snow-inventory"
+            exchanges[4].append((
+                bytes.fromhex("6d700007 0000 2b 00002000"),
+                bytes.fromhex("6e72b589 00003f 499d01 ca04 02"),
+            ))
+            inject(bytes.fromhex("17e2b585 0a0122 0005"), 4)
 
     def level(p, high, at):
         pin, t, ch, _ = PORTS[p]
@@ -338,7 +347,10 @@ def run(path, ram, fast=False, *, normal_reads=False):
                         assert p == 4 and ack_seen[p] and not exchange
                         jump_at = clock + 50_000
                     if device_reply:
-                        end = inject(device_reply)
+                        end = inject(device_reply, port=p)
+                        if phase == "snow-inventory":
+                            assert p == 4 and ack_seen[p]
+                            inventory_at = end
                         if phase in ("device-target", "setpoint-mode", "await-setpoint-setup"):
                             # Separate the background setup probe from the host's later transaction.
                             assert expected == bytes.fromhex("6d700007 2600 00 00008000")
@@ -448,7 +460,11 @@ def run(path, ram, fast=False, *, normal_reads=False):
                     gpio[0x14] = gpio[0x14] & ~button if down else gpio[0x14] | button
                 if inventory_at is not None and clock >= inventory_at:
                     inventory_at = None
-                    call(0x167, b"\0\0")
+                    if phase == "snow-inventory":
+                        call(0x167, bytes.fromhex("cf10"))
+                        call(0x197, bytes.fromhex("cf10"))
+                    else:
+                        call(0x167, b"\0\0")
                 if queued_send_at is not None and clock >= queued_send_at:
                     queued_send_at = None
                     exchanges[2].append((SCENE, None))
@@ -776,6 +792,11 @@ def run(path, ram, fast=False, *, normal_reads=False):
                 assert actual[-2] == (6, bytes.fromhex("04670100000100")), (actual[-7:], list(wire_log))
                 call(0x197, bytes.fromhex("010000000000"))
                 call(0x19f, bytes.fromhex("0100"))
+            elif method == 0x197 and phase == "snow-inventory":
+                assert actual[-2] == (6, bytes.fromhex("0467010000 cf10"))
+                assert data == bytes.fromhex("0497010000 cf10 499d0100")
+                phase = "normal-complete"
+                cpu.emu_stop()
             elif method == 0x19f:
                 assert actual[-2] == (6, bytes.fromhex("0497010000010082830100"))
                 assert data[5:] == struct.pack("<HI", 1, 29104)
@@ -799,8 +820,8 @@ def run(path, ram, fast=False, *, normal_reads=False):
                     assert len(burst_traces) == TRACE_BURST
                     for p in range(len(PORTS)):
                         assert [b for port, b in burst_traces if port == p] == [BODY, bytes.fromhex("12300001 ca")]
-                    phase = "normal-complete"
-                    cpu.emu_stop()
+                    phase = "snow-wait"
+                    line_progress()
                 elif normal_reads:
                     assert data[0] == 3 and (phase, data[5:]) in (("normal-block", b"\x08"), ("edit-guard", b"\x00"))
                 elif data[0] == 4 and phase == "trace-congested":
@@ -1234,7 +1255,7 @@ def run(path, ram, fast=False, *, normal_reads=False):
         assert boot_port_checked
         assert phase == "normal-complete" and not traces and not any(exchanges), (phase, actual[-8:])
         assert received_rx_acks == expected_rx_acks and observed_flags == expected_flags
-        print(f"ARM Normal: offline counters, addressed reads, multipart status, guarded writes, per-port announcements, silent peer; untouched stack {free} bytes")
+        print(f"ARM Normal: offline counters, addressed reads, multipart status, guarded writes, per-port announcements, silent peer, snow inventory; untouched stack {free} bytes")
         return
     assert entered, (clock, phase, [len(x) for x in exchanges], results, actual[-10:],
                      line_sends, expected_rx_acks - received_rx_acks, list(wire_log))

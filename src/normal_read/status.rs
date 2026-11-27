@@ -1,7 +1,7 @@
 //! Read-only 483 native status exchanges. A frame is forwarded in full, not rebuilt.
 use super::{TX_NOT_SENT, TX_PIN_UNAVAILABLE, outcome_byte};
 use crate::tn4::{
-    self, HEADER_BYTES, NODE_MASK, PAYLOAD_MASK,
+    self, HEADER_BYTES, NODE_MASK, PAYLOAD_MASK, snowmelt,
     tx::{Outcome, Request},
 };
 use crate::trpc::{Reply, method};
@@ -12,13 +12,6 @@ mod tests;
 const ANY_PEER: u8 = 0;
 const EXACT_PEER: u8 = 1;
 const ACCESS_QUERY: u8 = 1;
-const SNOW_ROLE_MASK: u8 = 7;
-const SNOW_NUMBER_STEP: u8 = 8;
-const ZONE: u8 = 1;
-const SENSOR: u8 = 2;
-const MAX_ZONES: u8 = 12;
-const MAX_SENSORS: u8 = 24;
-const SNOW_PAIR_BYTES: usize = 3;
 const IO_DISCOVERY_BYTES: usize = 13;
 const IO_VALUE_BYTES: usize = 6;
 const HUMIDITY_PREFIX: usize = tn4::message::payload_bytes::RH_REPORT_PREFIX;
@@ -28,7 +21,7 @@ const FRAME_EVENT: u8 = 0;
 #[repr(u16)]
 enum Kind {
     ZoneSync = 0x011,
-    Snow = 0x17f,
+    Snow = snowmelt::REQUEST as u16,
     IoChannel = 0x1f4,
     IoDiscovery = 0x1f6,
     Access = 0x200,
@@ -61,11 +54,7 @@ impl Kind {
                     (Snow, [addr, len, keys @ ..]) => {
                         !keys.is_empty()
                             && usize::from(*len) == keys.len()
-                            && match addr & SNOW_ROLE_MASK {
-                                ZONE => addr / SNOW_NUMBER_STEP < MAX_ZONES,
-                                SENSOR => addr / SNOW_NUMBER_STEP < MAX_SENSORS,
-                                _ => false,
-                            }
+                            && snowmelt::report_address(*addr).is_some()
                     }
                     (IoChannel, [_, _, _])
                     | (IoDiscovery, [_, _])
@@ -79,7 +68,7 @@ impl Kind {
     fn report(self) -> u32 {
         match self {
             Self::ZoneSync => tn4::message::ZONE_SYNC_ADJUSTMENT,
-            Self::Snow => 0x17e,
+            Self::Snow => snowmelt::REPORT,
             Self::IoChannel => 0x1f3,
             Self::IoDiscovery => 0x1f5,
             Self::Access => Self::Access as u32,
@@ -205,17 +194,14 @@ impl StatusRead {
     fn accepts(&mut self, data: &[u8]) -> bool {
         match self.kind {
             Kind::Snow => {
-                let [addr, count, tail @ ..] = data else {
+                let Some((address, pairs)) = snowmelt::status(data) else {
                     return false;
                 };
-                if *addr != self.args[0] + SNOW_NUMBER_STEP {
+                if Some(address) != snowmelt::report_address(self.args[0]) {
                     return false;
                 }
-                let Some(pairs) = tail.get(..usize::from(*count) * SNOW_PAIR_BYTES) else {
-                    return false;
-                };
                 let mut matched = false;
-                for pair in pairs.as_chunks::<SNOW_PAIR_BYTES>().0 {
+                for pair in pairs {
                     if self.wanted.has(pair[0]) {
                         matched = true;
                         self.covered += u16::from(self.seen.insert(pair[0]));

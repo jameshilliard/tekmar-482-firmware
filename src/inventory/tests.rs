@@ -85,6 +85,94 @@ fn address(reply: Reply) -> u16 {
 }
 
 #[test]
+fn snowmelt_status_establishes_presence_then_keeps_the_confirmed_identity_live() {
+    let mut inv = Inventory::new();
+    inv.set_reporting(true, 0);
+    let key = 4303u16.to_le_bytes(); // physical port 4, bus 3, header node 22
+    let zone = [0x61, 1, 0x1b, 0, 3]; // zone 12, not node 12
+    let sensor = [0xc2, 1, 0x22, 0x48, 6, 0xca]; // sensor 24 and a future byte
+    observe(&mut inv, 4, 0x2b, 22 | 32, 0x17e, &zone, 0);
+    assert_eq!(address(call(&mut inv, 0x167, 1, &key, 0).unwrap()), 4303);
+    assert_eq!(
+        call(&mut inv, 0x197, 1, &key, 0).unwrap().payload()[7..],
+        [0xff; 4]
+    );
+    assert_eq!(
+        inv.next_probe(4, Sample::from_seconds(0)).unwrap().body(),
+        [0x6d, 0x70, 0, 7, 0, 0, 0x2b, 0, 0, 0x20, 0]
+    );
+    observe(
+        &mut inv,
+        4,
+        0x2b,
+        22,
+        0x2e7,
+        &[0, 0, 0x3f, 0x49, 0x9d, 1, 0xca, 4, 2],
+        1,
+    );
+    assert_eq!(address(call(&mut inv, 0x167, 1, &[0, 0], 1).unwrap()), 4303);
+    assert_eq!(address(inv.walk_next().unwrap()), 0);
+    observe(&mut inv, 4, 0x2b, 22, 0x17e, &sensor, 140);
+    assert_eq!(
+        call(&mut inv, 0x197, 1, &key, 200).unwrap().payload()[7..],
+        105801u32.to_le_bytes()
+    );
+    assert_eq!(
+        call(&mut inv, 0x19f, 1, &key, 200).unwrap().payload()[7..],
+        122602u32.to_le_bytes()
+    );
+    assert_eq!(
+        call(&mut inv, 0x137, 1, &key, 200).unwrap().payload()[7..],
+        [0xff; 2]
+    );
+    assert!(!inv.has_reports() && probe(&mut inv, 200).is_none());
+    assert_eq!(
+        address(call(&mut inv, 0x167, 1, &key, 291).unwrap()),
+        u16::MAX
+    );
+    assert!(call(&mut inv, 0x197, 1, &key, 291).is_none());
+    observe(&mut inv, 4, 0x2b, 22, 0x17e, &zone, 292);
+    assert_eq!(
+        call(&mut inv, 0x197, 1, &key, 292).unwrap().payload()[7..],
+        [0xff; 4]
+    ); // Reidentify after loss of continuity.
+    assert!(inv.next_probe(4, Sample::from_seconds(292)).is_some());
+}
+
+#[test]
+fn snowmelt_liveness_rejects_bad_layout_and_nonlocal_header_sources() {
+    let mut inv = Inventory::new();
+    observe(&mut inv, 1, 0x13, 0, 0x3ff, &[], 0);
+    let valid = &[9, 1, 0x22, 0x48, 6];
+    for (subnet, node, bytes) in [
+        (0x13, 1, &[9, 2, 0x22, 0x48, 6][..]), // truncated second key
+        (0x13, 1, &[9, 0]),                    // no observation
+        (0x13, 1, &[1, 1, 0x22, 0x48, 6]),     // zero-based request address
+        (0x13, 1, &[0x69, 1, 0x22, 0x48, 6]),  // zone 13
+        (0x13, 1, &[0xca, 1, 0x22, 0x48, 6]),  // sensor 25
+        (0x13, 1, &[0x0b, 1, 0x22, 0x48, 6]),  // unknown role
+        (0x13, 0, valid),
+        (0x13, 31, valid),
+        (0x2b, 1, valid), // same decimal address, different full subnet
+    ] {
+        observe(&mut inv, 1, subnet, node, 0x17e, bytes, 0);
+    }
+    assert_eq!(address(call(&mut inv, 0x167, 1, &[0, 0], 0).unwrap()), 0);
+    assert!(probe(&mut inv, 0).is_none());
+    observe(&mut inv, 1, 0x13, 1, 0x17e, valid, 0);
+    observe(&mut inv, 1, 0x2b, 1, 0x17e, valid, 150);
+    observe(&mut inv, 2, 0x13, 1, 0x17e, valid, 150);
+    assert_eq!(
+        address(call(&mut inv, 0x167, 1, &1324u16.to_le_bytes(), 151).unwrap()),
+        u16::MAX
+    );
+    assert_eq!(
+        address(call(&mut inv, 0x167, 1, &2324u16.to_le_bytes(), 151).unwrap()),
+        2324
+    );
+}
+
+#[test]
 fn normal_identity_is_a_single_read_only_query_on_the_selected_line() {
     let mut inv = Inventory::new();
     assert!(!inv.line(1).identify(0x42, 0));

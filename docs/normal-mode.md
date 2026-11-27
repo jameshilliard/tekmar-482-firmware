@@ -244,11 +244,20 @@ clock frames; those remain available in Raw mode.
 
 ## Inventory and identity
 
-A valid status or block report from a thermostat node (1..24) on the port's
+A qualifying status or block report from an addressed node (1..24) on the port's
 subnet establishes presence. Preserve the physical port when converting to
 the decimal tHA address. A master subnet change invalidates the old port
 entries. Addressed devices age out after 150 seconds without qualifying
 traffic. A link ACK, a bus master or a group broadcast is not a thermostat.
+
+A native snowmelt status (17E) with a valid zone or sensor number and at
+least one complete declared key/value pair also establishes and renews
+presence. Use the header's subnet and node, not the configured zone or
+sensor number in the payload. This triggers the same addressed block-zero
+identity read as other qualifying traffic. A truncated frame, a node-zero
+or master-node report, or a report on another subnet cannot refresh that
+entry. Snowmelt status does not populate tHA thermostat readings. Use
+NormalStatusRead or Normal trace to read the snowmelt words themselves.
 
 Native 3E7 identifies the previous wire subnet and node in its payload
 and the new address in its header. Like J1196J, emit the serial report
