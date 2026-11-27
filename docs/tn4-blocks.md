@@ -16,6 +16,21 @@ byte with flags. A partial word remains raw. Unknown units, reserved flag
 bits and extension bytes are retained rather than assigned meanings.
 Layout support does not mean every product answers or accepts an update.
 
+To compare against trusted, locally extracted 483 software, run
+`python3 tests/compare_483.py <sw07-tn4-dir> <sw11-tn4-dir>` (the directories
+contain `message_types.rb`; Ruby 3 is needed). This is offline and uses no
+equipment. It checks message registrations, block IDs and indexed selectors,
+exercises every bit of the SW 11 indexed block readers and compares actual
+writer bytes with field edits. Matching bit positions alone does not
+establish the engineering unit or a particular device's capabilities.
+
+Two SW 11 indexed reader defects should **not** be copied: for block 08
+it reads the whole first or second byte for two fan fields declared as
+two bits, and for block 2B it ANDs instead of ORing the two halves of each
+hot-tub target. Use the low two bits for fan type and cool stage 2, and two
+little-endian words for the hot-tub wake/sleep table. The independent
+declarative layouts and the 2B write setters agree with these interpretations.
+
 ### Discovering identities
 
 Block 00 can select multiple nodes with a single read. The four-byte

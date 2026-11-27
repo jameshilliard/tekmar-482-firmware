@@ -782,6 +782,8 @@ class PayloadTests(unittest.TestCase):
                          (0x72, 0x1234, 0x5678, 0x9abc, 0xde))
 
     def test_setup_flags_masks_and_units(self):
+        self.assertEqual(decode(0x2e7, "0800 02 fe")["fan_ventilation_reserved"], 15)
+        self.assertEqual(decode(0x2e7, "8300 01 a7")["water_temperature_reserved"], 20)
         fan = decode(0x2e7, "0800 03 e439")
         self.assertEqual((fan["fan_operation_type"], fan["fan_heat_stage1"], fan["fan_heat_stage2"],
                           fan["fan_cool_stage1"], fan["fan_cool_stage2"], fan["ventilation_mode"]),
