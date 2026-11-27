@@ -22,6 +22,7 @@ check: image
 	RUSTC_BOOTSTRAP=1 cargo clippy --locked --release --target thumbv4t-none-eabi -Zbuild-std=core -- -D warnings
 	uv run --script tests/host.py
 	python3 tests/payload_test.py
+	python3 tests/edit_vectors.py
 	uv run --script tests/backup_test.py
 	uv run --script tests/smoke.py $(ELF).bin
 	uv run --script tests/smoke.py --fast $(ELF).bin

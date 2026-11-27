@@ -1,9 +1,9 @@
 //! Read-only 483 native status exchanges. A frame is forwarded in full, not rebuilt.
+use super::{TX_NOT_SENT, TX_PIN_UNAVAILABLE, outcome_byte};
 use crate::tn4::{
     self, HEADER_BYTES, NODE_MASK, PAYLOAD_MASK,
     tx::{Outcome, Request},
 };
-use crate::tpck::raw;
 use crate::trpc::{Reply, method};
 
 #[cfg(test)]
@@ -22,8 +22,6 @@ const SNOW_PAIR_BYTES: usize = 3;
 const IO_DISCOVERY_BYTES: usize = 13;
 const IO_VALUE_BYTES: usize = 6;
 const HUMIDITY_PREFIX: usize = tn4::message::payload_bytes::RH_REPORT_PREFIX;
-const TX_PIN_UNAVAILABLE: u8 = 0xfe;
-const TX_NOT_SENT: u8 = 0xff;
 const FRAME_EVENT: u8 = 0;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -183,14 +181,7 @@ impl StatusRead {
         if matches!(outcome, Outcome::ArbitrationLost) {
             return;
         }
-        self.tx = match outcome {
-            Outcome::Ack => raw::status::ACKNOWLEDGED,
-            Outcome::NoAck => raw::attempted::NO_ACK,
-            Outcome::EchoMismatch => raw::attempted::ECHO_MISMATCH,
-            Outcome::BadEnd => raw::attempted::BAD_END,
-            Outcome::Late => raw::attempted::MISSED_TIMING,
-            Outcome::ArbitrationLost => unreachable!(),
-        };
+        self.tx = outcome_byte(outcome);
         if self.queued() {
             self.phase = if matches!(outcome, Outcome::Ack | Outcome::NoAck) {
                 Phase::Listening

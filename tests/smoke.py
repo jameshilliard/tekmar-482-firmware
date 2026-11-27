@@ -21,6 +21,9 @@ from frames import Decoder, encode
 PORTS = [(4, 0, 1, 28), (11, 1, 1, 13), (6, 0, 2, 22), (10, 1, 0, 8), (2, 0, 0, 29)]
 BITS = "10001001000110000010000010000010000110100101000111000101111"
 BODY = bytes.fromhex("12300001a5")
+EDIT_KEY = bytes.fromhex("030018 0300 0000 07 03 010409 000409")
+EDIT_READ = bytes.fromhex("6d70000b 030000 00008000 00000000")
+EDIT_WRITE = bytes.fromhex("6df00007 0018 0300 000409")
 SCENE = bytes.fromhex("2ff00003 07e001")  # 483 scene 8, eight hours.
 RAW_SENDS = (SCENE, bytes.fromhex("21f00002 0401"), bytes.fromhex("31f00005 1ebf100607"),
              bytes.fromhex("01000003 000102"), bytes.fromhex("20000001 01"))
@@ -292,6 +295,7 @@ def run(path, ram, fast=False, *, normal_reads=False):
                         line_progress()
                         continue
                     if not exchange:
+                        assert wire != protected_bits(EDIT_WRITE) + "0" * tail, "unexpected duplicate or stale edit"
                         assert not raw_mode and not phase.startswith("line-") and phase != "cycle-read", (p, phase, wire)
                         drive_bits.clear()
                         continue
@@ -312,6 +316,9 @@ def run(path, ram, fast=False, *, normal_reads=False):
                         end = inject(bytes.fromhex("17e00045 090108 0102"), port=p)
                         end = inject(bytes.fromhex("17e00605 090108 35ca"), port=p, after=end)
                         inject(bytes.fromhex("17e00e06 0901ff 0405 7e"), port=p, after=end)
+                    elif phase in ("edit-guard", "edit-stale") and expected == EDIT_READ:
+                        other = 9 if phase == "edit-guard" else 10
+                        inject(bytes.fromhex("6e700606 0300 07 0104") + bytes([other]), port=p)
                     elif phase == "normal-silent":
                         assert p == 4 and ack_seen[p] and not exchange
                         jump_at = clock + 50_000
@@ -585,7 +592,7 @@ def run(path, ram, fast=False, *, normal_reads=False):
                     if data[0] == 4:
                         assert data[5:] == bytes.fromhex("040001 3412 0000")
                     else:
-                        assert data[0] == 2 and data[5:] == bytes([4,1])
+                        assert data[0] == 2 and data[5:] == bytes([4,1,0])
                         phase = "normal-complete"
                         cpu.emu_stop()
                 elif data[0] == 4:
@@ -595,8 +602,8 @@ def run(path, ram, fast=False, *, normal_reads=False):
                     extension(2, b"\x01", True)  # changing mode cannot abandon the read
                 else:
                     assert phase == "normal-block" and data[0] == 2 and data[5:7] == bytes([3,0])
-                    assert int.from_bytes(data[7:11], "little") > 0
-                    assert data[11:] == bytes.fromhex("6e700607 380003 f3 22 ca35")
+                    assert data[7] == 0 and int.from_bytes(data[8:12], "little") > 0
+                    assert data[12:] == bytes.fromhex("6e700607 380003 f3 22 ca35")
                     assert (6, bytes.fromhex("0406f04b54 0ff04b54 01")) in actual
                     assert (6, bytes.fromhex("0306f04b54 02f04b54 01")) in actual, (actual[-10:], list(wire_log))
                     phase = "normal-status"
@@ -615,6 +622,24 @@ def run(path, ram, fast=False, *, normal_reads=False):
                     assert [d[11:] for d in parts] == [bytes.fromhex(s) for s in ("17e00605 090108 35ca","17e00e06 0901ff 0405 7e")]
                     assert 0 < int.from_bytes(parts[0][7:11],"little") < int.from_bytes(parts[1][7:11],"little")
                     assert actual.count((6, bytes.fromhex("0406f04b54 0ff04b54 01"))) == 2
+                    phase = "edit-guard"
+                    exchanges[3].extend(((EDIT_READ, None), (EDIT_WRITE, None)))
+                    extension(17, EDIT_KEY)  # Request must never mutate.
+                    extension(17, EDIT_KEY, True)
+            elif method == 0x544bf011:
+                assert phase in ("edit-guard", "edit-stale")
+                if data[0] == 3:
+                    assert data[5:] == EDIT_KEY
+                    extension(17, EDIT_KEY, True)  # An overlapping edit cannot replace it.
+                elif phase == "edit-guard":
+                    assert data[0] == 2 and data[5:] == bytes([3,0,0,0])
+                    assert (6, bytes.fromhex("0406f04b54 11f04b54 02")) in actual
+                    assert (6, bytes.fromhex("0306f04b54 11f04b54 01")) in actual
+                    phase = "edit-stale"
+                    exchanges[3].append((EDIT_READ, None))
+                    extension(17, EDIT_KEY, True)
+                else:
+                    assert data[0] == 2 and data[5:] == bytes([3,1,0,255])
                     phase = "normal-silent"
                     exchanges[4].append((bytes.fromhex("6d70000b 3412 00 01000000 00000000"), None))
                     extension(15, bytes.fromhex("040001 3412 0000"))
@@ -1087,13 +1112,13 @@ def run(path, ram, fast=False, *, normal_reads=False):
         assert boot_port_checked
         assert phase == "normal-complete" and not traces and not any(exchanges), (phase, actual[-8:])
         assert received_rx_acks == expected_rx_acks and observed_flags == expected_flags
-        print(f"ARM Normal reads: offline counters, block selector, multipart status, cross-method busy, silent peer; untouched stack {free} bytes")
+        print(f"ARM Normal: offline counters, addressed reads, multipart status, guarded write/refusal, silent peer; untouched stack {free} bytes")
         return
     assert entered, (clock, phase, [len(x) for x in exchanges], results, actual[-10:],
                      line_sends, expected_rx_acks - received_rx_acks, list(wire_log))
     assert actual[:4] == [
         (6, bytes.fromhex(x))
-        for x in ("048f0100000300", "0400000000", "0401f04b54020005ff")
+        for x in ("048f0100000300", "0400000000", "0401f04b54020005bf01")
     ] + [
         (
             6,

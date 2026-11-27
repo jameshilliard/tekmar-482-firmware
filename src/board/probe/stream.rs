@@ -16,7 +16,7 @@ use tekmar_482_firmware::uptime::Uptime;
 use tekmar_482_firmware::{
     diagnostics,
     inventory::{AddressMove, Answer, BlockProbe, Broadcast, Inventory, LineProbe},
-    normal_read::ReadSlot,
+    normal_read::{ReadSlot, outcome_byte},
     tn4::{
         Frame, LinkResponse, Receiver, Trailer,
         tx::{Mode, Outcome, Request},
@@ -88,17 +88,6 @@ impl NormalTx {
     }
 }
 
-fn outcome_byte(result: Outcome) -> u8 {
-    match result {
-        Outcome::Ack => raw::status::ACKNOWLEDGED,
-        Outcome::NoAck => raw::attempted::NO_ACK,
-        Outcome::ArbitrationLost => raw::attempted::ARBITRATION_LOST,
-        Outcome::EchoMismatch => raw::attempted::ECHO_MISMATCH,
-        Outcome::BadEnd => raw::attempted::BAD_END,
-        Outcome::Late => raw::attempted::MISSED_TIMING,
-    }
-}
-
 pub async fn run(panel: &RefCell<Panel>) -> ! {
     #[cfg_attr(not(feature = "ram-trial"), unsafe(link_section = ".bss.inventory"))]
     static INVENTORY: static_cell::ConstStaticCell<Inventory> =
@@ -154,7 +143,10 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
         let now = TIMERS.map(|t| read(t + TC));
         if read_mask != 0 {
             for (port, read) in reads.iter_mut().enumerate() {
-                if read_mask & (1 << port) != 0 {
+                if read_mask & (1 << port) != 0
+                    && !(matches!(owner[port], NormalTx::HostRead)
+                        && sending[port].as_ref().is_some_and(Attempt::started))
+                {
                     read.expire(time.millis);
                 }
             }
@@ -430,7 +422,14 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                         trace::TX,
                         p,
                         time.millis,
-                        &[owner[p].trace_origin(), outcome_byte(result)],
+                        &[
+                            if matches!(owner[p], NormalTx::HostRead) && reads[p].writing() {
+                                trace::SETTING
+                            } else {
+                                owner[p].trace_origin()
+                            },
+                            outcome_byte(result),
+                        ],
                         attempt.body(),
                         errors,
                     );
@@ -438,6 +437,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                 if !raw
                     && result == Outcome::ArbitrationLost
                     && !matches!(owner[p], NormalTx::Setting)
+                    && !(matches!(owner[p], NormalTx::HostRead) && reads[p].writing())
                 {
                     attempt.yield_arbitration(t);
                     continue;
@@ -620,6 +620,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                                     method::NORMAL_TRACE
                                     | method::NORMAL_IDENTITY
                                     | method::NORMAL_BLOCK_READ
+                                    | method::NORMAL_BLOCK_EDIT
                                     | method::NORMAL_STATUS_READ,
                                     _,
                                     _,
@@ -627,6 +628,11 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                                 (
                                     method::NORMAL_BLOCK_READ | method::NORMAL_STATUS_READ,
                                     service::REQUEST,
+                                    [p @ 0..=LAST_PORT, key @ ..],
+                                )
+                                | (
+                                    method::NORMAL_BLOCK_EDIT,
+                                    service::UPDATE,
                                     [p @ 0..=LAST_PORT, key @ ..],
                                 ) => match ReadSlot::parse(call.method, key, time.millis) {
                                     Err(e) => call.error(e),
@@ -637,6 +643,13 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                                     }
                                     Ok(_) => call.error(BridgeError::Busy),
                                 },
+                                (
+                                    method::NORMAL_BLOCK_READ
+                                    | method::NORMAL_BLOCK_EDIT
+                                    | method::NORMAL_STATUS_READ,
+                                    _,
+                                    _,
+                                ) => call.error(BridgeError::InvalidRequest),
                                 (
                                     method::NORMAL_IDENTITY,
                                     service::REQUEST,

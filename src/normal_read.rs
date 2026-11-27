@@ -3,19 +3,37 @@ use crate::tn4::{
     self, HEADER_BYTES, MAX_BYTES, NODE_MASK, message,
     tx::{Outcome, Request},
 };
+use crate::tpck::raw;
 use crate::trpc::{BridgeError, Reply, method};
+mod edit;
 mod status;
+use edit::BlockEdit;
 use status::StatusRead;
 
 pub const WINDOW_MS: u32 = 10_000;
 const RESULT_PREFIX: usize = 2 + size_of::<u32>(); // port, status, observation time
-pub const MAX_RESULT: usize = RESULT_PREFIX + MAX_BYTES;
+const BLOCK_PREFIX: usize = RESULT_PREFIX + 1; // also includes the observed TX outcome
+pub const MAX_RESULT: usize = BLOCK_PREFIX + MAX_BYTES;
+const TX_PIN_UNAVAILABLE: u8 = 0xfe;
+const TX_NOT_SENT: u8 = 0xff;
+
+pub fn outcome_byte(result: Outcome) -> u8 {
+    match result {
+        Outcome::Ack => raw::status::ACKNOWLEDGED,
+        Outcome::NoAck => raw::attempted::NO_ACK,
+        Outcome::ArbitrationLost => raw::attempted::ARBITRATION_LOST,
+        Outcome::EchoMismatch => raw::attempted::ECHO_MISMATCH,
+        Outcome::BadEnd => raw::attempted::BAD_END,
+        Outcome::Late => raw::attempted::MISSED_TIMING,
+    }
+}
 
 // Block and status transactions share the physical port, not two independent send slots.
 #[repr(u8)]
 pub enum ReadSlot {
     Block(BlockRead),
     Status(StatusRead),
+    Edit(BlockEdit),
 }
 
 impl ReadSlot {
@@ -32,37 +50,48 @@ impl ReadSlot {
             method::NORMAL_STATUS_READ => StatusRead::parse(key, now)
                 .map(Self::Status)
                 .ok_or(BridgeError::InvalidRequest),
+            method::NORMAL_BLOCK_EDIT => BlockEdit::parse(key, now)
+                .map(Self::Edit)
+                .ok_or(BridgeError::InvalidRequest),
             _ => Err(BridgeError::InvalidRequest),
         }
+    }
+    pub fn writing(&self) -> bool {
+        matches!(self, Self::Edit(r) if r.writing())
     }
     pub fn queued(&self) -> bool {
         match self {
             Self::Block(r) => r.queued(),
             Self::Status(r) => r.queued(),
+            Self::Edit(r) => r.queued(),
         }
     }
     pub fn frame(&self, port: u8) -> Option<Request> {
         match self {
             Self::Block(r) => r.frame(port),
             Self::Status(r) => r.frame(port),
+            Self::Edit(r) => r.frame(port),
         }
     }
     pub fn sent(&mut self, outcome: Outcome) {
         match self {
             Self::Block(r) => r.sent(outcome),
             Self::Status(r) => r.sent(outcome),
+            Self::Edit(r) => r.sent(outcome),
         }
     }
     pub fn unavailable(&mut self) {
         match self {
             Self::Block(r) => r.unavailable(),
             Self::Status(r) => r.unavailable(),
+            Self::Edit(r) => r.unavailable(),
         }
     }
     pub fn expire(&mut self, now: u32) {
         match self {
             Self::Block(r) => r.expire(now),
             Self::Status(r) => r.expire(now),
+            Self::Edit(r) => r.expire(now),
         }
     }
     pub fn observe(
@@ -78,12 +107,17 @@ impl ReadSlot {
                 true
             }
             Self::Status(r) => r.observe(port, body, now, publish),
+            Self::Edit(r) => {
+                r.observe(body);
+                true
+            }
         }
     }
     pub fn take_result(&mut self, port: u8) -> Option<Reply> {
         match self {
             Self::Block(r) => r.take_result(port),
             Self::Status(r) => r.take_result(port),
+            Self::Edit(r) => r.take_result(port),
         }
     }
 }
@@ -173,6 +207,7 @@ pub struct BlockRead {
     stamp: u32,
     body: [u8; MAX_BYTES],
     len: u8,
+    tx: u8,
 }
 
 impl BlockRead {
@@ -188,6 +223,7 @@ impl BlockRead {
         stamp: 0,
         body: [0; MAX_BYTES],
         len: 0,
+        tx: 0, // Idle storage is zero-initialized; admission sets TX_NOT_SENT.
     };
     pub fn active(&self) -> bool {
         self.phase != Phase::Idle
@@ -202,6 +238,7 @@ impl BlockRead {
         self.query = query;
         self.stamp = now;
         self.len = 0;
+        self.tx = TX_NOT_SENT;
         self.phase = Phase::Queued;
         true
     }
@@ -210,6 +247,9 @@ impl BlockRead {
     }
     pub fn sent(&mut self, outcome: Outcome) {
         if self.queued() {
+            if outcome != Outcome::ArbitrationLost {
+                self.tx = outcome_byte(outcome);
+            }
             self.phase = match outcome {
                 Outcome::ArbitrationLost => Phase::Queued,
                 Outcome::Ack | Outcome::NoAck => Phase::Listening,
@@ -219,6 +259,7 @@ impl BlockRead {
     }
     pub fn unavailable(&mut self) {
         if self.queued() {
+            self.tx = TX_PIN_UNAVAILABLE;
             self.phase = Phase::Done(Status::PinUnavailable);
         }
     }
@@ -246,13 +287,14 @@ impl BlockRead {
         let mut data = [0; MAX_RESULT];
         data[0] = port;
         data[1] = status as u8;
+        data[2] = self.tx;
         let len = if status == Status::Report {
-            data[2..RESULT_PREFIX].copy_from_slice(&self.stamp.to_le_bytes());
+            data[3..BLOCK_PREFIX].copy_from_slice(&self.stamp.to_le_bytes());
             let len = usize::from(self.len);
-            data[RESULT_PREFIX..RESULT_PREFIX + len].copy_from_slice(&self.body[..len]);
-            RESULT_PREFIX + len
+            data[BLOCK_PREFIX..BLOCK_PREFIX + len].copy_from_slice(&self.body[..len]);
+            BLOCK_PREFIX + len
         } else {
-            2
+            3
         };
         Some(Reply::report(method::NORMAL_BLOCK_READ, &data[..len]))
     }

@@ -50,7 +50,7 @@ the request body is empty. All integers are little endian.
 | --- | --- | --- |
 | 00000187 FirmwareRevision | Request, zero or two placeholder bytes | u16 numeric revision, 0 for this unnumbered custom image |
 | 0000018F ProtocolVersion | Request, zero or two placeholder bytes | u16 tHA protocol version, currently 3 |
-| 544BF001 BridgeCapabilities | Request | Four u8 values: version (2), mode (0 Normal, 1 Raw), port count (5), flags (bit 0 Raw, 1 ROM update, 2 Normal trace, 3 error reporting, 4 Normal identity read, 5 traffic counters, 6 Normal block read, 7 Normal status read). |
+| 544BF001 BridgeCapabilities | Request | Three u8 values: version (2), mode (0 Normal, 1 Raw), port count (5). Remaining bytes are one little-endian feature bitmap: bit 0 Raw, 1 ROM update, 2 Normal trace, 3 error reporting, 4 Normal identity read, 5 traffic counters, 7 Normal status read, 8 Normal block transfers. Bit 6 is retired. |
 | 544BF002 SetBridgeMode | Update, mode u8 | Echo mode: 0 Normal, 1 Raw. Busy during an inventory walk, a started transmission, an outstanding host send or a local ACK. Switching modes clears the Normal inventory; returning to Normal also clears the ACK mask. |
 | 544BF003 PortDrops | Request, port u8 | Port u8, valid records dropped u64, invalid records dropped u64. |
 | 544BF004 FirmwareBuild | Request | Build revision without a terminator: 40 lowercase hexadecimal digits or `unversioned` |
@@ -66,6 +66,7 @@ the request body is empty. All integers are little endian.
 | 544BF00E TrafficCounts | Request | Read gateway-owned traffic totals or enumerate native paths, in either mode. See below. |
 | 544BF00F NormalBlockRead | Request, Report | Read a block on one physical port and receive the matching native frame on the control channel. Normal only. |
 | 544BF010 NormalStatusRead | Request, Report | Solicit native status, including multipart replies, without changing mode or trace configuration. |
+| 544BF011 NormalBlockEdit | Update, Report | Compare an addressed block with the host's baseline and send at most one native block update. Does not select Raw mode. |
 
 Version 2 event counts start at zero at boot, survive mode changes and
 saturate at 2^64-1 instead of wrapping. Subtract snapshots from the same
@@ -109,9 +110,10 @@ guarantee the line becomes available before the ten-second gateway deadline.
 
 Each admitted read produces exactly one Report on the same method, via the
 control FIFO independently of trace and report subscriptions. On success its
-body is `port:u8 00 gateway_ms:u32 native_header_and_payload`. On failure
-it is exactly `port:u8 status:u8`: 1 deadline expired, 2 TX pin unavailable,
-3 link fault. No response packet or temperature is synthesized. An ACK or
+body is `port:u8 00 tx:u8 gateway_ms:u32 native_header_and_payload`. On failure
+it is exactly `port:u8 status:u8 tx:u8`: 1 deadline expired, 2 TX pin unavailable,
+3 link fault. TX records the actual request outcome using the codes below.
+No response packet or temperature is synthesized. An ACK or
 missing ACK by itself is not decisive: after transmission the receiver waits
 for a valid on-time `2E7` from that subnet/node, with the requested block,
 an intelligible support mask and, if indexed, the supported selector.
@@ -124,6 +126,38 @@ in UART order, not when a host coroutine resumes. After a lost or cancelled
 admission, an inline capabilities request fences earlier acceptance replies;
 it does not cancel an accepted read. Raw mode and ROM handoff cannot abandon
 an outstanding read. Timeouts never cause a retry after a completed frame.
+
+## Guarded block edits
+
+When feature bit 8 is present, send **Update** `544BF011` with the seven
+NormalBlockRead selector bytes, followed by `support:u8 old_len:u8
+old_fields[old_len] new_fields[remaining]`. Fields are positional. Use the
+support mask and all old bytes from the addressed peer, and a documented
+[block writer](tn4-blocks.md). The gateway rejects read-only blocks, wrong
+lengths or selectors, changes to unsupported bytes, and no-op proposals.
+Block 0F can extend five old bytes with its prescribed zero; 2E can have
+three or four words. 5A permits only a runtime reset to zero.
+
+Response:Update echoes the request on admission. The port shares its slot
+and deadline with Normal reads. The gateway sends an addressed `2D7`,
+waits for a fresh matching `2E7`, and compares the support mask and **every
+baseline byte**, including siblings the user did not edit. A mismatch, even
+one observed while waiting to acquire the line for the update, retires the
+transaction without writing. An exact match permits one class-1, source-zero
+`2DF` addressed to that node. Unlike a read, a write that loses arbitration
+is **not** retried. Once the write is driving the line, its actual completion
+is reported even if the admission deadline elapses. This is not a lock on the
+remote device: a physical edit can still race the final transmission.
+
+The one terminal Report is `port:u8 end:u8 guard_tx:u8 update_tx:u8`.
+End 0 means update attempted (not applied), 1 baseline changed, 2 expired
+before the update, 3 guard transmission failed, 4 update TX pin unavailable.
+TX: 00 ACK, 01 no ACK, 02 arbitration lost, 03 echo mismatch, 04 bad end,
+05 missed timing, FE pin unavailable, FF no completed attempt. For ends 1,
+2 and 3, update_tx is FF. Admission, a link ACK, and the guard's matching
+report **are not write confirmation**. After a possibly delivered update,
+start a separate NormalBlockRead and compare the edited fields. Do not
+automatically resubmit an edit after a host timeout.
 
 ## Normal status reads
 

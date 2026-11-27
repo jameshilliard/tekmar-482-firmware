@@ -44,10 +44,10 @@ fn fresh_peer_only_after_transmit_with_selector_and_valid_layout() {
     assert!(!slot.admit(q, 57));
     let result = slot.take_result(2).unwrap();
     assert_eq!(
-        &result.payload()[..11],
-        &[2, 15, 0xf0, 0x4b, 0x54, 2, 0, 56, 0, 0, 0]
+        &result.payload()[..12],
+        &[2, 15, 0xf0, 0x4b, 0x54, 2, 0, 1, 56, 0, 0, 0]
     );
-    assert_eq!(&result.payload()[11..], &REPLY);
+    assert_eq!(&result.payload()[12..], &REPLY);
     assert!(!slot.active() && slot.take_result(2).is_none());
 }
 
@@ -72,18 +72,116 @@ fn expiry_failures_and_maximum_extension_never_produce_cached_data() {
         assert!(slot.take_result(0).is_none());
         slot.expire(WINDOW_MS - 4);
         slot.sent(Outcome::Ack);
-        assert_eq!(&slot.take_result(0).unwrap().payload()[5..], &[0, 1]);
+        assert_eq!(
+            &slot.take_result(0).unwrap().payload()[5..],
+            &[0, 1, outcome.map_or(0xff, outcome_byte)]
+        );
     }
     assert!(slot.admit(q, 0));
     slot.unavailable();
-    assert_eq!(&slot.take_result(0).unwrap().payload()[5..], &[0, 2]);
+    assert_eq!(&slot.take_result(0).unwrap().payload()[5..], &[0, 2, 0xfe]);
     assert!(slot.admit(q, 0));
     slot.sent(Outcome::Late);
-    assert_eq!(&slot.take_result(0).unwrap().payload()[5..], &[0, 3]);
+    assert_eq!(&slot.take_result(0).unwrap().payload()[5..], &[0, 3, 5]);
     let mut max = [0xca; MAX_BYTES];
     max[..7].copy_from_slice(&[0x6e, 0x71, 0x20, 0x7f, 0xcd, 0xab, 0xff]);
     assert!(slot.admit(q, 0));
     slot.sent(Outcome::Ack);
     slot.observe(&max, 9);
-    assert_eq!(&slot.take_result(4).unwrap().payload()[11..], &max);
+    assert_eq!(&slot.take_result(4).unwrap().payload()[12..], &max);
+}
+
+const EDIT: [u8; 14] = [0x12, 1, 3, 0, 0, 0, 7, 3, 1, 4, 9, 0, 4, 9];
+const MODE: [u8; 10] = [0x6e, 0x71, 0x28, 0x46, 3, 0, 7, 1, 4, 9];
+
+#[test]
+fn guarded_edit_checks_the_entire_baseline_and_never_retries_a_write() {
+    for (outcome, code) in [
+        (Outcome::Ack, 0),
+        (Outcome::NoAck, 1),
+        (Outcome::ArbitrationLost, 2),
+        (Outcome::EchoMismatch, 3),
+        (Outcome::Late, 5),
+    ] {
+        let mut edit = BlockEdit::parse(&EDIT, 0).unwrap();
+        edit.observe(&MODE);
+        assert!(!edit.writing());
+        edit.sent(Outcome::ArbitrationLost);
+        assert_eq!(
+            edit.frame(2),
+            Request::new(2, &[0x6d, 0x70, 0, 11, 3, 0, 0x12, 1, 0, 0, 0, 0, 0, 0, 0])
+        );
+        edit.sent(Outcome::NoAck);
+        edit.observe(&MODE);
+        assert!(edit.writing());
+        assert_eq!(
+            edit.frame(2),
+            Request::new(2, &[0x6d, 0xf0, 0, 7, 0x12, 1, 3, 0, 0, 4, 9])
+        );
+        edit.sent(outcome);
+        assert!(edit.frame(2).is_none());
+        assert_eq!(
+            &edit.take_result(2).unwrap().payload()[5..],
+            &[2, 0, 1, code]
+        );
+        assert!(edit.take_result(2).is_none());
+    }
+    for already_queued in [false, true] {
+        let mut edit = BlockEdit::parse(&EDIT, 0).unwrap();
+        edit.sent(Outcome::Ack);
+        if already_queued {
+            edit.observe(&MODE);
+        }
+        let mut changed = MODE;
+        changed[9] ^= 1; // An untouched sibling changed: do not overwrite it.
+        edit.observe(&changed);
+        assert!(edit.frame(0).is_none());
+        assert_eq!(
+            &edit.take_result(0).unwrap().payload()[5..],
+            &[0, 1, 0, 0xff]
+        );
+    }
+}
+
+#[test]
+fn malformed_unsupported_or_wrong_instance_edits_do_not_reach_the_bus() {
+    for (offset, value) in [
+        (1, 0),
+        (1, 32),
+        (2, 0),
+        (4, 7),
+        (6, 6),
+        (6, 0x87),
+        (7, 2),
+        (7, 4),
+        (11, 1),
+    ] {
+        let mut bad = EDIT;
+        bad[offset] = value;
+        assert!(BlockEdit::parse(&bad, 0).is_none(), "{offset}");
+    }
+    let hours = [0x12, 1, 0x44, 0, 0xff, 0x81, 7, 3, 0x81, 2, 1, 0x81, 0, 0];
+    assert!(BlockEdit::parse(&hours, 0).is_some());
+    let mut wrong = hours;
+    wrong[11] = 1;
+    assert!(BlockEdit::parse(&wrong, 0).is_none());
+    let mut edit = BlockEdit::parse(&hours, 0).unwrap();
+    edit.sent(Outcome::Ack);
+    let mut frame = [0x6e, 0x71, 0x28, 0x46, 0x44, 0, 7, 1, 2, 1];
+    edit.observe(&frame);
+    assert!(!edit.writing());
+    frame[7] = 0x81;
+    edit.observe(&frame);
+    assert!(edit.writing());
+    edit.expire(WINDOW_MS);
+    assert_eq!(
+        &edit.take_result(2).unwrap().payload()[5..],
+        &[2, 2, 0, 0xff]
+    );
+    assert_eq!(
+        (0..=u16::MAX)
+            .filter(|&b| edit::layout(b).is_some())
+            .count(),
+        55 // 54 explicit writers, and the documented zero-only tank runtime reset
+    );
 }

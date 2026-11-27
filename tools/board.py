@@ -147,7 +147,7 @@ async def identify(port):
             await port.write(preamble)
             await asyncio.sleep(0.08)
     caps = await call(port, 1)
-    if len(caps) != 4 or caps[1] > 1 or caps[2] != 5:
+    if len(caps) < 4 or caps[1] > 1 or caps[2] != 5:
         raise RuntimeError("missing binary bridge capabilities")
     if caps[0] != WIRE_VERSION:
         raise RuntimeError(f"unsupported custom bridge wire version {caps[0]}; expected {WIRE_VERSION}")
