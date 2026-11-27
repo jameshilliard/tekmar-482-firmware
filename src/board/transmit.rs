@@ -13,6 +13,14 @@ const TX_PINS: [usize; PORT_COUNT] = [28, 13, 22, 8, 29];
 pub(super) struct Attempt {
     sender: Sender,
     pin: LineDriver,
+    completion: Option<Completion>,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct Completion {
+    pub outcome: Outcome,
+    pub fault_at: Option<u32>,
+    pub sampled_at: u32,
 }
 
 pub(super) struct LineDriver {
@@ -85,6 +93,10 @@ impl Attempt {
         self.sender.deadline()
     }
 
+    pub(super) fn completion(&self) -> Option<Completion> {
+        self.completion
+    }
+
     pub(super) fn respond(&mut self, dominant: bool) {
         debug_assert!(!self.started());
         if dominant {
@@ -105,27 +117,35 @@ impl Attempt {
         Some(Self {
             pin: LineDriver::claim(request.port, rx_pin, errors, ms)?,
             sender: Sender::new(request, now, mode),
+            completion: None,
         })
     }
 
     pub(super) fn yield_arbitration(&mut self, now: u32) {
-        self.pin.release();
         let reset = self.sender.retry_arbitration(now);
         debug_assert!(reset);
+        self.completion = None;
     }
 
-    pub(super) fn poll(&mut self, now: u32, may_start: bool) -> Option<(Outcome, Option<u32>)> {
-        if !may_start && self.sender.hold_if_waiting(now) {
-            return None;
+    pub(super) fn poll(&mut self, now: u32, may_start: bool) {
+        if self.completion.is_some() || (!may_start && self.sender.hold_if_waiting(now)) {
+            return;
         }
-        match self.sender.poll(now, read(PIN) & self.pin.rx != 0) {
+        let (outcome, fault_at) = match self.sender.poll(now, read(PIN) & self.pin.rx != 0) {
             Action::Drive(high) => {
                 self.pin.drive(high);
-                None
+                return;
             }
-            Action::Finish(outcome) => Some((outcome, None)),
-            Action::Fault { outcome, next_bit } => Some((outcome, Some(next_bit))),
-            Action::None => None,
-        }
+            Action::Finish(outcome) => (outcome, None),
+            Action::Fault { outcome, next_bit } => (outcome, Some(next_bit)),
+            Action::None => return,
+        };
+        // Release immediately; trace ordering must not hold the physical pin.
+        self.pin.release();
+        self.completion = Some(Completion {
+            outcome,
+            fault_at,
+            sampled_at: now,
+        });
     }
 }

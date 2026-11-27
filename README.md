@@ -64,6 +64,13 @@ spins and streaming yields after each bounded service pass. Link ACK
 slots and transmit edges are driven from the capture timers, not from
 Embassy task delays.
 
+The bridge snapshots completed frames from all five receivers before
+running the inventory handlers. Active transmitters are serviced after
+capture and between frame handlers; they release the line immediately on
+completion. The completion result is published after older receive records.
+New frames still start later in the pass. In Normal mode, received reports
+and address changes are applied before a queued transmission can start.
+
 `make check-ram` optionally builds and emulates an SRAM-linked image at
 `0x40001000` while the firmware fits its 24 KiB region. This is not a CI or
 release requirement. `make ram-trial` only builds it. Its binary is under

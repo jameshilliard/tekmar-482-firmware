@@ -7,7 +7,7 @@ use super::{CCR, Capture, CaptureInput, INPUTS, IR, TC, TIMERS, next_edge_flags,
 use core::cell::RefCell;
 use tekmar_482_firmware::diagnostics::errors::{ALL_SOURCES, ErrorBook, HostError, LineError};
 use tekmar_482_firmware::diagnostics::timing::LinkTiming;
-use tekmar_482_firmware::tn4::{ALL_PORTS_MASK, LAST_PORT, PORT_COUNT};
+use tekmar_482_firmware::tn4::{ALL_PORTS_MASK, LAST_PORT, MAX_BYTES, PORT_COUNT};
 use tekmar_482_firmware::tpck::{raw, trace};
 const MOVE_QUEUE_CAPACITY: usize = 128;
 const NORMAL_MODE: u8 = 0;
@@ -67,6 +67,35 @@ impl Receivers {
         }
     }
 }
+
+struct CapturedFrame {
+    bytes: [u8; MAX_BYTES],
+    len: u8,
+    flags: u8,
+    observed: bool,
+}
+
+impl CapturedFrame {
+    const EMPTY: Self = Self {
+        bytes: [0; MAX_BYTES],
+        len: 0,
+        flags: 0,
+        observed: false,
+    };
+
+    fn save(&mut self, frame: Frame<'_>) {
+        self.observed = true;
+        if matches!(frame.trailer, Trailer::Ack | Trailer::NoAck) {
+            // One hardware capture edge per line cannot delimit two valid frames.
+            debug_assert_eq!(self.len, 0);
+            self.bytes[..frame.bytes.len()].copy_from_slice(frame.bytes);
+            self.len = frame.bytes.len() as u8;
+            self.flags = (u8::from(frame.trailer == Trailer::Ack) * trace::ACK)
+                | (u8::from(frame.early_start) * trace::EARLY_START);
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum NormalTx {
     Idle,
@@ -86,6 +115,44 @@ impl NormalTx {
             Self::Probe(_) => trace::PROBE,
             Self::HostOperation => operation.trace_origin(),
             Self::Idle => unreachable!(),
+        }
+    }
+}
+
+fn poll_attempt(
+    attempt: &mut Attempt,
+    port: usize,
+    may_start: bool,
+    ms: u32,
+    timing: &mut LinkTiming,
+) {
+    let at = read(TIMERS[INPUTS[port].timer] + TC);
+    let deadline = attempt.deadline();
+    attempt.poll(at, may_start);
+    if let Some(due) = deadline {
+        let missed = attempt
+            .completion()
+            .is_some_and(|tx| tx.outcome == Outcome::Late);
+        timing.poll_transmit(port, at, missed.then_some(due), ms);
+    } else if attempt.started() && attempt.completion().is_none() {
+        timing.start_transmit(port, at);
+    }
+}
+
+fn poll_started(
+    sending: &mut [Option<Attempt>; PORT_COUNT],
+    response: &[LinkResponse; PORT_COUNT],
+    ms: u32,
+    timing: &mut LinkTiming,
+) {
+    // A started sender owns the pin. Do not let this pass start a queued
+    // send or consume the outcome before earlier RX records are published.
+    for (port, entry) in sending.iter_mut().enumerate() {
+        if let Some(attempt) = entry
+            && attempt.deadline().is_some()
+            && !response[port].busy()
+        {
+            poll_attempt(attempt, port, false, ms, timing);
         }
     }
 }
@@ -116,6 +183,9 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
     let mut stuck = [false; PORT_COUNT];
     inventory.set_reporting(panel.borrow().reporting_at_boot(), 0);
     let mut bus = Receivers::start();
+    static RECEIVED: static_cell::ConstStaticCell<[CapturedFrame; PORT_COUNT]> =
+        static_cell::ConstStaticCell::new([const { CapturedFrame::EMPTY }; PORT_COUNT]);
+    let received = RECEIVED.take();
     let mut decoder = tpck::Decoder::default();
     let out = Output::take();
     let mut baud = Acquisition::default();
@@ -140,11 +210,13 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
         timing.begin_pass(us);
         let time = uptime.sample(us);
         let seconds = time.seconds;
+        let now = TIMERS.map(|t| read(t + TC));
+        bus.poll(now, |p, frame| received[p].save(frame));
+        poll_started(sending, &response, time.millis, &mut timing);
         if !raw && !reboot && last_service != Some(seconds) {
             last_service = Some(seconds);
             inventory.tick(seconds);
         }
-        let now = TIMERS.map(|t| read(t + TC));
         if read_mask != 0 {
             for (port, read) in reads.iter_mut().enumerate() {
                 if read_mask & (1 << port) != 0
@@ -155,21 +227,26 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                 }
             }
         }
-        bus.poll(now, |p, frame| {
+        for (p, frame) in received.iter_mut().enumerate() {
+            if !core::mem::take(&mut frame.observed) {
+                continue;
+            }
             panel.borrow_mut().observe(p);
-            if !matches!(frame.trailer, Trailer::Ack | Trailer::NoAck) {
-                return;
+            let len = usize::from(core::mem::take(&mut frame.len));
+            if len == 0 {
+                continue;
             }
+            let body = &frame.bytes[..len];
             if !sending[p].as_ref().is_some_and(Attempt::started) {
-                traffic.received(p, frame.bytes);
+                traffic.received(p, body);
             }
-            if frame.trailer == Trailer::NoAck {
+            if frame.flags & trace::ACK == 0 {
                 errors.line(p, LineError::RxNoAck, time.millis);
             }
             if raw {
                 out.capture(
                     Kind::Rx(p as u8),
-                    &[&[raw::RX, p as u8], &time.millis.to_le_bytes(), frame.bytes],
+                    &[&[raw::RX, p as u8], &time.millis.to_le_bytes(), body],
                     time.millis,
                     errors,
                 );
@@ -179,13 +256,11 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                 && !sending[p].as_ref().is_some_and(Attempt::started)
             {
                 if trace_mask & (1 << p) != 0 {
-                    let flags = (u8::from(frame.trailer == Trailer::Ack) * trace::ACK)
-                        | (u8::from(frame.early_start) * trace::EARLY_START);
-                    out.trace(trace::RX, p, time.millis, &[flags], frame.bytes, errors);
+                    out.trace(trace::RX, p, time.millis, &[frame.flags], body, errors);
                 }
-                if !frame.early_start {
+                if frame.flags & trace::EARLY_START == 0 {
                     if read_mask & (1 << p) != 0
-                        && !reads[p].observe(p as u8, frame.bytes, time.millis, |part| {
+                        && !reads[p].observe(p as u8, body, time.millis, |part| {
                             if !out.can_receive() {
                                 return false;
                             }
@@ -195,7 +270,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                     {
                         errors.line(p, LineError::NativeReadDrop, time.millis);
                     }
-                    if let Some(moved) = inventory.observe(p, frame.bytes, seconds) {
+                    if let Some(moved) = inventory.observe(p, body, seconds) {
                         if moves.is_full() {
                             moves.pop_front();
                             errors.host(HostError::AddressNoticeDrop, time.millis);
@@ -204,7 +279,10 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                     }
                 }
             }
-        });
+            // Dispatch can queue a full reply or update many devices. Do not
+            // accumulate that work across lines before servicing the pins.
+            poll_started(sending, &response, time.millis, &mut timing);
+        }
         timing.end_receive(crate::board::panel::now());
         for p in 0..PORT_COUNT {
             let listening = !reboot && !sending[p].as_ref().is_some_and(Attempt::started);
@@ -410,23 +488,14 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                     bus.rx[p].verify_response_drive();
                 }
             }
-            if !response[p].busy()
-                && let Some(attempt) = sending[p].as_mut()
-            {
-                // Scheduling requests and queueing replies above can consume a
-                // substantial part of a half-bit. Check the pin with fresh time.
-                let at = read(counter);
-                let deadline = attempt.deadline();
-                let result = attempt.poll(at, may_start);
-                if let Some(due) = deadline {
-                    let missed = result.is_some_and(|(outcome, _)| outcome == Outcome::Late);
-                    timing.poll_transmit(p, at, missed.then_some(due), time.millis);
-                } else if attempt.started() {
-                    timing.start_transmit(p, at);
+            if let Some(attempt) = sending[p].as_mut() {
+                if !response[p].busy() && attempt.completion().is_none() {
+                    poll_attempt(attempt, p, may_start, time.millis, &mut timing);
                 }
-                let Some((result, fault_at)) = result else {
+                let Some(completion) = attempt.completion() else {
                     continue;
                 };
+                let result = completion.outcome;
                 traffic.transmitted(p, attempt.body(), result);
                 if let Some(code) = LineError::from_outcome(result) {
                     errors.line(p, code, time.millis);
@@ -446,12 +515,12 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                     && !matches!(owner[p], NormalTx::Setting)
                     && !(matches!(owner[p], NormalTx::HostOperation) && reads[p].single_attempt())
                 {
-                    attempt.yield_arbitration(at);
+                    attempt.yield_arbitration(completion.sampled_at);
                     continue;
                 }
                 sending[p] = None;
                 if !raw {
-                    if let Some(at) = fault_at {
+                    if let Some(at) = completion.fault_at {
                         response[p].recover(&mut bus.rx[p], at);
                     }
                     inventory.line(p).sent(result);
