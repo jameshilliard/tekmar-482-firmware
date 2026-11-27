@@ -142,13 +142,31 @@ The 483 SW 11 device, timer and reset-control models give these read hints:
   not the enabled mask or a count. For tank pump hours use `5B`.
 - For reset-control bus counters (`48/49`), SW 11 uses water bus minus one,
   not the bridge's physical port. Water bus zero supplies no such index.
+  The base 483 device model does not enumerate ports for these blocks.
+  For other models, including the 654, use a selector from an actual
+  report or one explicitly supplied by the caller, not an assumed zero.
 - The mix/heat pump availability masks (`50/97`) and matching runtime IDs
   (`4D/98`) likewise provide candidate pump indices. The returned selector
   and support mask confirm what the device actually supplied.
 
-When no enumeration is known, zero is a useful first probe, not a maximum.
+For other indexed blocks without an enumeration, zero is a first probe,
+not a maximum.
 Keep other selectors actually seen from that device. A present zero
 availability mask advertises no instances; a missing mask is unknown.
+
+### Device link counters
+
+These addressed registers are independent of the 482's gateway lifetime
+counters. `48` reports a device-local port ID followed by seven u8 counts:
+stuffing, CRC, missing CRC delimiter, missing ACK, missing ACK delimiter,
+missing EOF and dominant bit. `49` reports a port ID followed by four u8
+counts: local busy, remote busy, lost arbitration and errors/events.
+Keep the receiving gateway port and the reported port ID separate.
+The SW 11 declarative registry also defines `62` as a little-endian u32
+received-message count; no model read table establishes that a device
+supports it. Preserve the support mask and raw counter values. Neither the
+reset/wrap behavior nor the use of these registers on a particular model
+is implied by the field layouts. No writes are defined for these blocks.
 
 ## Addressed Writes
 
