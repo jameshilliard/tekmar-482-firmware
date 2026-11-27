@@ -207,6 +207,14 @@ flushes or send deadlines. A host read timeout does not establish whether
 a frame was sent. Even a link ACK needs an application-level report or
 readback to confirm that a setting changed.
 
+On the same port, a peer frame received while the send is still waiting
+for the bus appears before TxResult. It remains valid capture data, but
+cannot answer that request. For a completed transmission the gateway
+queues TxResult before a subsequent peer reply. Arm the application
+collector at that wire record (ACK or no ACK), not when the sending
+coroutine gets CPU time. A single serial read may contain both records.
+This orders observations; the native bus does not tag a solicited reply.
+
 ## Normal-mode trace
 
 This is a tap on Normal traffic, not a third operating mode. The gateway
@@ -221,7 +229,7 @@ u8, gateway uptime in ms u32 (little endian, wraps). After the prefix:
 | Event | Data | Meaning |
 | --- | --- | --- |
 | 00 Rx | flags u8, complete native body | Peer frame; bit 0 means link ACK observed, bit 1 early start (not passed to the Normal inventory). Gateway TX echo is excluded. |
-| 01 Tx | origin u8, outcome u8, intended native body | One gateway attempt at completion, including an arbitration loss before a retry. Origins: 0 setting transaction, 1 broadcast, 2 line discovery, 3 background block read. Outcome 0 link ACK, 1 no ACK, 2 arbitration lost, 3 echo mismatch, 4 bad end, 5 missed timing. A failed attempt need not have put the complete body on the bus. |
+| 01 Tx | origin u8, outcome u8, intended native body | One gateway attempt at completion, including an arbitration loss before a retry. Origins: 0 setting transaction, 1 broadcast, 2 line discovery, 3 native read (background or explicit). Outcome 0 link ACK, 1 no ACK, 2 arbitration lost, 3 echo mismatch, 4 bad end, 5 missed timing. A failed attempt need not have put the complete body on the bus. |
 | 04 RxInvalid | reason u8, bit count u16, captured bits | Same reason and bit packing as Raw RxInvalid. Not a valid peer update. |
 
 Trace records preserve observation order with respect to each other.

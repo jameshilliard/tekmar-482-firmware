@@ -519,6 +519,8 @@ def run(path, ram, fast=False, *, normal_reads=False):
     def read_event(event):
         nonlocal phase, queued_send_at
         assert event not in read_events
+        if event == "report":
+            assert "result" in read_events, ("peer reply overtook TxResult", reads[0])
         read_events.add(event)
         if read_events == {"result", "report"}:
             read_events.clear()
@@ -533,6 +535,8 @@ def run(path, ram, fast=False, *, normal_reads=False):
 
     def queued_event(event):
         assert event not in queued_events
+        if event == "no-peer-ack":
+            assert BODY in queued_events, "Rx from before bus acquisition must precede TxResult"
         queued_events.add(event)
         if queued_events == {BODY, SCENE, "no-peer-ack"}:
             telemetry_capture()

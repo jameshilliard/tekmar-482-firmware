@@ -222,7 +222,13 @@ are not model identification. Sources with no addressable node or no
 usable reply cannot be assigned a model by this request.
 
 Use block 00 to confirm the native source. A plant master need not have
-a thermostat-style tHA inventory address. On a 402, read-only queries
+a thermostat-style tHA inventory address. To locate it, send MasterQuery
+on one physical port and use the **source of its MasterPresent reply** for
+the next block read. The boiler and mix subnet bytes inside that report
+describe loops; they are not interchangeable addresses for the master's
+registers. A read of the same pump-hours register on the same port can
+time out at an advertised loop address and succeed at the reporting source.
+On a 402, read-only queries
 confirmed distinct `44` replies for primary pump selector 0 and DHW pump
 selector 129. Both echoed the complete selector byte followed by the
 hours word (mask `07`). Boiler and mix pump hours used selector 0 on
