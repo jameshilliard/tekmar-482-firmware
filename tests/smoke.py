@@ -22,6 +22,7 @@ from frames import Decoder, encode
 PORTS = [(4, 0, 1, 28), (11, 1, 1, 13), (6, 0, 2, 22), (10, 1, 0, 8), (2, 0, 0, 29)]
 TRACE_BURST = 2 * len(PORTS)
 CLIENT_STEP_US = 120_000
+PEER_TURNAROUND_US = 30_000
 BITS = "10001001000110000010000010000010000110100101000111000101111"
 BODY = bytes.fromhex("12300001a5")
 EDIT_KEY = bytes.fromhex("030018 0300 0000 07 03 010409 000409")
@@ -167,7 +168,8 @@ def run(path, ram, fast=False, *, normal_reads=False, client_script=None):
     client_output = bytearray()
     client_tick = 0
     client_done = False
-    client_rx_end = [0] * len(PORTS)
+    client_rx_ready = [0] * len(PORTS)
+    client_replies = [deque() for _ in PORTS]
 
     def contend(p, loser, winner, tag):
         a, b = protected_bits(loser), protected_bits(winner)
@@ -314,6 +316,8 @@ def run(path, ram, fast=False, *, normal_reads=False, client_script=None):
                     if tail == 3:
                         expected_flags.add((p, drive_start[p] + (len(wire) - 1) * 2500))
                     wire_log.append((drive_start[p], "tx", p, wire[:48], len(wire)))
+                    if phase == "client":
+                        client_rx_ready[p] = max(client_rx_ready[p], clock + PEER_TURNAROUND_US)
                     if wire in line_wires:
                         assert not raw_mode, "autonomous discovery in Raw mode"
                         assert wire == protected_bits(line_wires[wire]) + "0" * tail
@@ -334,11 +338,7 @@ def run(path, ram, fast=False, *, normal_reads=False, client_script=None):
                     assert wire == protected_bits(expected) + "0" * tail, (p, phase, expected.hex(), wire)
                     drive_bits.clear()
                     if client_script is not None:
-                        for response in device_reply:
-                            client_rx_end[p] = inject(response, port=p, after=max(clock, client_rx_end[p]))
-                        ordered = sorted(edges)
-                        edges.clear()
-                        edges.extend(ordered)
+                        client_replies[p].extend(device_reply)
                         continue
                     if phase == "cycle-read":
                         assert p == 3 and ack_seen[p] and not exchange
@@ -485,6 +485,8 @@ def run(path, ram, fast=False, *, normal_reads=False, client_script=None):
                 cpu.mem_write(
                     0xE0014008, struct.pack("<I", (0xFFFF0000 + clock + uptime_offset) & 0xFFFFFFFF)
                 )
+                if phase == "client":
+                    start_client_replies()
                 while edges and edges[0][0] <= clock:
                     at, p, high = edges.popleft()
                     external[p] = high
@@ -581,14 +583,14 @@ def run(path, ram, fast=False, *, normal_reads=False, client_script=None):
     overlap = False
     phase = "line-cold"
 
-    def inject(body, port=0, *, after=None, bad_crc=False):
+    def inject(body, port=0, *, after=None, bad_crc=False, turnaround=PEER_TURNAROUND_US):
         if not raw_mode:
             peers.add(port)
         protected = protected_bits(body)
         if bad_crc:
             protected = protected[:-1] + ("0" if protected[-1] == "1" else "1")
         wire = protected + "0" * 18
-        start = (clock if after is None else after) + 30_000
+        start = (clock if after is None else after) + turnaround
         wire_log.append((start, "rx", port, body.hex()))
         if not bad_crc and (not raw_mode or raw_ack_mask & (1 << port)):
             expected_rx_acks.add((port, start + (len(protected) + 1) * 2500))
@@ -598,6 +600,20 @@ def run(path, ram, fast=False, *, normal_reads=False, client_script=None):
             if i == 0 or bit != wire[i - 1]:
                 edges.append((start + i * 2500, port, bit == "1"))
         return start + len(wire) * 2500
+
+    def start_client_replies():
+        # Wait for the line before starting the reply, including autonomous
+        # gateway traffic between replies to a single command.
+        started = False
+        for port, queue in enumerate(client_replies):
+            if queue and clock >= client_rx_ready[port] and not (gpio[0] & 1 << PORTS[port][3]):
+                end = inject(queue.popleft(), port=port, turnaround=0)
+                client_rx_ready[port] = end + PEER_TURNAROUND_US
+                started = True
+        if started:
+            ordered = sorted(edges)
+            edges.clear()
+            edges.extend(ordered)
 
     def telemetry_capture():
         nonlocal phase
