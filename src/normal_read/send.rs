@@ -1,7 +1,7 @@
-//! A single operator-requested announcement on one physical line.
-use super::{TX_NOT_SENT, TX_PIN_UNAVAILABLE, WINDOW_MS, outcome_byte};
+//! Normal operations that return the link outcome without collecting application replies.
+use super::{Query, TX_NOT_SENT, TX_PIN_UNAVAILABLE, WINDOW_MS, outcome_byte};
 use crate::tn4::{
-    message,
+    block, message,
     tx::{Outcome, Request},
 };
 use crate::trpc::{Reply, method};
@@ -17,15 +17,19 @@ enum Phase {
     Idle,
 }
 
-pub struct Announcement {
-    message: u32,
-    payload: heapless::Vec<u8, MAX_CLOCK_BYTES>,
+enum Body {
+    Announcement(u32, heapless::Vec<u8, MAX_CLOCK_BYTES>),
+    IdentityProbe(u8),
+}
+
+pub struct Send {
+    body: Body,
     start: u32,
     phase: Phase,
 }
 
-impl Announcement {
-    pub(super) fn parse(key: &[u8], start: u32) -> Option<Self> {
+impl Send {
+    pub(super) fn announcement(key: &[u8], start: u32) -> Option<Self> {
         let (id, payload) = key.split_first_chunk::<2>()?;
         let message = u32::from(u16::from_le_bytes(*id));
         match (message, payload) {
@@ -41,11 +45,23 @@ impl Announcement {
             _ => return None,
         }
         Some(Self {
-            message,
-            payload: heapless::Vec::from_slice(payload).ok()?,
+            body: Body::Announcement(message, heapless::Vec::from_slice(payload).ok()?),
             start,
             phase: Phase::Queued,
         })
+    }
+
+    pub(super) fn discovery(key: &[u8], start: u32) -> Option<Self> {
+        let &[subnet] = key else { return None };
+        Some(Self {
+            body: Body::IdentityProbe(subnet),
+            start,
+            phase: Phase::Queued,
+        })
+    }
+
+    pub(super) fn is_discovery(&self) -> bool {
+        matches!(self.body, Body::IdentityProbe(_))
     }
 
     pub(super) fn queued(&self) -> bool {
@@ -53,11 +69,21 @@ impl Announcement {
     }
     pub(super) fn frame(&self, port: u8) -> Option<Request> {
         if !self.queued() {
-            None
-        } else if self.message == message::NETWORK_INIT_REQUEST {
-            Request::gateway(port, self.message, &self.payload)
-        } else {
-            Request::gateway_class_zero(port, self.message, &self.payload)
+            return None;
+        }
+        match &self.body {
+            Body::Announcement(message::NETWORK_INIT_REQUEST, data) => {
+                Request::gateway(port, message::NETWORK_INIT_REQUEST, data)
+            }
+            Body::Announcement(id, data) => Request::gateway_class_zero(port, *id, data),
+            Body::IdentityProbe(subnet) => Query {
+                nodes: super::ALL_NODES,
+                subnet: *subnet,
+                block: [block::DEVICE_INFO, 0],
+                selector_mask: 0,
+                selector: 0,
+            }
+            .frame(port),
         }
     }
     pub(super) fn sent(&mut self, outcome: Outcome) {
@@ -81,7 +107,12 @@ impl Announcement {
             return None;
         };
         self.phase = Phase::Idle;
-        Some(Reply::report(method::NORMAL_ANNOUNCE, &[port, result]))
+        let method = if self.is_discovery() {
+            method::NORMAL_DISCOVER
+        } else {
+            method::NORMAL_ANNOUNCE
+        };
+        Some(Reply::report(method, &[port, result]))
     }
 }
 
@@ -105,7 +136,7 @@ mod tests {
             ),
             (&[0xdf, 3], &[0x7d, 0xf0, 0, 0]),
         ] {
-            let a = Announcement::parse(key, 0).unwrap();
+            let a = Send::announcement(key, 0).unwrap();
             assert_eq!(a.frame(3).unwrap(), Request::new(3, body).unwrap());
         }
         for bad in [
@@ -126,7 +157,7 @@ mod tests {
             &[0x1f, 3, 0, 1, 0, 31, 0],
             &[0x1f, 3, 0, 1, 0, 0, 0, 0, 0],
         ] {
-            assert!(Announcement::parse(bad, 0).is_none(), "{bad:?}");
+            assert!(Send::announcement(bad, 0).is_none(), "{bad:?}");
         }
     }
 
@@ -143,7 +174,7 @@ mod tests {
             (None, 0xff),
             (None, 0xfe),
         ] {
-            let mut a = Announcement::parse(&[0x1f, 2, 1, 1], start).unwrap();
+            let mut a = Send::announcement(&[0x1f, 2, 1, 1], start).unwrap();
             a.expire(start.wrapping_add(WINDOW_MS - 1));
             assert!(a.queued() && a.take_result(4).is_none());
             if let Some(out) = outcome {

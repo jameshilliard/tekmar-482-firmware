@@ -5,11 +5,11 @@ use crate::tn4::{
 };
 use crate::tpck::raw;
 use crate::trpc::{BridgeError, Reply, method};
-mod announce;
 mod edit;
+mod send;
 mod status;
-use announce::Announcement;
 use edit::BlockEdit;
+use send::Send;
 use status::StatusRead;
 
 pub const WINDOW_MS: u32 = 10_000;
@@ -18,6 +18,7 @@ const BLOCK_PREFIX: usize = RESULT_PREFIX + 1; // also includes the observed TX 
 pub const MAX_RESULT: usize = BLOCK_PREFIX + MAX_BYTES;
 const TX_PIN_UNAVAILABLE: u8 = 0xfe;
 const TX_NOT_SENT: u8 = 0xff;
+const ALL_NODES: u32 = u32::MAX >> 1;
 
 pub fn outcome_byte(result: Outcome) -> u8 {
     match result {
@@ -35,7 +36,7 @@ pub enum NormalOperation {
     Block(BlockRead),
     Status(StatusRead),
     Edit(BlockEdit),
-    Announce(Announcement),
+    Send(Send),
 }
 
 impl NormalOperation {
@@ -55,19 +56,23 @@ impl NormalOperation {
             method::NORMAL_BLOCK_EDIT => BlockEdit::parse(key, now)
                 .map(Self::Edit)
                 .ok_or(BridgeError::InvalidRequest),
-            method::NORMAL_ANNOUNCE => Announcement::parse(key, now)
-                .map(Self::Announce)
+            method::NORMAL_ANNOUNCE => Send::announcement(key, now)
+                .map(Self::Send)
+                .ok_or(BridgeError::InvalidRequest),
+            method::NORMAL_DISCOVER => Send::discovery(key, now)
+                .map(Self::Send)
                 .ok_or(BridgeError::InvalidRequest),
             _ => Err(BridgeError::InvalidRequest),
         }
     }
     pub fn single_attempt(&self) -> bool {
-        matches!(self, Self::Announce(_)) || matches!(self, Self::Edit(r) if r.writing())
+        matches!(self, Self::Send(_)) || matches!(self, Self::Edit(r) if r.writing())
     }
     pub fn trace_origin(&self) -> u8 {
         use crate::tpck::trace;
         match self {
-            Self::Announce(_) => trace::BROADCAST,
+            Self::Send(r) if r.is_discovery() => trace::DISCOVERY,
+            Self::Send(_) => trace::BROADCAST,
             Self::Edit(r) if r.writing() => trace::SETTING,
             _ => trace::PROBE,
         }
@@ -77,7 +82,7 @@ impl NormalOperation {
             Self::Block(r) => r.queued(),
             Self::Status(r) => r.queued(),
             Self::Edit(r) => r.queued(),
-            Self::Announce(r) => r.queued(),
+            Self::Send(r) => r.queued(),
         }
     }
     pub fn frame(&self, port: u8) -> Option<Request> {
@@ -85,7 +90,7 @@ impl NormalOperation {
             Self::Block(r) => r.frame(port),
             Self::Status(r) => r.frame(port),
             Self::Edit(r) => r.frame(port),
-            Self::Announce(r) => r.frame(port),
+            Self::Send(r) => r.frame(port),
         }
     }
     pub fn sent(&mut self, outcome: Outcome, now: u32) {
@@ -93,7 +98,7 @@ impl NormalOperation {
             Self::Block(r) => r.sent(outcome, now),
             Self::Status(r) => r.sent(outcome),
             Self::Edit(r) => r.sent(outcome),
-            Self::Announce(r) => r.sent(outcome),
+            Self::Send(r) => r.sent(outcome),
         }
     }
     pub fn unavailable(&mut self) {
@@ -101,7 +106,7 @@ impl NormalOperation {
             Self::Block(r) => r.unavailable(),
             Self::Status(r) => r.unavailable(),
             Self::Edit(r) => r.unavailable(),
-            Self::Announce(r) => r.unavailable(),
+            Self::Send(r) => r.unavailable(),
         }
     }
     pub fn expire(&mut self, now: u32) {
@@ -109,7 +114,7 @@ impl NormalOperation {
             Self::Block(r) => r.expire(now),
             Self::Status(r) => r.expire(now),
             Self::Edit(r) => r.expire(now),
-            Self::Announce(r) => r.expire(now),
+            Self::Send(r) => r.expire(now),
         }
     }
     pub fn observe(
@@ -122,7 +127,7 @@ impl NormalOperation {
         match self {
             Self::Block(r) => r.observe(port, body, now, publish),
             Self::Status(r) => r.observe(port, body, now, publish),
-            Self::Announce(_) => true,
+            Self::Send(_) => true,
             Self::Edit(r) => {
                 r.observe(body);
                 true
@@ -134,7 +139,7 @@ impl NormalOperation {
             Self::Block(r) => r.take_result(port),
             Self::Status(r) => r.take_result(port),
             Self::Edit(r) => r.take_result(port),
-            Self::Announce(r) => r.take_result(port),
+            Self::Send(r) => r.take_result(port),
         }
     }
 }
@@ -192,7 +197,7 @@ impl Query {
         selector_mask: u8,
         selector: u8,
     ) -> Option<Self> {
-        (nodes != 0 && nodes <= u32::MAX >> 1 && selector & !selector_mask == 0).then_some(Self {
+        (nodes != 0 && nodes <= ALL_NODES && selector & !selector_mask == 0).then_some(Self {
             nodes,
             subnet,
             block,

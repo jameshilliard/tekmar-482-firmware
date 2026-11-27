@@ -14,6 +14,7 @@ pub mod service {
 use service::*;
 
 #[repr(u8)]
+#[derive(Debug)]
 pub enum BridgeError {
     Busy = 1,
     InvalidRequest = 2,
@@ -34,6 +35,7 @@ const FEATURE_NORMAL_STATUS_READ: u8 = 1 << 7;
 const FEATURE_BLOCK_TRANSFERS: u16 = 1 << 10;
 const FEATURE_NORMAL_ANNOUNCE: u16 = 1 << 9;
 const FEATURE_ORDERED_TRACE_GAPS: u16 = 1 << 11;
+const FEATURE_NORMAL_DISCOVER: u16 = 1 << 12;
 const HEADER_BYTES: usize = 1 + size_of::<u32>();
 const REVISION_MAGIC: &[u8; 8] = b"TK48REV\0";
 const REVISION_BYTES: usize = REVISION_MAGIC.len() + 40; // hexadecimal Git object name
@@ -179,7 +181,8 @@ impl<'a> Call<'a> {
                         | FEATURE_NORMAL_STATUS_READ,
                     (FEATURE_BLOCK_TRANSFERS
                         | FEATURE_NORMAL_ANNOUNCE
-                        | FEATURE_ORDERED_TRACE_GAPS)
+                        | FEATURE_ORDERED_TRACE_GAPS
+                        | FEATURE_NORMAL_DISCOVER)
                         .to_le_bytes()[1],
                 ],
             ),

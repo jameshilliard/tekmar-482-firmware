@@ -3,6 +3,41 @@ const KEY: [u8; 9] = [0x12, 1, 0, 0, 0, 0x38, 0, 7, 3];
 const REPLY: [u8; 9] = [0x6e, 0x71, 0x28, 0x45, 0x38, 0, 3, 0xf3, 0xca];
 
 #[test]
+fn identity_discovery_is_one_read_only_link_attempt_not_a_bitmap_collector() {
+    for key in [&[][..], &[1, 2]] {
+        assert!(NormalOperation::parse(method::NORMAL_DISCOVER, key, 0).is_err());
+    }
+    for (outcome, code) in [
+        (Outcome::Ack, 0),
+        (Outcome::NoAck, 1),
+        (Outcome::ArbitrationLost, 2),
+    ] {
+        let mut op = NormalOperation::parse(method::NORMAL_DISCOVER, &[0xff], 0).unwrap();
+        assert!(op.single_attempt());
+        assert_eq!(op.trace_origin(), crate::tpck::trace::DISCOVERY);
+        assert_eq!(
+            op.frame(4),
+            Request::new(
+                4,
+                &[
+                    0x6d, 0x70, 0, 11, 0, 0, 0xff, 0xff, 0xff, 0xff, 0x7f, 0, 0, 0, 0
+                ]
+            )
+        );
+        op.observe(4, &REPLY, 1, |_| {
+            panic!("probe cannot publish a peer identity")
+        });
+        assert!(op.take_result(4).is_none());
+        op.sent(outcome, 2);
+        assert_eq!(
+            op.take_result(4).unwrap().payload(),
+            &[2, 0x13, 0xf0, 0x4b, 0x54, 4, code]
+        );
+        assert!(op.frame(4).is_none() && op.take_result(4).is_none());
+    }
+}
+
+#[test]
 fn fresh_peer_only_after_transmit_with_selector_and_valid_layout() {
     let mut slot = BlockRead::EMPTY;
     let q = Query::parse(&KEY).unwrap();

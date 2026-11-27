@@ -617,12 +617,15 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                                     | method::NORMAL_BLOCK_READ
                                     | method::NORMAL_BLOCK_EDIT
                                     | method::NORMAL_ANNOUNCE
+                                    | method::NORMAL_DISCOVER
                                     | method::NORMAL_STATUS_READ,
                                     _,
                                     _,
                                 ) if raw => call.error(BridgeError::WrongMode),
                                 (
-                                    method::NORMAL_BLOCK_READ | method::NORMAL_STATUS_READ,
+                                    method::NORMAL_BLOCK_READ
+                                    | method::NORMAL_STATUS_READ
+                                    | method::NORMAL_DISCOVER,
                                     service::REQUEST,
                                     [p @ 0..=LAST_PORT, key @ ..],
                                 )
@@ -643,6 +646,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                                     method::NORMAL_BLOCK_READ
                                     | method::NORMAL_BLOCK_EDIT
                                     | method::NORMAL_ANNOUNCE
+                                    | method::NORMAL_DISCOVER
                                     | method::NORMAL_STATUS_READ,
                                     _,
                                     _,

@@ -50,7 +50,7 @@ the request body is empty. All integers are little endian.
 | --- | --- | --- |
 | 00000187 FirmwareRevision | Request, zero or two placeholder bytes | u16 numeric revision, 0 for this unnumbered custom image |
 | 0000018F ProtocolVersion | Request, zero or two placeholder bytes | u16 tHA protocol version, currently 3 |
-| 544BF001 BridgeCapabilities | Request | Three u8 values: version (2), mode (0 Normal, 1 Raw), port count (5). Remaining bytes are one little-endian feature bitmap: bit 0 Raw, 1 ROM update, 2 Normal trace, 3 error reporting, 4 Normal identity read, 5 traffic counters, 7 Normal status read, 9 Normal announcements, 10 Normal bitmap block reads and guarded edits, 11 ordered Normal trace loss notices. Bits 6 and 8 are retired. |
+| 544BF001 BridgeCapabilities | Request | Three u8 values: version (2), mode (0 Normal, 1 Raw), port count (5). Remaining bytes are one little-endian feature bitmap: bit 0 Raw, 1 ROM update, 2 Normal trace, 3 error reporting, 4 Normal identity read, 5 traffic counters, 7 Normal status read, 9 Normal announcements, 10 Normal bitmap block reads and guarded edits, 11 ordered Normal trace loss notices, 12 Normal subnet discovery. Bits 6 and 8 are retired. |
 | 544BF002 SetBridgeMode | Update, mode u8 | Echo mode: 0 Normal, 1 Raw. Busy during an inventory walk, a started transmission, an outstanding host send or a local ACK. Switching modes clears the Normal inventory; returning to Normal also clears the ACK mask. |
 | 544BF003 PortDrops | Request, port u8 | Port u8, valid records dropped u64, invalid records dropped u64. |
 | 544BF004 FirmwareBuild | Request | Build revision without a terminator: 40 lowercase hexadecimal digits or `unversioned` |
@@ -68,6 +68,7 @@ the request body is empty. All integers are little endian.
 | 544BF010 NormalStatusRead | Request, Report | Solicit native status, including multipart replies, without changing mode or trace configuration. |
 | 544BF011 NormalBlockEdit | Update, Report | Compare an addressed block with the host's baseline and send at most one native block update. Does not select Raw mode. |
 | 544BF012 NormalAnnounce | Update, Report | Send one known native announcement on one physical port; report the transmit outcome. |
+| 544BF013 NormalDiscover | Request, Report | Send one read-only identity probe on one subnet; report the link outcome, not an inventory. |
 
 Version 2 event counts start at zero at boot, survive mode changes and
 saturate at 2^64-1 instead of wrapping. Subtract snapshots from the same
@@ -167,6 +168,22 @@ TX: 00 ACK, 01 no ACK, 02 arbitration lost, 03 echo mismatch, 04 bad end,
 report **are not write confirmation**. After a possibly delivered update,
 start a separate NormalBlockRead and compare the edited fields. Do not
 automatically resubmit an edit after a host timeout.
+
+## Normal subnet discovery
+
+With feature bit 12, Request `544BF013` takes `port:u8 subnet:u8`. An
+accepted request echoes the pair and shares the per-port Normal operation
+slot. It attempts one native block 00 request from the gateway with a
+31-node bitmap (`FF FF FF 7F`) and a four-byte zero argument. Its terminal
+Report is `port:u8 outcome:u8` using the same link outcomes as NormalAnnounce,
+including arbitration loss, unavailable pin and expired without transmission.
+It does not wait for absent nodes, retry or change link ACK, reporting, or
+bridge mode. Busy rejects a second operation on the occupied port.
+
+Subscribe to Normal trace before requesting discovery. Learn devices from
+peer RX, not the link outcome: a link ACK identifies no individual responder,
+and responses can arrive before or after the terminal Report. For a control
+channel copy of individual peer replies use NormalBlockRead instead.
 
 ## Normal announcements
 
