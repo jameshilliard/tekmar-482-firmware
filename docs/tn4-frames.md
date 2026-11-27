@@ -499,6 +499,13 @@ port and native source, including node zero. Also key 20F by its payload
 group: two groups from one sender, or two senders reporting the same
 group, are independent observations.
 
+In the optional 483 comparison described in [the block reference](tn4-blocks.md),
+zero and every individual bit of these eight base layouts are checked against
+the SW 11 indexed message readers. Keep the reserved bits separate from the
+named flags in gateway access, network lock, group enable and warm-weather
+shutdown. The indexed NetworkLock reader always returns zero for its padding;
+the declarative layout and the captured byte leave bits 7:2 reserved.
+
 200 with the request bit set is not a status, even if its access-open bit
 is also set. A 21F setpoint-group command is not a 20F report. A 010,
 2FF or 31F broadcast can be the host's own announcement; it does not

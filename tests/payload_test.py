@@ -75,6 +75,12 @@ class PayloadTests(unittest.TestCase):
             self.assertIsNone(line_report(mid, data))
         self.assertTrue(GatewayAccess(0xf2).access_open)
         self.assertTrue(NetworkLock(0x82).address_lock)
+        self.assertEqual(decode(0x2ef, "82")["reserved"], 32)
+        self.assertEqual(decode(0x200, "f2")["reserved"], 60)
+        self.assertEqual(decode(0x30f, "91")["reserved"], 4)
+        flags = decode(0x20f, "03ae")
+        self.assertEqual((flags["requested_enable"], flags["requested_reserved"],
+                          flags["actual_enable"], flags["actual_reserved"]), (0, 7, 0, 5))
         self.assertFalse(NetworkLock(0x82).access_lock)
         self.assertEqual(WarmWeatherShutdown(0x91).active_slots, (TargetSlot.WAKE, TargetSlot.AWAY))
         self.assertIsNone(ZoneSyncReport(7, 2, 0x99).target)
