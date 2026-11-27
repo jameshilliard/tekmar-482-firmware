@@ -123,6 +123,35 @@ assigned floor inputs (external 1 alone on 528/538) and rounds down in
 native units; do not publish it with missing contributors. The input
 blocks are read-only here. Raw forwarding never changes their bytes.
 
+### Thermostat equipment setup
+
+The 483 SW 11 `StageSetup` block (`01`) has five bytes: first terminal
+code, first system-pump byte, second terminal code, second system-pump
+byte, and second-stage heat-source code. Both pump bytes declare a
+7-bit delay and a required bit in bit 7; the indexed reader omits
+the second required bit but the declarative layout names it. Keep the
+terminal, source, and delay values in wire units. These are configured
+outputs and pump requirements, not live relay states. A physical 553
+reported all five fields.
+
+`04` gives the number of cooling stages, minimum run and off times,
+cycles per hour, interlock, and priority. The same 553 supplied the stage
+count, interlock and priority, but did not support the other bytes even
+though the positional report carried placeholders. `97` carries separate
+available and enabled heat-pump masks, not counts. `08` carries packed fan
+operation and ventilation settings, coil limits, delay, and three purge
+settings. The physical 553 supplied the two packed bytes and fan purge;
+the other fields were unsupported. `58` reports the floor cooling setting
+(0 off, 1 on) on the cataloged 552. It also returned a supported byte on an
+addressed read of the physical 553, even though SW 11 does not list it for
+that model.
+[Service Bulletin 082](https://www.watts.com/dfsmedia/0533dbba17714b1ab581ab07a4cbb521/43143-source/638820700500000000/sb0082-01.pdf)
+describes the option's removal from later 552s and changes to floor cooling
+on the 553 and 557; the bulletin alone does not establish a wire layout
+for the 557. Do not infer a running stage or use a reported
+floor-cooling option as proof of compressor capability. These blocks
+have no applicable 483 field editor. Unknown values remain raw.
+
 ## Selecting Instances
 
 A single `2D7` request can select several nodes on the same subnet. Each

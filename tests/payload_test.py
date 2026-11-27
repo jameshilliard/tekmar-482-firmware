@@ -334,6 +334,32 @@ class PayloadTests(unittest.TestCase):
         self.assertEqual(member(16, 33, 255), AirTarget(T.HEAT, 0, 255))
         self.assertIsNone(member(16, 33, 255).celsius)
 
+    def test_thermostat_equipment_obeys_positional_and_compact_support_masks(self):
+        product = identify_product(105102)
+        self.assertIn(0x58, product.candidate_blocks)
+        self.assertNotIn(0x58, identify_product(104401).candidate_blocks)
+        for cooling in ("31 02 aabbcc 0103", "31 02 0103"):
+            reports = {block: decode_payload(0x2e7, block.to_bytes(2, "little") + bytes.fromhex(data))
+                       for block, data in ((1, "1e 8b 00 0d cb"), (4, cooling),
+                                           (0x97, "02 05"), (0x58, "01 81"))}
+            setup = ThermostatConfiguration.from_blocks(product, 2, reports)
+            first, second = setup.stage_setup.heating_stage1, setup.stage_setup.heating_stage2
+            self.assertEqual((first.terminal_raw, first.pump_delay_raw, first.pump_required), (None, 11, True))
+            self.assertEqual((second.terminal_raw, second.pump_delay_raw, second.pump_required), (0, 13, False))
+            self.assertEqual(setup.stage_setup.stage2_heat_source_raw, 0xcb)
+            self.assertEqual((setup.cooling_stages, setup.cooling_setup.heat_cool_interlock_raw,
+                              setup.cooling_setup.heat_cool_priority_raw), (2, 1, 3))
+            self.assertIsNone(setup.cooling_setup.minimum_run_time_raw)
+            self.assertIsNone(setup.cooling_setup.minimum_off_time_raw)
+            self.assertIsNone(setup.cooling_setup.cycles_per_hour)
+            self.assertEqual((setup.heat_pump_setup.available_mask, setup.enabled_heat_pumps), (None, 5))
+            self.assertEqual((setup.floor_cooling_raw, setup.floor_cooling_enabled), (0x81, None))
+        fan = FanSetup.from_report(decode(0x2e7, "0800 75 04 2e 13 14 15"))
+        self.assertTrue(fan.enabled)
+        self.assertEqual((fan.minimum_heating_coil_temp_raw, fan.maximum_cooling_coil_temp_raw,
+                          fan.delay_raw, fan.purge_raw, fan.heating_purge_raw, fan.cooling_purge_raw),
+                         (46, None, 19, 20, 21, None))
+
     def test_thermostat_selector_uses_setup_and_revision_not_reported_demand(self):
         for m in Mode:
             self.assertEqual(decode_payload(0x2e7, b"\x03\x00\x01" + bytes([m]))["mode_setting_name"],
