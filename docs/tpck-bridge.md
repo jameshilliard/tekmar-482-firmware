@@ -333,7 +333,9 @@ progress and ordinary tHA replies need not wait. A host can consume trace
 through completion before reconciling a read with moves, writes and gaps.
 This is a UART ordering guarantee, not a promise that a peer will answer
 or that a future report belongs to the operation.
-Trace has three dedicated slots; a full queue drops new trace records,
+Normal trace has ten slots shared by the five ports, separate from control
+and Raw send-result capacity. An empty queue can absorb two records on
+every port without any UART progress. A full queue drops new trace records,
 increments the affected port's lifetime drop counter and leaves Normal
 operations running. A gap notice follows the last retained native record
 and precedes the next retained native record or trace-mask reply, including

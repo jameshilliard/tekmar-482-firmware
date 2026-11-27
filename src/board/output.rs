@@ -5,9 +5,11 @@ use tekmar_482_firmware::tn4::{MAX_BYTES, PORT_COUNT};
 const REPORT_WATERMARK: usize = 2;
 const RX_WATERMARK: usize = 6;
 const COMMAND_WATERMARK: usize = 8;
-const TRACE_SLOTS: usize = 3;
+// Two simultaneous five-line bursts can arrive before the UART drains a record.
+const TRACE_SLOTS: usize = 2 * PORT_COUNT;
 const RECORD_SLOTS: usize = COMMAND_WATERMARK + PORT_COUNT + TRACE_SLOTS;
-const _: () = assert!(RECORD_SLOTS <= u16::BITS as usize);
+type SlotMask = u32;
+const _: () = assert!(RECORD_SLOTS <= SlotMask::BITS as usize);
 const ENCODED_RECORD_BYTES: usize = 168; // includes TPCK escaping
 use heapless::Vec;
 use tekmar_482_firmware::tpck;
@@ -33,7 +35,7 @@ struct Record {
 pub(super) struct Output {
     records: [Record; RECORD_SLOTS],
     order: [u8; RECORD_SLOTS],
-    used: u16,
+    used: SlotMask,
     len: usize,
     traces: usize,
     gap: tpck::trace::PendingGap,
@@ -43,7 +45,8 @@ pub(super) struct Output {
 
 impl Output {
     pub(super) fn take() -> &'static mut Self {
-        #[unsafe(link_section = ".low_bss")]
+        // Auxiliary SRAM is CPU-accessible; keep the stack and link drivers in local SRAM.
+        #[unsafe(link_section = ".bss.uart_output")]
         static QUEUE: static_cell::ConstStaticCell<Output> =
             static_cell::ConstStaticCell::new(Output {
                 records: [const {

@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 from frames import Decoder, encode
 
 PORTS = [(4, 0, 1, 28), (11, 1, 1, 13), (6, 0, 2, 22), (10, 1, 0, 8), (2, 0, 0, 29)]
+TRACE_BURST = 2 * len(PORTS)
 BITS = "10001001000110000010000010000010000110100101000111000101111"
 BODY = bytes.fromhex("12300001a5")
 EDIT_KEY = bytes.fromhex("030018 0300 0000 07 03 010409 000409")
@@ -154,6 +155,7 @@ def run(path, ram, fast=False, *, normal_reads=False):
     fault_words = []
     traces = []
     read_traces = []
+    burst_traces = []
     congestion_reports = []
     trace_resume = 0
     trace_check_at = None
@@ -318,7 +320,8 @@ def run(path, ram, fast=False, *, normal_reads=False):
                         assert p == 3 and ack_seen[p] and not exchange
                         end = inject(bytes.fromhex("6e700607 380003 f3 22 ca35"), port=p)
                         end = inject(bytes.fromhex("6e700e07 380003 f3 53 ca35"), port=p, after=end)
-                        end = inject(bytes.fromhex("6e700087 380003 f3 99 ca35"), port=p, after=end)
+                        for _ in range(TRACE_BURST - 1):
+                            end = inject(bytes.fromhex("6e700087 380003 f3 99 ca35"), port=p, after=end)
                         end = inject(bytes.fromhex("6e700047 380003 f3 11 ca35"), port=p, after=end)
                         # Hold UART TX through the last peer. Its dropped trace
                         # must be accounted for before the terminal tRPC report.
@@ -396,8 +399,11 @@ def run(path, ram, fast=False, *, normal_reads=False):
                     connect_host()
                 if trace_check_at is not None and clock >= trace_check_at:
                     trace_check_at = None
-                    call(0x107, bytes(2))
-                    extension(11)
+                    if phase == "trace-burst":
+                        extension(11, b"\0", True)
+                    else:
+                        call(0x107, bytes(2))
+                        extension(11)
                 if retry_isp_at is not None and clock >= retry_isp_at:
                     retry_isp_at = None
                     if phase == "isp-after-flag":
@@ -585,13 +591,17 @@ def run(path, ram, fast=False, *, normal_reads=False):
         nonlocal trace_resume, trace_check_at
         nonlocal phase, overlap, raw_mode, raw_ack_mask, uptime_offset, retry_isp_at
         if kind == 0xd0:
+            if phase == "trace-burst":
+                assert data[0] == 0, ("unexpected TX, invalid frame or trace loss", data.hex())
+                burst_traces.append((data[1], data[7:]))
+                return
             if normal_reads:
                 assert data[1] == (8 if data[0] == 5 else 3)
                 read_traces.append(data)
                 return
             if data[0] == 5:
                 assert phase == "trace-congested" and data == bytes.fromhex("0501 0200000000000000")
-                assert [r[-2] for k, r in traces if k == 0] == [1, 2, 3]
+                assert [r[-2] for k, r in traces if k == 0] == list(range(1, TRACE_BURST + 1))
                 traces.append((data[0], data[1:]))
                 return
             assert data[1] == 0 and int.from_bytes(data[2:6], "little") and not raw_mode
@@ -600,7 +610,7 @@ def run(path, ram, fast=False, *, normal_reads=False):
                 assert data[0] == 4 and data[6:9] == bytes.fromhex("02 3800")
                 phase = "trace-congested"
                 end = clock + 100_000
-                for code in range(1, 6):
+                for code in range(1, TRACE_BURST + 3):
                     end = inject(bytes.fromhex("7d700602") + bytes([code, 0]), after=end)
                 trace_check_at, trace_resume = end + 10_000, end + 40_000
             return
@@ -619,8 +629,8 @@ def run(path, ram, fast=False, *, normal_reads=False):
                         assert data[5:] == bytes.fromhex("0400 01000000 3412 0000")
                     else:
                         assert data[0] == 2 and data[5:] == bytes([4,1,0])
-                        phase = "normal-complete"
-                        cpu.emu_stop()
+                        phase = "trace-burst-arm"
+                        extension(11, b"\x1f", True)
                 elif data[0] == 4:
                     assert phase == "normal-block"
                     assert data[5:] == GROUP_KEY
@@ -636,7 +646,7 @@ def run(path, ram, fast=False, *, normal_reads=False):
                     captured = [t[7:] for t in read_traces if t[0] == 0]
                     lost = sum(int.from_bytes(t[2:], "little") for t in read_traces if t[0] == 5)
                     assert captured and data[12:] not in captured and lost > 0
-                    assert len(captured) + lost >= 4
+                    assert len(captured) + lost >= TRACE_BURST + 2
                     parts = [d for k, d in actual if k == 6 and d[:7] == bytes.fromhex("020ff04b54 0304")]
                     assert len(parts) == 1 and 0 < int.from_bytes(parts[0][8:12], "little") < int.from_bytes(data[8:12], "little")
                     assert (6, bytes.fromhex("0406f04b54 0ff04b54 01")) in actual
@@ -771,12 +781,32 @@ def run(path, ram, fast=False, *, normal_reads=False):
                 assert data[5:] == struct.pack("<HI", 1, 29104)
                 extension(11)
             elif method == 0x544bf00b:
-                if normal_reads:
+                if phase == "trace-burst-arm":
+                    assert data[0] == 3 and data[5:] == b"\x1f"
+                    phase = "trace-burst"
+                    for p in range(len(PORTS)):
+                        end = inject(BODY, p)
+                        # Start the next peer after all 13 trailer/intermission
+                        # bits, before a waiting gateway can claim an idle line.
+                        next_sof = end - (18 - 14) * 2500
+                        end = inject(bytes.fromhex("12300001 ca"), p, after=next_sof - 30_000)
+                    ordered = sorted(edges)
+                    edges.clear()
+                    edges.extend(ordered)
+                    trace_check_at, trace_resume = end + 10_000, end + 40_000
+                elif phase == "trace-burst":
+                    assert data[0] == 3 and data[5:] == b"\0"
+                    assert len(burst_traces) == TRACE_BURST
+                    for p in range(len(PORTS)):
+                        assert [b for port, b in burst_traces if port == p] == [BODY, bytes.fromhex("12300001 ca")]
+                    phase = "normal-complete"
+                    cpu.emu_stop()
+                elif normal_reads:
                     assert data[0] == 3 and (phase, data[5:]) in (("normal-block", b"\x08"), ("edit-guard", b"\x00"))
                 elif data[0] == 4 and phase == "trace-congested":
                     assert data[5:] == b"\x01" + struct.pack("<5Q", 2, 0, 0, 0, 0)
-                    assert (6, bytes.fromhex("0407010000 0500")) in actual
-                    assert [r[-2] for k, r in traces if k == 0] == [1, 2, 3]
+                    assert (6, bytes.fromhex("0407010000 0c00")) in actual
+                    assert [r[-2] for k, r in traces if k == 0] == list(range(1, TRACE_BURST + 1))
                     assert [r for k, r in traces if k == 5] == [bytes.fromhex("01 0200000000000000")]
                     phase = "trace-reporting"
                     send(0)
@@ -843,7 +873,7 @@ def run(path, ram, fast=False, *, normal_reads=False):
                     ordered = sorted(edges)
                     edges.clear()
                     edges.extend(ordered)
-            elif method == 0x107 and data[0] == 2 and data[6:] == b"\0" and 1 <= data[5] <= 5:
+            elif method == 0x107 and data[0] == 2 and data[6:] == b"\0" and 1 <= data[5] <= TRACE_BURST + 2:
                 congestion_reports.append(data[5])
             elif method == 0x107 and phase == "fault-burst":
                 if data[0] == 2:
@@ -1233,7 +1263,7 @@ def run(path, ram, fast=False, *, normal_reads=False):
     assert not reads and not read_events and actual[-1] == (6, bytes.fromhex("0305f04b54"))
     assert expected_flags == observed_flags, (clock, expected_flags - observed_flags, observed_flags - expected_flags)
     assert tuple(telemetry) == TELEMETRY
-    assert congestion_reports == [1, 2, 3, 4, 5], congestion_reports
+    assert congestion_reports == list(range(1, TRACE_BURST + 3)), congestion_reports
     assert [b for b, _ in line_sends[2]] == [init, master]
     assert not conflicts and not interrupted and lost == {"master", "write", "raw"}
     assert (1, raw_winner) in [(b[1], b[6:]) for k, b in actual if k == 1 and b[0] == 0]
