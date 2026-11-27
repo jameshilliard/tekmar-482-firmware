@@ -189,6 +189,11 @@ impl Sender {
         !matches!(self.phase, Phase::Idle)
     }
 
+    /// Deadline of the active half-bit, in this line's capture timer domain.
+    pub fn deadline(&self) -> Option<u32> {
+        matches!(self.phase, Phase::Sample | Phase::Boundary).then_some(self.due)
+    }
+
     /// Only a lost protected-bit arbitration proves that our frame did not finish.
     pub fn retry_arbitration(&mut self, now: u32) -> bool {
         if !matches!(self.phase, Phase::Lost) {

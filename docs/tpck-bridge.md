@@ -50,7 +50,7 @@ the request body is empty. All integers are little endian.
 | --- | --- | --- |
 | 00000187 FirmwareRevision | Request, zero or two placeholder bytes | u16 numeric revision, 0 for this unnumbered custom image |
 | 0000018F ProtocolVersion | Request, zero or two placeholder bytes | u16 tHA protocol version, currently 3 |
-| 544BF001 BridgeCapabilities | Request | Three u8 values: version (2), mode (0 Normal, 1 Raw), port count (5). Remaining bytes are one little-endian feature bitmap: bit 0 Raw, 1 ROM update, 2 Normal trace, 3 error reporting, 4 Normal identity read, 5 traffic counters, 7 Normal status read, 9 Normal announcements, 10 Normal bitmap block reads and guarded edits, 11 ordered Normal trace loss notices, 12 Normal subnet discovery, 13 trace-ordered native operation results. Bits 6 and 8 are retired. |
+| 544BF001 BridgeCapabilities | Request | Three u8 values: version (2), mode (0 Normal, 1 Raw), port count (5). Remaining bytes are one little-endian feature bitmap: bit 0 Raw, 1 ROM update, 2 Normal trace, 3 error reporting, 4 Normal identity read, 5 traffic counters, 7 Normal status read, 9 Normal announcements, 10 Normal bitmap block reads and guarded edits, 11 ordered Normal trace loss notices, 12 Normal subnet discovery, 13 trace-ordered native operation results, 14 link timing. Bits 6 and 8 are retired. |
 | 544BF002 SetBridgeMode | Update, mode u8 | Echo mode: 0 Normal, 1 Raw. Busy during an inventory walk, a started transmission, an outstanding host send or a local ACK. Switching modes clears the Normal inventory; returning to Normal also clears the ACK mask. |
 | 544BF003 PortDrops | Request, port u8 | Port u8, valid records dropped u64, invalid records dropped u64. |
 | 544BF004 FirmwareBuild | Request | Build revision without a terminator: 40 lowercase hexadecimal digits or `unversioned` |
@@ -69,6 +69,7 @@ the request body is empty. All integers are little endian.
 | 544BF011 NormalBlockEdit | Update, Report | Compare an addressed block with the host's baseline and send at most one native block update. Does not select Raw mode. |
 | 544BF012 NormalAnnounce | Update, Report | Send one known native announcement on one physical port; report the transmit outcome. |
 | 544BF013 NormalDiscover | Request, Report | Send one read-only identity probe on one subnet; report the link outcome, not an inventory. |
+| 544BF014 LinkTiming | Request, empty or port u8 | Read service loop timing or a physical port's transmit timing, in either mode. No bus transmission. |
 
 Version 2 event counts start at zero at boot, survive mode changes and
 saturate at 2^64-1 instead of wrapping. Subtract snapshots from the same
@@ -89,7 +90,7 @@ Byte-exact frames (spaces separate fields, not transmitted bytes):
 ProtocolVersion request:   CA 07 06 01 8F010000 0000 9E 35
 ProtocolVersion response:  CA 07 06 04 8F010000 0300 A4 35
 BridgeCapabilities:        CA 05 06 01 01F04B54 9C 35
-Normal capabilities:       CA 0A 06 04 01F04B54 020005BF3E A8 35
+Normal capabilities:       CA 0A 06 04 01F04B54 020005BF7E E8 35
 EnterFirmwareUpdate:       CA 05 06 00 05F04B54 9F 35
 Drained before handoff:    CA 05 06 03 05F04B54 A2 35
 ```
@@ -276,6 +277,24 @@ messages without a verified native node destination remain in the port totals.
 Unsent requests do not count. Up to 256 distinct paths are retained without
 eviction; if the directory fills, bus totals and previously registered paths
 continue counting.
+
+## Link timing
+
+Capability bit 14 exposes elapsed time measured on the running gateway,
+not UART latency or a measure of how long a device takes to reply.
+Request `544BF014` with one of these bodies:
+
+| Request body | Response body (little endian) |
+| --- | --- |
+| Empty | Four u32 microsecond maxima: complete service pass, capture/receive and housekeeping, five-port response/transmit service, UART and host processing including executor yield. |
+| Port u8 (0..4) | Same port, then four u32: maximum gap between active TX polls (us), poll gap at last missed deadline (us), lateness at that deadline (us), uptime at the miss (ms, wraps). |
+
+Maxima are independent high-water marks since boot; they need not be from
+the same pass. Poll gaps exclude time waiting for the line before SOF.
+Zero lateness means no missed deadline; the corresponding gap and
+timestamp are also zero. Compare the timestamp with the port's
+`TX_MISSED_TIMING` error counter. The measurements do not change the
+physical timing tolerance, clear error counters, or affect reporting.
 
 ## Raw records
 

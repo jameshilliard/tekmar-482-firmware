@@ -28,6 +28,9 @@ BODY = bytes.fromhex("12300001a5")
 EDIT_KEY = bytes.fromhex("030018 0300 0000 07 03 010409 000409")
 GROUP_KEY = bytes.fromhex("0300 01008000 3800 0703")
 GROUP_READ = bytes.fromhex("6d70000b 3800 00 01008000 03000000")
+TIMING_PORT = 3
+TIMING_QUERY = bytes.fromhex("0300 00008000 0300 0000")
+TIMING_STALL_US = 4_000
 EDIT_READ = bytes.fromhex("6d70000b 030000 00008000 00000000")
 EDIT_WRITE = bytes.fromhex("6df00007 0018 0300 000409")
 SCENE = bytes.fromhex("2ff00003 07e001")  # 483 scene 8, eight hours.
@@ -162,6 +165,9 @@ def run(path, ram, fast=False, *, normal_reads=False, client_script=None):
     congestion_reports = []
     trace_resume = 0
     trace_check_at = None
+    miss_injected = False
+    miss_released = False
+    timing_modes = set()
     conflicts, interrupted, lost = {}, {}, set()
     raw_winner = bytes.fromhex("3f700000")
     backoff_after = 0
@@ -261,7 +267,7 @@ def run(path, ram, fast=False, *, normal_reads=False, client_script=None):
             timers[t][0] = timers[t].get(0, 0) | (1 << (4 + ch))
 
     def gpio_write(uc, off, size, value, data):
-        nonlocal pins, phase, inventory_at, jump_at, trace_resume
+        nonlocal pins, phase, inventory_at, jump_at, trace_resume, miss_released
         if off in (0x18, 0x1C, 0):
             for p, exchange in enumerate(exchanges):
                 tx = 1 << PORTS[p][3]
@@ -286,6 +292,12 @@ def run(path, ram, fast=False, *, normal_reads=False, client_script=None):
                     ack_seen[p] |= peer_ack[p]
                     compete(p, drive_bits)
                 elif off == 0 and not value & tx and gpio[0] & tx:
+                    if phase == "timing-miss" and p == TIMING_PORT:
+                        assert miss_injected and not miss_released
+                        assert drive_bits == ["1", "0"], drive_bits
+                        miss_released = True
+                        drive_bits.clear()
+                        continue
                     if p in interrupted:
                         expected, tag = interrupted.pop(p)
                         assert "".join(drive_bits) == expected and tag not in lost
@@ -420,9 +432,14 @@ def run(path, ram, fast=False, *, normal_reads=False, client_script=None):
     def timer_read(uc, off, size, t):
         nonlocal trace_check_at, connect_at, client_tick, client_done
         nonlocal clock, inventory_at, next_byte, queued_send_at, phase, jump_at, uptime_offset, discovery_end, retry_isp_at, backoff_after
+        nonlocal miss_injected
         if off == 8:
             if t == 0 and timers[t].get(4) == 1:
                 clock += 40
+                if phase == "timing-miss" and driven[TIMING_PORT] and not miss_injected:
+                    # Resume the same attempt after skipping its first sample.
+                    clock += TIMING_STALL_US
+                    miss_injected = True
                 if clock > 55_000_000:
                     raise AssertionError(("emulated bus scenario timed out", phase, actual[-4:]))
                 if phase == "client" and clock >= client_tick:
@@ -688,11 +705,20 @@ def run(path, ram, fast=False, *, normal_reads=False, client_script=None):
             if method == 0x544BF004:
                 line_progress()
                 if not normal_reads:
+                    extension(0x14)
                     extension(12)
                     extension(12, bytes.fromhex("0584"))
                     extension(12, b"\x24", True)  # port 2 and gateway
             elif method == 0x544bf00f:
-                if phase == "normal-silent":
+                if phase == "timing-miss":
+                    if data[0] == 4:
+                        assert data[5:] == TIMING_QUERY
+                    else:
+                        assert data[0] == 2 and data[5:] == bytes([TIMING_PORT, 3, 5])
+                        assert miss_injected and miss_released
+                        phase = "timing-report"
+                        extension(0x14, bytes([TIMING_PORT]))
+                elif phase == "normal-silent":
                     if data[0] == 4:
                         assert data[5:] == bytes.fromhex("0400 01000000 3412 0000")
                     else:
@@ -847,8 +873,27 @@ def run(path, ram, fast=False, *, normal_reads=False, client_script=None):
             elif method == 0x197 and phase == "snow-inventory":
                 assert actual[-2] == (6, bytes.fromhex("0467010000 cf10"))
                 assert data == bytes.fromhex("0497010000 cf10 499d0100")
-                phase = "normal-complete"
-                cpu.emu_stop()
+                phase = "timing-miss"
+                extension(15, TIMING_QUERY)
+            elif method == 0x544BF014:
+                assert data[0] == 4
+                if phase == "timing-report":
+                    port, maximum, gap, lateness, ms = struct.unpack("<B4I", data[5:])
+                    assert port == TIMING_PORT and maximum >= gap >= TIMING_STALL_US
+                    assert 625 <= lateness < gap and ms > 0
+                    phase = "normal-complete"
+                    cpu.emu_stop()
+                elif raw_mode:
+                    port, maximum, gap, lateness, ms = struct.unpack("<B4I", data[5:])
+                    assert port == TIMING_PORT and maximum > 0
+                    assert (gap, lateness, ms) == (0, 0, 0)
+                    timing_modes.add("raw")
+                else:
+                    elapsed, receive, lines, host = struct.unpack("<4I", data[5:])
+                    # Virtual time advances on capture timer reads, so the
+                    # cooperative host phase need not advance this clock.
+                    assert elapsed and receive and lines and host <= elapsed
+                    timing_modes.add("normal")
             elif method == 0x19f:
                 assert actual[-2] == (6, bytes.fromhex("0497010000010082830100"))
                 assert data[5:] == struct.pack("<HI", 1, 29104)
@@ -1124,6 +1169,9 @@ def run(path, ram, fast=False, *, normal_reads=False, client_script=None):
                     bytes.fromhex("03a7010000dc07061a020a1b"),
                 ]
                 assert len(clock_ports) == 5
+                extension(0x14, bytes([TIMING_PORT]))
+                extension(0x14, bytes([len(PORTS)]))
+                extension(0x14, update=True)
                 extension(12)
                 incoming.extend(corrupt)
                 call(0x187, bytes(2))
@@ -1314,13 +1362,13 @@ def run(path, ram, fast=False, *, normal_reads=False, client_script=None):
         assert boot_port_checked
         assert phase == "normal-complete" and not traces and not any(exchanges), (phase, actual[-8:])
         assert received_rx_acks == expected_rx_acks and observed_flags == expected_flags
-        print(f"ARM Normal: offline counters, addressed reads, multipart status, guarded writes, per-port announcements, silent peer, snow inventory; untouched stack {free} bytes")
+        print(f"ARM Normal: offline counters, addressed reads, multipart status, guarded writes, per-port announcements, silent peer, snow inventory, missed deadline; untouched stack {free} bytes")
         return
     assert entered, (clock, phase, [len(x) for x in exchanges], results, actual[-10:],
                      line_sends, expected_rx_acks - received_rx_acks, list(wire_log))
     assert actual[:4] == [
         (6, bytes.fromhex(x))
-        for x in ("048f0100000300", "0400000000", "0401f04b54020005bf3e")
+        for x in ("048f0100000300", "0400000000", "0401f04b54020005bf7e")
     ] + [
         (
             6,
@@ -1329,6 +1377,9 @@ def run(path, ram, fast=False, *, normal_reads=False, client_script=None):
         )
     ]
     assert (6, bytes.fromhex("0306f04b5402f04b5401")) in actual
+    assert timing_modes == {"normal", "raw"}
+    assert (6, bytes.fromhex("0406f04b5414f04b5402")) in actual
+    assert (6, bytes.fromhex("0306f04b5414f04b5402")) in actual
     assert error_masks == [(4, b"\0"), (3, b"\x24"), (4, b"\x24"), (3, b"\0")], error_masks
     assert [(s, k, n) for s, k, _, n in error_reads] == [(5, 0x84, 1), (5, 0x84, 3)], error_reads
     assert [(raw, n) for raw, s, k, _, n in error_reports if (s,k) == (5,0x84)] == [(False,2), (True,3)]

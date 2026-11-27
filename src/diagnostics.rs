@@ -3,6 +3,7 @@
 use crate::tn4::PORT_COUNT;
 
 pub mod errors;
+pub mod timing;
 pub mod traffic;
 
 pub const CAPTURE_BYTES: usize =

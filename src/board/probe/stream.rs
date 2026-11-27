@@ -6,6 +6,7 @@ use super::super::transmit::{Attempt, LineDriver};
 use super::{CCR, Capture, CaptureInput, INPUTS, IR, TC, TIMERS, next_edge_flags, read, write};
 use core::cell::RefCell;
 use tekmar_482_firmware::diagnostics::errors::{ALL_SOURCES, ErrorBook, HostError, LineError};
+use tekmar_482_firmware::diagnostics::timing::LinkTiming;
 use tekmar_482_firmware::tn4::{ALL_PORTS_MASK, LAST_PORT, MAX_BYTES, PORT_COUNT};
 use tekmar_482_firmware::tpck::{raw, trace};
 const MOVE_QUEUE_CAPACITY: usize = 128;
@@ -132,9 +133,11 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
     let mut response_pin: [Option<LineDriver>; PORT_COUNT] = core::array::from_fn(|_| None);
     let mut ack_mask = 0u8;
     let mut uptime = Uptime::default();
+    let mut timing = LinkTiming::EMPTY;
     let mut last_service = None;
     loop {
         let us = crate::board::panel::now();
+        timing.begin_pass(us);
         let time = uptime.sample(us);
         let seconds = time.seconds;
         if !raw && !reboot && last_service != Some(seconds) {
@@ -208,6 +211,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                 }
             }
         });
+        timing.end_receive(crate::board::panel::now());
         for p in 0..PORT_COUNT {
             let listening = !reboot && !sending[p].as_ref().is_some_and(Attempt::started);
             let mut fault_at = bus.rx[p].take_drive_fault();
@@ -282,7 +286,8 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
             } else {
                 stuck[p] = false;
             }
-            let t = read(TIMERS[INPUTS[p].timer] + TC);
+            let counter = TIMERS[INPUTS[p].timer] + TC;
+            let t = read(counter);
             let may_start =
                 raw || inventory.line(p).may_start(t, bus.rx[p].idle()) && !bus.rx[p].recovering();
             if !raw && !reboot {
@@ -393,7 +398,12 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
             } else {
                 None
             };
-            if let Some(high) = response[p].poll(t, ack_slot) {
+            let response_at = if response[p].busy() || ack_slot.is_some() {
+                read(counter)
+            } else {
+                t
+            };
+            if let Some(high) = response[p].poll(response_at, ack_slot) {
                 if let Some(waiting) = sending[p].as_mut() {
                     waiting.respond(high);
                 } else if high {
@@ -412,7 +422,17 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
             if !response[p].busy()
                 && let Some(attempt) = sending[p].as_mut()
             {
-                let result = attempt.poll(t, may_start);
+                // Scheduling requests and queueing replies above can consume a
+                // substantial part of a half-bit. Check the pin with fresh time.
+                let at = read(counter);
+                let deadline = attempt.deadline();
+                let result = attempt.poll(at, may_start);
+                if let Some(due) = deadline {
+                    let missed = result.is_some_and(|(outcome, _)| outcome == Outcome::Late);
+                    timing.poll_transmit(p, at, missed.then_some(due), time.millis);
+                } else if attempt.started() {
+                    timing.start_transmit(p, at);
+                }
                 let Some((result, fault_at)) = result else {
                     continue;
                 };
@@ -435,7 +455,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                     && !matches!(owner[p], NormalTx::Setting)
                     && !(matches!(owner[p], NormalTx::HostOperation) && reads[p].single_attempt())
                 {
-                    attempt.yield_arbitration(t);
+                    attempt.yield_arbitration(at);
                     continue;
                 }
                 sending[p] = None;
@@ -474,6 +494,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                 );
             }
         }
+        timing.end_lines(crate::board::panel::now());
         if out.can_receive()
             && let Some(moved) = moves.pop_front()
         {
@@ -592,6 +613,15 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                             let reply = match (call.method, call.service, call.body) {
                                 (method::TRAFFIC_COUNTS, service::REQUEST, _) => {
                                     traffic.read(&call)
+                                }
+                                (method::LINK_TIMING, service::REQUEST, []) => {
+                                    call.ok(&timing.service())
+                                }
+                                (method::LINK_TIMING, service::REQUEST, [p @ 0..=LAST_PORT]) => {
+                                    call.ok(&timing.transmit(*p))
+                                }
+                                (method::LINK_TIMING, _, _) => {
+                                    call.error(BridgeError::InvalidRequest)
                                 }
                                 (
                                     method::SET_BRIDGE_MODE,

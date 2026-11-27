@@ -81,6 +81,10 @@ impl Attempt {
         self.sender.started()
     }
 
+    pub(super) fn deadline(&self) -> Option<u32> {
+        self.sender.deadline()
+    }
+
     pub(super) fn respond(&mut self, dominant: bool) {
         debug_assert!(!self.started());
         if dominant {
