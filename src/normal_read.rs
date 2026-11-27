@@ -3,11 +3,90 @@ use crate::tn4::{
     self, HEADER_BYTES, MAX_BYTES, NODE_MASK, message,
     tx::{Outcome, Request},
 };
-use crate::trpc::{Reply, method};
+use crate::trpc::{BridgeError, Reply, method};
+mod status;
+use status::StatusRead;
 
 pub const WINDOW_MS: u32 = 10_000;
 const RESULT_PREFIX: usize = 2 + size_of::<u32>(); // port, status, observation time
 pub const MAX_RESULT: usize = RESULT_PREFIX + MAX_BYTES;
+
+// Block and status transactions share the physical port, not two independent send slots.
+#[repr(u8)]
+pub enum ReadSlot {
+    Block(BlockRead),
+    Status(StatusRead),
+}
+
+impl ReadSlot {
+    pub const EMPTY: Self = Self::Block(BlockRead::EMPTY);
+
+    pub fn parse(method: u32, key: &[u8], now: u32) -> Result<Self, BridgeError> {
+        match method {
+            method::NORMAL_BLOCK_READ => {
+                let q = Query::parse(key).ok_or(BridgeError::InvalidRequest)?;
+                let mut block = BlockRead::EMPTY;
+                block.admit(q, now);
+                Ok(Self::Block(block))
+            }
+            method::NORMAL_STATUS_READ => StatusRead::parse(key, now)
+                .map(Self::Status)
+                .ok_or(BridgeError::InvalidRequest),
+            _ => Err(BridgeError::InvalidRequest),
+        }
+    }
+    pub fn queued(&self) -> bool {
+        match self {
+            Self::Block(r) => r.queued(),
+            Self::Status(r) => r.queued(),
+        }
+    }
+    pub fn frame(&self, port: u8) -> Option<Request> {
+        match self {
+            Self::Block(r) => r.frame(port),
+            Self::Status(r) => r.frame(port),
+        }
+    }
+    pub fn sent(&mut self, outcome: Outcome) {
+        match self {
+            Self::Block(r) => r.sent(outcome),
+            Self::Status(r) => r.sent(outcome),
+        }
+    }
+    pub fn unavailable(&mut self) {
+        match self {
+            Self::Block(r) => r.unavailable(),
+            Self::Status(r) => r.unavailable(),
+        }
+    }
+    pub fn expire(&mut self, now: u32) {
+        match self {
+            Self::Block(r) => r.expire(now),
+            Self::Status(r) => r.expire(now),
+        }
+    }
+    pub fn observe(
+        &mut self,
+        port: u8,
+        body: &[u8],
+        now: u32,
+        publish: impl FnOnce(&Reply) -> bool,
+    ) -> bool {
+        match self {
+            Self::Block(r) => {
+                r.observe(body, now);
+                true
+            }
+            Self::Status(r) => r.observe(port, body, now, publish),
+        }
+    }
+    pub fn take_result(&mut self, port: u8) -> Option<Reply> {
+        match self {
+            Self::Block(r) => r.take_result(port),
+            Self::Status(r) => r.take_result(port),
+        }
+    }
+}
 
 #[repr(u8)]
 #[derive(Clone, Copy, PartialEq, Eq)]

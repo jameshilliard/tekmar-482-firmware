@@ -303,6 +303,11 @@ def run(path, ram, fast=False, *, normal_reads=False):
                     elif phase == "normal-block":
                         assert p == 3 and ack_seen[p] and not exchange
                         inject(bytes.fromhex("6e700607 380003 f3 22 ca35"), port=p)
+                    elif phase == "normal-status":
+                        assert p == 3 and ack_seen[p] and not exchange
+                        end = inject(bytes.fromhex("17e00045 090108 0102"), port=p)
+                        end = inject(bytes.fromhex("17e00605 090108 35ca"), port=p, after=end)
+                        inject(bytes.fromhex("17e00e06 0901ff 0405 7e"), port=p, after=end)
                     elif phase == "normal-silent":
                         assert p == 4 and ack_seen[p] and not exchange
                         jump_at = clock + 50_000
@@ -575,6 +580,22 @@ def run(path, ram, fast=False, *, normal_reads=False):
                     assert data[11:] == bytes.fromhex("6e700607 380003 f3 22 ca35")
                     assert (6, bytes.fromhex("0406f04b54 0ff04b54 01")) in actual
                     assert (6, bytes.fromhex("0306f04b54 02f04b54 01")) in actual, (actual[-10:], list(wire_log))
+                    phase = "normal-status"
+                    exchanges[3].append((bytes.fromhex("17f00004 010208ff"), None))
+                    extension(16, bytes.fromhex("03010018 7f01 010208ff"))
+            elif method == 0x544bf010:
+                assert phase == "normal-status"
+                if data[0] == 4:
+                    assert data[5:] == bytes.fromhex("03010018 7f01 010208ff")
+                    extension(15, bytes.fromhex("030018 0000 0000"))
+                elif data[5:7] == bytes([3,0]):
+                    assert data[0] == 2
+                else:
+                    assert data[0] == 2 and data[5:] == bytes([3,1,0])
+                    parts = [d for k, d in actual if k == 6 and d[:7] == bytes.fromhex("0210f04b54 0300")]
+                    assert [d[11:] for d in parts] == [bytes.fromhex(s) for s in ("17e00605 090108 35ca","17e00e06 0901ff 0405 7e")]
+                    assert 0 < int.from_bytes(parts[0][7:11],"little") < int.from_bytes(parts[1][7:11],"little")
+                    assert actual.count((6, bytes.fromhex("0406f04b54 0ff04b54 01"))) == 2
                     phase = "normal-silent"
                     exchanges[4].append((bytes.fromhex("6d70000b 3412 00 01000000 00000000"), None))
                     extension(15, bytes.fromhex("040001 3412 0000"))
@@ -1013,15 +1034,19 @@ def run(path, ram, fast=False, *, normal_reads=False):
     # not a bus timing limit. The timer above and the individual wire assertions
     # bound simulated time, arbitration and ACK-slot timing independently.
     cpu.emu_start(base, 0xFFFFFFFF, count=750_000_000)
+    painted = bytes(cpu.mem_read(floor, top - floor))
+    free = len(painted) - len(painted.lstrip(b"\xa5"))
+    assert free >= 256, free
     if normal_reads:
         assert phase == "normal-complete" and not traces and not any(exchanges), (phase, actual[-8:])
-        print("ARM Normal block reads: independent control results, selector, busy, silent peer")
+        assert received_rx_acks == expected_rx_acks and observed_flags == expected_flags
+        print(f"ARM Normal reads: block selector, multipart status, cross-method busy, silent peer; untouched stack {free} bytes")
         return
     assert entered, (clock, phase, [len(x) for x in exchanges], results, actual[-10:],
                      line_sends, expected_rx_acks - received_rx_acks, list(wire_log))
     assert actual[:4] == [
         (6, bytes.fromhex(x))
-        for x in ("048f0100000300", "0400000000", "0401f04b540200057f")
+        for x in ("048f0100000300", "0400000000", "0401f04b54020005ff")
     ] + [
         (
             6,
@@ -1049,9 +1074,6 @@ def run(path, ram, fast=False, *, normal_reads=False):
     assert not conflicts and not interrupted and lost == {"master", "write", "raw"}
     assert (1, raw_winner) in [(b[1], b[6:]) for k, b in actual if k == 1 and b[0] == 0]
     assert expected_rx_acks and received_rx_acks == expected_rx_acks, expected_rx_acks - received_rx_acks
-    painted = bytes(cpu.mem_read(floor, top - floor))
-    free = len(painted) - len(painted.lstrip(b"\xa5"))
-    assert free >= 256, free
     print(
         f"ARM TPCK: five-port discovery, arbitration/backoff, RX/ACK, TX/overlap, ISP; untouched stack {free} bytes"
     )

@@ -1,7 +1,7 @@
 //! One bus attempt. Only Normal mode schedules a link error response.
 use super::{
     BIT_US, CRC_BITS, CRC_POLYNOMIAL, EOF_BITS, HEADER_BYTES, MAX_BYTES, MAX_LATENESS_US,
-    PAYLOAD_MASK, PORT_COUNT, SAMPLE_OFFSET_US, STUFF_RUN, crc_bit, gateway_header,
+    MESSAGE_SHIFT, PAYLOAD_MASK, PORT_COUNT, SAMPLE_OFFSET_US, STUFF_RUN, crc_bit, gateway_header,
 };
 
 const TX_IDLE_BITS: u32 = 16;
@@ -33,12 +33,22 @@ impl Request {
 
     /// Gateway application traffic is class 1 and originates at subnet/node zero.
     pub(crate) fn gateway(port: u8, message: u32, payload: &[u8]) -> Option<Self> {
+        Self::with_header(port, gateway_header(message, payload.len()), payload)
+    }
+
+    /// The 483 sends native status requests at class zero, also from address zero.
+    pub(crate) fn status_query(port: u8, message: u16, payload: &[u8]) -> Option<Self> {
+        let header = (u32::from(message) << MESSAGE_SHIFT) | payload.len() as u32;
+        Self::with_header(port, header.to_be_bytes(), payload)
+    }
+
+    fn with_header(port: u8, header: [u8; HEADER_BYTES], payload: &[u8]) -> Option<Self> {
         let len = HEADER_BYTES + payload.len();
         if usize::from(port) >= PORT_COUNT || len > MAX_BYTES {
             return None;
         }
         let mut data = [0; MAX_BYTES];
-        data[..HEADER_BYTES].copy_from_slice(&gateway_header(message, payload.len()));
+        data[..HEADER_BYTES].copy_from_slice(&header);
         data[HEADER_BYTES..len].copy_from_slice(payload);
         Some(Self { port, data, len })
     }

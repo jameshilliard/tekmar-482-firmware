@@ -16,7 +16,7 @@ use tekmar_482_firmware::uptime::Uptime;
 use tekmar_482_firmware::{
     diagnostics,
     inventory::{AddressMove, Answer, BlockProbe, Broadcast, Inventory, LineProbe},
-    normal_read::{BlockRead, Query},
+    normal_read::ReadSlot,
     tn4::{
         Frame, LinkResponse, Receiver, Trailer,
         tx::{Mode, Outcome, Request},
@@ -117,8 +117,8 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
         static_cell::ConstStaticCell::new(diagnostics::traffic::Traffic::EMPTY);
     let traffic = TRAFFIC.take();
     #[unsafe(link_section = ".bss.normal_reads")]
-    static READS: static_cell::ConstStaticCell<[BlockRead; PORT_COUNT]> =
-        static_cell::ConstStaticCell::new([const { BlockRead::EMPTY }; PORT_COUNT]);
+    static READS: static_cell::ConstStaticCell<[ReadSlot; PORT_COUNT]> =
+        static_cell::ConstStaticCell::new([const { ReadSlot::EMPTY }; PORT_COUNT]);
     let reads = READS.take();
     let mut read_mask = 0u8;
     let mut uart = super::super::UartRx::default();
@@ -194,8 +194,16 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                     out.trace(trace::RX, p, time.millis, &[flags], frame.bytes, errors);
                 }
                 if !frame.early_start {
-                    if read_mask & (1 << p) != 0 {
-                        reads[p].observe(frame.bytes, time.millis);
+                    if read_mask & (1 << p) != 0
+                        && !reads[p].observe(p as u8, frame.bytes, time.millis, |part| {
+                            if !out.can_receive() {
+                                return false;
+                            }
+                            out.enqueue(Kind::Control, tpck::TRPC, part.payload());
+                            true
+                        })
+                    {
+                        errors.line(p, LineError::StatusReadDrop, time.millis);
                     }
                     if let Some(moved) = inventory.observe(p, frame.bytes, seconds) {
                         if moves.is_full() {
@@ -292,11 +300,11 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                 inventory.command_expire(p, seconds);
                 let cancel = match owner[p] {
                     NormalTx::Probe(probe) => {
-                        foreground || host_read || !inventory.probe_current(probe, seconds)
+                        foreground || read_active || !inventory.probe_current(probe, seconds)
                     }
                     NormalTx::Idle => false,
                     NormalTx::Discovery(probe) => {
-                        foreground || host_read || discovery != Some(probe)
+                        foreground || read_active || discovery != Some(probe)
                     }
                     NormalTx::HostRead => foreground || !host_read,
                     NormalTx::Setting => inventory.command_finished(p),
@@ -356,6 +364,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                             reads[p].unavailable();
                         }
                     } else if !foreground
+                        && !read_active
                         && let Some(probe) = discovery
                         && let Some(req) = probe.frame(p as u8)
                     {
@@ -365,6 +374,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                             owner[p] = NormalTx::Discovery(probe);
                         }
                     } else if !foreground
+                        && !read_active
                         && let Some(probe) = inventory.next_probe(p, time)
                         && let Some(req) = Request::new(p as u8, &probe.body())
                     {
@@ -609,21 +619,23 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                                 (
                                     method::NORMAL_TRACE
                                     | method::NORMAL_IDENTITY
-                                    | method::NORMAL_BLOCK_READ,
+                                    | method::NORMAL_BLOCK_READ
+                                    | method::NORMAL_STATUS_READ,
                                     _,
                                     _,
                                 ) if raw => call.error(BridgeError::WrongMode),
                                 (
-                                    method::NORMAL_BLOCK_READ,
+                                    method::NORMAL_BLOCK_READ | method::NORMAL_STATUS_READ,
                                     service::REQUEST,
                                     [p @ 0..=LAST_PORT, key @ ..],
-                                ) => match Query::parse(key) {
-                                    None => call.error(BridgeError::InvalidRequest),
-                                    Some(q) if reads[usize::from(*p)].admit(q, time.millis) => {
+                                ) => match ReadSlot::parse(call.method, key, time.millis) {
+                                    Err(e) => call.error(e),
+                                    Ok(slot) if read_mask & (1 << *p) == 0 => {
+                                        reads[usize::from(*p)] = slot;
                                         read_mask |= 1 << *p;
                                         call.ok(call.body)
                                     }
-                                    Some(_) => call.error(BridgeError::Busy),
+                                    Ok(_) => call.error(BridgeError::Busy),
                                 },
                                 (
                                     method::NORMAL_IDENTITY,
@@ -706,7 +718,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                                 (
                                     method::SET_BRIDGE_MODE
                                     | method::PORT_DROPS
-                                    | method::PANEL..=method::NORMAL_BLOCK_READ,
+                                    | method::PANEL..=method::NORMAL_STATUS_READ,
                                     _,
                                     _,
                                 ) => call.error(BridgeError::InvalidRequest),
