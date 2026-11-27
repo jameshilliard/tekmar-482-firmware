@@ -39,6 +39,7 @@ const FEATURE_NORMAL_DISCOVER: u16 = 1 << 12;
 const FEATURE_ORDERED_NATIVE_RESULTS: u16 = 1 << 13;
 const FEATURE_LINK_TIMING: u16 = 1 << 14;
 const FEATURE_NORMAL_STAGE_COMMAND: u16 = 1 << 15;
+const FEATURE_NORMAL_SERVICE_FRAME: u32 = 1 << 16;
 const HEADER_BYTES: usize = 1 + size_of::<u32>();
 const REVISION_MAGIC: &[u8; 8] = b"TK48REV\0";
 const REVISION_BYTES: usize = REVISION_MAGIC.len() + 40; // hexadecimal Git object name
@@ -190,6 +191,7 @@ impl<'a> Call<'a> {
                         | FEATURE_LINK_TIMING
                         | FEATURE_NORMAL_STAGE_COMMAND)
                         .to_le_bytes()[1],
+                    FEATURE_NORMAL_SERVICE_FRAME.to_le_bytes()[2],
                 ],
             ),
             (REQUEST, FIRMWARE_BUILD) if self.body.is_empty() => {

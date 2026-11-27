@@ -642,6 +642,15 @@ one of these commands without leaving Normal mode. The 483 registries
 establish the bytes and target mask; they do not establish every
 receiver's behavior or which models accept each operation.
 
+**Calibration, mixing and network-test commands.** Both 483 decoders
+establish the base byte widths for 287, 357, 387 and 38F. They do not
+associate the mode codes or time words with particular device menus.
+These messages carry no explicit destination selector. The
+[NormalServiceFrame](tpck-bridge.md#normal-service-frames) operation
+uses a caller-supplied native source and priority, does not add a
+motor-speed byte, and does not assume any device implemented the
+command. Monitor subsequent peer traffic separately for actual state.
+
 **Associating water temperatures.** A MasterPresent slot is a subnet byte
 (control in bits 7:3, bus in 2:0), not a physical gateway port. Slot 0
 advertises the boiler; slots 1 through 7 advertise those numbered mixes.

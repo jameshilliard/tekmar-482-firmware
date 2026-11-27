@@ -65,6 +65,9 @@ impl NormalOperation {
             method::NORMAL_STAGE_COMMAND => Send::stage(key, now)
                 .map(Self::Send)
                 .ok_or(BridgeError::InvalidRequest),
+            method::NORMAL_SERVICE_FRAME => Send::service_frame(key, now)
+                .map(Self::Send)
+                .ok_or(BridgeError::InvalidRequest),
             _ => Err(BridgeError::InvalidRequest),
         }
     }

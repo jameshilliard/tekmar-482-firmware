@@ -1,7 +1,7 @@
 //! Normal operations that return the link outcome without collecting application replies.
 use super::{Query, TX_NOT_SENT, TX_PIN_UNAVAILABLE, WINDOW_MS, outcome_byte};
 use crate::tn4::{
-    block,
+    HEADER_BYTES, MESSAGE_MASK, MESSAGE_SHIFT, PAYLOAD_MASK, block,
     message::{self, payload_bytes::STAGE_SELECTION},
     tx::{Outcome, Request},
 };
@@ -12,6 +12,7 @@ const MAX_CLOCK_BYTES: usize = 6; // five date/time fields and optional DST mode
 const WEEKDAY_MASK: u8 = 7;
 const HOUR_SHIFT: u8 = 3;
 const DST_FLAG: u8 = 1 << 4;
+const SERVICE_BODY_BYTES: usize = HEADER_BYTES + 3; // largest known service payload
 
 enum Phase {
     Queued,
@@ -23,6 +24,7 @@ enum Body {
     Announcement(u32, heapless::Vec<u8, MAX_CLOCK_BYTES>),
     IdentityProbe(u8),
     Stage(u32, [u8; STAGE_SELECTION]),
+    Service(heapless::Vec<u8, SERVICE_BODY_BYTES>),
 }
 
 pub struct Send {
@@ -79,11 +81,35 @@ impl Send {
         })
     }
 
+    pub(super) fn service_frame(body: &[u8], start: u32) -> Option<Self> {
+        let (header, payload) = body.split_first_chunk::<HEADER_BYTES>()?;
+        let id = (u32::from_be_bytes(*header) >> MESSAGE_SHIFT) & MESSAGE_MASK;
+        if usize::from(header[HEADER_BYTES - 1] & PAYLOAD_MASK) != payload.len()
+            || !matches!(
+                (id, payload),
+                (message::CALIBRATION_MODE, [_])
+                    | (message::NETWORK_TEST_TIME, [_, _])
+                    | (
+                        message::NETWORK_TEST_MODE | message::MIXING_MODULE_UPDATE,
+                        [_, _, _]
+                    )
+            )
+        {
+            return None;
+        }
+        Some(Self {
+            body: Body::Service(heapless::Vec::from_slice(body).ok()?),
+            start,
+            phase: Phase::Queued,
+        })
+    }
+
     pub(super) fn trace_origin(&self) -> u8 {
         match self.body {
             Body::Announcement(..) => trace::BROADCAST,
             Body::IdentityProbe(_) => trace::DISCOVERY,
             Body::Stage(..) => trace::STAGE_COMMAND,
+            Body::Service(_) => trace::SERVICE_FRAME,
         }
     }
 
@@ -100,6 +126,7 @@ impl Send {
             }
             Body::Announcement(id, data) => Request::gateway_class_zero(port, *id, data),
             Body::Stage(id, data) => Request::gateway_class_zero(port, *id, data),
+            Body::Service(body) => Request::new(port, body),
             Body::IdentityProbe(subnet) => Query {
                 nodes: super::ALL_NODES,
                 subnet: *subnet,
@@ -135,6 +162,7 @@ impl Send {
             Body::Announcement(..) => method::NORMAL_ANNOUNCE,
             Body::IdentityProbe(_) => method::NORMAL_DISCOVER,
             Body::Stage(..) => method::NORMAL_STAGE_COMMAND,
+            Body::Service(_) => method::NORMAL_SERVICE_FRAME,
         };
         Some(Reply::report(method, &[port, result]))
     }
@@ -219,6 +247,38 @@ mod tests {
             &[0xff, 2, 0xab, 0xf5, 1, 0x80, 0x80], // a scene
         ] {
             assert!(Send::stage(bad, 0).is_none(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn service_frames_preserve_the_header_and_admit_only_known_lengths() {
+        for body in [
+            &[0x68, 0x74, 0x31, 0xc1, 3][..],
+            &[0xb5, 0x74, 0x31, 0xc3, 0xcf, 0xfe, 99],
+            &[0xb8, 0x74, 0x31, 0xc2, 0x34, 0x12],
+            &[0xb8, 0xf4, 0x31, 0xc3, 2, 0x56, 0x34],
+        ] {
+            let mut send = Send::service_frame(body, 0).unwrap();
+            assert_eq!(send.frame(3), Request::new(3, body));
+            assert_eq!(send.trace_origin(), trace::SERVICE_FRAME);
+            send.sent(Outcome::ArbitrationLost);
+            send.sent(Outcome::Ack);
+            assert!(send.frame(3).is_none());
+            assert_eq!(
+                send.take_result(3).unwrap().payload(),
+                &[2, 0x16, 0xf0, 0x4b, 0x54, 3, 2]
+            );
+            assert!(send.take_result(3).is_none());
+        }
+        for bad in [
+            &[][..],
+            &[0xb8, 0xf4, 0x31],
+            &[0xb8, 0xf4, 0x31, 0xc2, 2, 0x56, 0x34], // length disagrees with header
+            &[0xb8, 0xf4, 0x31, 0xc2, 2, 0x56],       // incomplete test mode
+            &[0xb5, 0x74, 0x31, 0xc4, 0xcf, 0xfe, 99, 0x77], // unknown tail
+            &[0x2d, 0xf0, 0, 5, 0x43, 7, 3, 0, 1],    // unguarded BlockUpdate
+        ] {
+            assert!(Send::service_frame(bad, 0).is_none(), "{bad:?}");
         }
     }
 

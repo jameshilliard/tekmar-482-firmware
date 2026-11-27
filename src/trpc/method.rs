@@ -50,3 +50,4 @@ pub const NORMAL_ANNOUNCE: u32 = 0x544b_f012;
 pub const NORMAL_DISCOVER: u32 = 0x544b_f013;
 pub const LINK_TIMING: u32 = 0x544b_f014;
 pub const NORMAL_STAGE_COMMAND: u32 = 0x544b_f015;
+pub const NORMAL_SERVICE_FRAME: u32 = 0x544b_f016;
