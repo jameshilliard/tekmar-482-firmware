@@ -50,7 +50,7 @@ the request body is empty. All integers are little endian.
 | --- | --- | --- |
 | 00000187 FirmwareRevision | Request, zero or two placeholder bytes | u16 numeric revision, 0 for this unnumbered custom image |
 | 0000018F ProtocolVersion | Request, zero or two placeholder bytes | u16 tHA protocol version, currently 3 |
-| 544BF001 BridgeCapabilities | Request | Four u8 values: version (2), mode (0 Normal, 1 Raw), port count (5), flags (bit 0 Raw, 1 ROM update, 2 Normal trace, 3 error reporting, 4 Normal identity read, 5 traffic counters). |
+| 544BF001 BridgeCapabilities | Request | Four u8 values: version (2), mode (0 Normal, 1 Raw), port count (5), flags (bit 0 Raw, 1 ROM update, 2 Normal trace, 3 error reporting, 4 Normal identity read, 5 traffic counters, 6 Normal block read). |
 | 544BF002 SetBridgeMode | Update, mode u8 | Echo mode: 0 Normal, 1 Raw. Busy during an inventory walk, a started transmission, an outstanding host send or a local ACK. Switching modes clears the Normal inventory; returning to Normal also clears the ACK mask. |
 | 544BF003 PortDrops | Request, port u8 | Port u8, valid records dropped u64, invalid records dropped u64. |
 | 544BF004 FirmwareBuild | Request | Build revision without a terminator: 40 lowercase hexadecimal digits or `unversioned` |
@@ -64,6 +64,7 @@ the request body is empty. All integers are little endian.
 | 544BF00C ErrorReporting | Request, Update, Report | Both modes. Read/replace the source mask, read one error counter, or receive changed counters (below). |
 | 544BF00D NormalIdentity | Request, port/subnet/node | Queues a read of identity block 00 in Normal mode. The native reply, not the gateway acknowledgement, identifies the device. |
 | 544BF00E TrafficCounts | Request | Read gateway-owned traffic totals or enumerate native paths, in either mode. See below. |
+| 544BF00F NormalBlockRead | Request, Report | Read a block on one physical port and receive the matching native frame on the control channel. Normal only. |
 
 Version 2 event counts start at zero at boot, survive mode changes and
 saturate at 2^64-1 instead of wrapping. Subtract snapshots from the same
@@ -84,10 +85,44 @@ Byte-exact frames (spaces separate fields, not transmitted bytes):
 ProtocolVersion request:   CA 07 06 01 8F010000 0000 9E 35
 ProtocolVersion response:  CA 07 06 04 8F010000 0300 A4 35
 BridgeCapabilities:        CA 05 06 01 01F04B54 9C 35
-Normal, all six features:  CA 09 06 04 01F04B54 0200053F E9 35
+Normal, all seven features: CA 09 06 04 01F04B54 0200057F 29 35
 EnterFirmwareUpdate:       CA 05 06 00 05F04B54 9F 35
 Drained before handoff:    CA 05 06 03 05F04B54 A2 35
 ```
+
+## Addressed Normal reads
+
+Send Request `544BF00F` with `port:u8 subnet:u8 node:u8 block:u16
+selector_mask:u8 selector:u8`. Node is 1..31. For a plain block both
+selector bytes are zero. For an indexed block the selector must fit its
+mask: for example, `07 03` selects schedule 3 ignoring the other flags in
+its first data byte. The gateway sends only a class-1, source-zero
+`2D7`, with a one-node bitmap and a little-endian u32 selector argument.
+The request cannot send an update or change trace, mode or reporting.
+
+An immediate Response:Request repeats the seven request bytes if admitted.
+One read fits on each port; an overlap gets BridgeError Busy and no terminal
+event of its own. A busy port or silent peer does not block the host's other
+tRPC commands. Queued settings take priority over reads; admission does not
+guarantee the line becomes available before the ten-second gateway deadline.
+
+Each admitted read produces exactly one Report on the same method, via the
+control FIFO independently of trace and report subscriptions. On success its
+body is `port:u8 00 gateway_ms:u32 native_header_and_payload`. On failure
+it is exactly `port:u8 status:u8`: 1 deadline expired, 2 TX pin unavailable,
+3 link fault. No response packet or temperature is synthesized. An ACK or
+missing ACK by itself is not decisive: after transmission the receiver waits
+for a valid on-time `2E7` from that subnet/node, with the requested block,
+an intelligible support mask and, if indexed, the supported selector.
+Header flags, partial supported data and extension bytes are returned intact.
+This is fresh peer evidence, not proof the read caused the announcement.
+
+No host token is needed. A port's terminal report is enqueued before a
+new read on that port can be accepted. Arm the waiter at its own admission
+in UART order, not when a host coroutine resumes. After a lost or cancelled
+admission, an inline capabilities request fences earlier acceptance replies;
+it does not cancel an accepted read. Raw mode and ROM handoff cannot abandon
+an outstanding read. Timeouts never cause a retry after a completed frame.
 
 ## Traffic counters
 

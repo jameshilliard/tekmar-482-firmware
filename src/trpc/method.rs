@@ -43,3 +43,4 @@ pub const NORMAL_TRACE: u32 = 0x544b_f00b;
 pub const ERROR_REPORTING: u32 = 0x544b_f00c;
 pub const NORMAL_IDENTITY: u32 = 0x544b_f00d;
 pub const TRAFFIC_COUNTS: u32 = 0x544b_f00e;
+pub const NORMAL_BLOCK_READ: u32 = 0x544b_f00f;

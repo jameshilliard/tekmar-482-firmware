@@ -16,6 +16,7 @@ use tekmar_482_firmware::uptime::Uptime;
 use tekmar_482_firmware::{
     diagnostics,
     inventory::{AddressMove, Answer, BlockProbe, Broadcast, Inventory, LineProbe},
+    normal_read::{BlockRead, Query},
     tn4::{
         Frame, LinkResponse, Receiver, Trailer,
         tx::{Mode, Outcome, Request},
@@ -69,6 +70,7 @@ impl Receivers {
 enum NormalTx {
     Idle,
     Probe(BlockProbe),
+    HostRead,
     Discovery(LineProbe),
     Setting,
     Broadcast(Broadcast),
@@ -80,7 +82,7 @@ impl NormalTx {
             Self::Setting => trace::SETTING,
             Self::Broadcast(_) => trace::BROADCAST,
             Self::Discovery(_) => trace::DISCOVERY,
-            Self::Probe(_) => trace::PROBE,
+            Self::Probe(_) | Self::HostRead => trace::PROBE,
             Self::Idle => unreachable!(),
         }
     }
@@ -114,6 +116,11 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
     static TRAFFIC: static_cell::ConstStaticCell<diagnostics::traffic::Traffic> =
         static_cell::ConstStaticCell::new(diagnostics::traffic::Traffic::EMPTY);
     let traffic = TRAFFIC.take();
+    #[unsafe(link_section = ".bss.normal_reads")]
+    static READS: static_cell::ConstStaticCell<[BlockRead; PORT_COUNT]> =
+        static_cell::ConstStaticCell::new([const { BlockRead::EMPTY }; PORT_COUNT]);
+    let reads = READS.take();
+    let mut read_mask = 0u8;
     let mut uart = super::super::UartRx::default();
     let mut stuck = [false; PORT_COUNT];
     inventory.set_reporting(panel.borrow().reporting_at_boot());
@@ -145,6 +152,13 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
             inventory.tick(seconds);
         }
         let now = TIMERS.map(|t| read(t + TC));
+        if read_mask != 0 {
+            for (port, read) in reads.iter_mut().enumerate() {
+                if read_mask & (1 << port) != 0 {
+                    read.expire(time.millis);
+                }
+            }
+        }
         bus.poll(now, |p, frame| {
             panel.borrow_mut().observe(p);
             if !matches!(frame.trailer, Trailer::Ack | Trailer::NoAck) {
@@ -179,14 +193,17 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                         | (u8::from(frame.early_start) * trace::EARLY_START);
                     out.trace(trace::RX, p, time.millis, &[flags], frame.bytes, errors);
                 }
-                if !frame.early_start
-                    && let Some(moved) = inventory.observe(p, frame.bytes, seconds)
-                {
-                    if moves.is_full() {
-                        moves.pop_front();
-                        errors.host(HostError::AddressNoticeDrop, time.millis);
+                if !frame.early_start {
+                    if read_mask & (1 << p) != 0 {
+                        reads[p].observe(frame.bytes, time.millis);
                     }
-                    let _ = moves.push_back(moved);
+                    if let Some(moved) = inventory.observe(p, frame.bytes, seconds) {
+                        if moves.is_full() {
+                            moves.pop_front();
+                            errors.host(HostError::AddressNoticeDrop, time.millis);
+                        }
+                        let _ = moves.push_back(moved);
+                    }
                 }
             }
         });
@@ -269,14 +286,19 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                 raw || inventory.line(p).may_start(t, bus.rx[p].idle()) && !bus.rx[p].recovering();
             if !raw && !reboot {
                 let foreground = inventory.has_command(p) || inventory.has_broadcast(p);
+                let read_active = read_mask & (1 << p) != 0;
+                let host_read = read_active && reads[p].queued();
                 let discovery = inventory.line(p).pending();
                 inventory.command_expire(p, seconds);
                 let cancel = match owner[p] {
                     NormalTx::Probe(probe) => {
-                        foreground || !inventory.probe_current(probe, seconds)
+                        foreground || host_read || !inventory.probe_current(probe, seconds)
                     }
                     NormalTx::Idle => false,
-                    NormalTx::Discovery(probe) => foreground || discovery != Some(probe),
+                    NormalTx::Discovery(probe) => {
+                        foreground || host_read || discovery != Some(probe)
+                    }
+                    NormalTx::HostRead => foreground || !host_read,
                     NormalTx::Setting => inventory.command_finished(p),
                     NormalTx::Broadcast(tx) => inventory.stale_broadcast(p, tx, seconds),
                 };
@@ -290,7 +312,15 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                     }
                     owner[p] = NormalTx::Idle;
                 }
-                if (foreground || discovery.is_some() || inventory.has_reads(p))
+                if read_active
+                    && !matches!(owner[p], NormalTx::HostRead)
+                    && out.can_receive()
+                    && let Some(result) = reads[p].take_result(p as u8)
+                {
+                    out.enqueue(Kind::Control, tpck::TRPC, result.payload());
+                    read_mask &= !(1 << p);
+                }
+                if (foreground || host_read || discovery.is_some() || inventory.has_reads(p))
                     && sending[p].is_none()
                     && !response[p].busy()
                 {
@@ -313,6 +343,17 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                             Attempt::new(&req, INPUTS[p].pin, t, Mode::Normal, errors, time.millis);
                         if sending[p].is_some() {
                             owner[p] = NormalTx::Broadcast(tx);
+                        }
+                    } else if !foreground
+                        && host_read
+                        && let Some(req) = reads[p].frame(p as u8)
+                    {
+                        sending[p] =
+                            Attempt::new(&req, INPUTS[p].pin, t, Mode::Normal, errors, time.millis);
+                        if sending[p].is_some() {
+                            owner[p] = NormalTx::HostRead;
+                        } else {
+                            reads[p].unavailable();
                         }
                     } else if !foreground
                         && let Some(probe) = discovery
@@ -400,6 +441,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                     match core::mem::replace(&mut owner[p], NormalTx::Idle) {
                         NormalTx::Setting => inventory.command_sent(p, result),
                         NormalTx::Probe(probe) => inventory.probe_sent(probe, time.millis),
+                        NormalTx::HostRead => reads[p].sent(result),
                         NormalTx::Discovery(probe) => inventory.line(p).finished(probe),
                         _ => {}
                     }
@@ -532,6 +574,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                             }
                             let busy = !moves.is_empty()
                                 || inventory.walking()
+                                || read_mask != 0
                                 || (0..PORT_COUNT).any(|p| {
                                     inventory.has_command(p) || inventory.has_broadcast(p)
                                 })
@@ -563,9 +606,25 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                                 (method::SET_BRIDGE_MODE, service::UPDATE, [_]) if busy => {
                                     call.error(BridgeError::Busy)
                                 }
-                                (method::NORMAL_TRACE | method::NORMAL_IDENTITY, _, _) if raw => {
-                                    call.error(BridgeError::WrongMode)
-                                }
+                                (
+                                    method::NORMAL_TRACE
+                                    | method::NORMAL_IDENTITY
+                                    | method::NORMAL_BLOCK_READ,
+                                    _,
+                                    _,
+                                ) if raw => call.error(BridgeError::WrongMode),
+                                (
+                                    method::NORMAL_BLOCK_READ,
+                                    service::REQUEST,
+                                    [p @ 0..=LAST_PORT, key @ ..],
+                                ) => match Query::parse(key) {
+                                    None => call.error(BridgeError::InvalidRequest),
+                                    Some(q) if reads[usize::from(*p)].admit(q, time.millis) => {
+                                        read_mask |= 1 << *p;
+                                        call.ok(call.body)
+                                    }
+                                    Some(_) => call.error(BridgeError::Busy),
+                                },
                                 (
                                     method::NORMAL_IDENTITY,
                                     service::REQUEST,
@@ -647,7 +706,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                                 (
                                     method::SET_BRIDGE_MODE
                                     | method::PORT_DROPS
-                                    | method::PANEL..=method::TRAFFIC_COUNTS,
+                                    | method::PANEL..=method::NORMAL_BLOCK_READ,
                                     _,
                                     _,
                                 ) => call.error(BridgeError::InvalidRequest),

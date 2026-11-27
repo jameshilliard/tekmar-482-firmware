@@ -29,10 +29,12 @@ const FEATURE_NORMAL_TRACE: u8 = 1 << 2;
 const FEATURE_ERROR_REPORTING: u8 = 1 << 3;
 const FEATURE_NORMAL_IDENTITY: u8 = 1 << 4;
 const FEATURE_TRAFFIC_COUNTS: u8 = 1 << 5;
+const FEATURE_NORMAL_BLOCK_READ: u8 = 1 << 6;
 const HEADER_BYTES: usize = 1 + size_of::<u32>();
 const REVISION_MAGIC: &[u8; 8] = b"TK48REV\0";
 const REVISION_BYTES: usize = REVISION_MAGIC.len() + 40; // hexadecimal Git object name
-const MAX_REPLY_BYTES: usize = HEADER_BYTES + crate::diagnostics::CAPTURE_BYTES;
+const MAX_REPLY_BYTES: usize = HEADER_BYTES + crate::normal_read::MAX_RESULT;
+const _: () = assert!(crate::normal_read::MAX_RESULT >= crate::diagnostics::CAPTURE_BYTES);
 
 const BUILD_LEN: usize = env!("TEKMAR_BUILD_REVISION").len();
 
@@ -169,7 +171,8 @@ impl<'a> Call<'a> {
                         | FEATURE_NORMAL_TRACE
                         | FEATURE_ERROR_REPORTING
                         | FEATURE_NORMAL_IDENTITY
-                        | FEATURE_TRAFFIC_COUNTS,
+                        | FEATURE_TRAFFIC_COUNTS
+                        | FEATURE_NORMAL_BLOCK_READ,
                 ],
             ),
             (REQUEST, FIRMWARE_BUILD) if self.body.is_empty() => {

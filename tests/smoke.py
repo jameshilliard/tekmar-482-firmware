@@ -78,7 +78,7 @@ def protected_bits(body):
     return wire
 
 
-def run(path, ram, fast=False):
+def run(path, ram, fast=False, *, normal_reads=False):
     cpu = Uc(UC_ARCH_ARM, UC_MODE_ARM)
     base = 0x40001000 if ram else 0
     if not ram:
@@ -182,6 +182,12 @@ def run(path, ram, fast=False):
         nonlocal phase, jump_at, discovery_end, inventory_at
         if phase == "line-cold" and len(actual) >= 4 and all(line_sends) and len(observed_flags) == 5:
             assert all([b for b, _ in tx] == [init] for tx in line_sends)
+            if normal_reads:
+                phase = "normal-block"
+                peers.update((3,4))
+                exchanges[3].append((bytes.fromhex("6d70000b 3800 00 00008000 03000000"), None))
+                extension(15, bytes.fromhex("030018 3800 0703"))
+                return
             phase = "line-up"
             contend(1, master, bytes.fromhex("7ff05001 00"), "master")
             end = inject(bytes.fromhex("7ff00001 00"))
@@ -219,7 +225,7 @@ def run(path, ram, fast=False):
             timers[t][0] = timers[t].get(0, 0) | (1 << (4 + ch))
 
     def gpio_write(uc, off, size, value, data):
-        nonlocal pins, phase, inventory_at
+        nonlocal pins, phase, inventory_at, jump_at
         if off in (0x18, 0x1C, 0):
             for p, exchange in enumerate(exchanges):
                 tx = 1 << PORTS[p][3]
@@ -294,6 +300,12 @@ def run(path, ram, fast=False):
                         phase = "capture"
                         end = inject(bytes.fromhex("7ff09000"), port=3)  # retire this synthetic subnet
                         inventory_at = inject(bytes.fromhex("6e700609 00003f 828301 2301 04"), after=end)
+                    elif phase == "normal-block":
+                        assert p == 3 and ack_seen[p] and not exchange
+                        inject(bytes.fromhex("6e700607 380003 f3 22 ca35"), port=p)
+                    elif phase == "normal-silent":
+                        assert p == 4 and ack_seen[p] and not exchange
+                        jump_at = clock + 50_000
                     if device_reply:
                         end = inject(device_reply)
                         if phase in ("device-target", "setpoint-mode", "await-setpoint-setup"):
@@ -344,6 +356,8 @@ def run(path, ram, fast=False):
         if off == 8:
             if t == 0 and timers[t].get(4) == 1:
                 clock += 40
+                if clock > 55_000_000:
+                    raise AssertionError(("emulated bus scenario timed out", phase, actual[-4:]))
                 if trace_check_at is not None and clock >= trace_check_at:
                     trace_check_at = None
                     call(0x107, bytes(2))
@@ -538,9 +552,32 @@ def run(path, ram, fast=False):
             method = int.from_bytes(data[1:5], "little")
             if method == 0x544BF004:
                 line_progress()
-                extension(12)
-                extension(12, bytes.fromhex("0584"))
-                extension(12, b"\x24", True)  # port 2 and gateway
+                if not normal_reads:
+                    extension(12)
+                    extension(12, bytes.fromhex("0584"))
+                    extension(12, b"\x24", True)  # port 2 and gateway
+            elif method == 0x544bf00f:
+                if phase == "normal-silent":
+                    if data[0] == 4:
+                        assert data[5:] == bytes.fromhex("040001 3412 0000")
+                    else:
+                        assert data[0] == 2 and data[5:] == bytes([4,1])
+                        phase = "normal-complete"
+                        cpu.emu_stop()
+                elif data[0] == 4:
+                    assert phase == "normal-block"
+                    assert data[5:] == bytes.fromhex("030018 3800 0703")
+                    extension(15, bytes.fromhex("030018 3800 0703"))  # busy, not a second query
+                    extension(2, b"\x01", True)  # changing mode cannot abandon the read
+                else:
+                    assert phase == "normal-block" and data[0] == 2 and data[5:7] == bytes([3,0])
+                    assert int.from_bytes(data[7:11], "little") > 0
+                    assert data[11:] == bytes.fromhex("6e700607 380003 f3 22 ca35")
+                    assert (6, bytes.fromhex("0406f04b54 0ff04b54 01")) in actual
+                    assert (6, bytes.fromhex("0306f04b54 02f04b54 01")) in actual, (actual[-10:], list(wire_log))
+                    phase = "normal-silent"
+                    exchanges[4].append((bytes.fromhex("6d70000b 3412 00 01000000 00000000"), None))
+                    extension(15, bytes.fromhex("040001 3412 0000"))
             elif method == 0x544bf00e:
                 body=data[5:]
                 assert data[0]==4
@@ -572,7 +609,7 @@ def run(path, ram, fast=False):
                         incoming.append(0)
                         incoming.extend(corrupt)
             elif method == 0x167 and data[5:] == bytes(2):
-                assert actual[-2] == (6, bytes.fromhex("04670100000100"))
+                assert actual[-2] == (6, bytes.fromhex("04670100000100")), (actual[-7:], list(wire_log))
                 call(0x197, bytes.fromhex("010000000000"))
                 call(0x19f, bytes.fromhex("0100"))
             elif method == 0x19f:
@@ -972,12 +1009,19 @@ def run(path, ram, fast=False):
     cpu.mmio_map(0xE000C000, 0x1000, read, None, write, None)
     cpu.hook_add(UC_HOOK_CODE, rom, begin=0x7FFFFFF0, end=0x7FFFFFF0)
     # The scenario runs real ARM instructions while each synthetic tN4 bit elapses.
-    cpu.emu_start(base, 0xFFFFFFFF, count=600_000_000)
+    # This is a runaway-code guard (including a loop that never reads a timer),
+    # not a bus timing limit. The timer above and the individual wire assertions
+    # bound simulated time, arbitration and ACK-slot timing independently.
+    cpu.emu_start(base, 0xFFFFFFFF, count=750_000_000)
+    if normal_reads:
+        assert phase == "normal-complete" and not traces and not any(exchanges), (phase, actual[-8:])
+        print("ARM Normal block reads: independent control results, selector, busy, silent peer")
+        return
     assert entered, (clock, phase, [len(x) for x in exchanges], results, actual[-10:],
                      line_sends, expected_rx_acks - received_rx_acks, list(wire_log))
     assert actual[:4] == [
         (6, bytes.fromhex(x))
-        for x in ("048f0100000300", "0400000000", "0401f04b540200053f")
+        for x in ("048f0100000300", "0400000000", "0401f04b540200057f")
     ] + [
         (
             6,
@@ -1020,3 +1064,4 @@ if __name__ == "__main__":
     parser.add_argument("image", type=Path)
     args = parser.parse_args()
     run(args.image, args.ram, args.fast)
+    run(args.image, args.ram, args.fast, normal_reads=True)

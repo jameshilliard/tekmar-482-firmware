@@ -27,7 +27,7 @@ SECTIONS {
     __data_load = LOADADDR(.data);
     .main_bss (NOLOAD) : ALIGN(4) {
         __main_start = .;
-        *(.bss.inventory .bss.address_moves .bss.error_book .bss.traffic)
+        *(.bss.inventory .bss.address_moves .bss.error_book .bss.traffic .bss.normal_reads)
         . = ALIGN(4);
         __main_end = .;
     } > RAM

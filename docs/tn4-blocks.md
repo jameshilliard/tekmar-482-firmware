@@ -205,6 +205,12 @@ reading this block does not return the active scene.
 
 ## Reading a 402
 
+With capability bit 6, use [NormalBlockRead](tpck-bridge.md#addressed-normal-reads)
+for the identification block or any addressed setup block. It returns the
+peer's actual frame without enabling trace. Supply the selector for an
+indexed register; the block catalog describes possible reads, not which
+instances the particular control has installed.
+
 In Normal mode, capability bit 4 advertises `NormalIdentity` (tRPC
 `0x544BF00D`). Request with three bytes: physical port (0..4), full
 subnet, and block destination node (1..31). The ResponseRequest echoes

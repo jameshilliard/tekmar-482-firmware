@@ -2,6 +2,7 @@
 
 pub mod diagnostics;
 pub mod inventory;
+pub mod normal_read;
 pub mod onboard_test;
 pub mod tn4;
 pub mod tpck;
