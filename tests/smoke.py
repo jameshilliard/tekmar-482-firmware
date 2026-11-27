@@ -5,6 +5,7 @@
 """Run the release ARM image against binary UART, capture timers and five line transceivers."""
 
 import argparse
+import json
 import os
 import struct
 import subprocess
@@ -20,6 +21,7 @@ from frames import Decoder, encode
 
 PORTS = [(4, 0, 1, 28), (11, 1, 1, 13), (6, 0, 2, 22), (10, 1, 0, 8), (2, 0, 0, 29)]
 TRACE_BURST = 2 * len(PORTS)
+CLIENT_STEP_US = 120_000
 BITS = "10001001000110000010000010000010000110100101000111000101111"
 BODY = bytes.fromhex("12300001a5")
 EDIT_KEY = bytes.fromhex("030018 0300 0000 07 03 010409 000409")
@@ -84,7 +86,7 @@ def protected_bits(body):
     return wire
 
 
-def run(path, ram, fast=False, *, normal_reads=False):
+def run(path, ram, fast=False, *, normal_reads=False, client_script=None):
     cpu = Uc(UC_ARCH_ARM, UC_MODE_ARM)
     base = 0x40001000 if ram else 0
     if not ram:
@@ -162,6 +164,10 @@ def run(path, ram, fast=False, *, normal_reads=False):
     conflicts, interrupted, lost = {}, {}, set()
     raw_winner = bytes.fromhex("3f700000")
     backoff_after = 0
+    client_output = bytearray()
+    client_tick = 0
+    client_done = False
+    client_rx_end = [0] * len(PORTS)
 
     def contend(p, loser, winner, tag):
         a, b = protected_bits(loser), protected_bits(winner)
@@ -192,6 +198,12 @@ def run(path, ram, fast=False, *, normal_reads=False):
         nonlocal phase, jump_at, discovery_end, inventory_at, connect_at
         if phase == "line-cold" and all(line_sends) and len(observed_flags) == 5:
             assert all([b for b, _ in tx] == [init] for tx in line_sends)
+            if client_script is not None:
+                for port, request, responses in client_script:
+                    exchanges[port].append((bytes.fromhex(request), tuple(map(bytes.fromhex, responses))))
+                    peers.add(port)
+                phase = "client"
+                return
             if normal_reads:
                 # No UART input, subscriptions or trace while these frames arrive.
                 assert not actual and not incoming and not training
@@ -310,6 +322,7 @@ def run(path, ram, fast=False, *, normal_reads=False):
                         line_progress()
                         continue
                     if not exchange:
+                        assert client_script is None, ("unscripted tN4 transmit", p, wire)
                         assert wire != protected_bits(GROUP_READ) + "0" * tail, "duplicate group read"
                         assert wire != protected_bits(EDIT_WRITE) + "0" * tail, "unexpected duplicate or stale edit"
                         assert wire != protected_bits(SCENE) + "0" * tail, "unrequested scene copy"
@@ -320,6 +333,13 @@ def run(path, ram, fast=False, *, normal_reads=False):
                     # Ten delimiter/ACK/EOF bits, then the driver's final release.
                     assert wire == protected_bits(expected) + "0" * tail, (p, phase, expected.hex(), wire)
                     drive_bits.clear()
+                    if client_script is not None:
+                        for response in device_reply:
+                            client_rx_end[p] = inject(response, port=p, after=max(clock, client_rx_end[p]))
+                        ordered = sorted(edges)
+                        edges.clear()
+                        edges.extend(ordered)
+                        continue
                     if phase == "cycle-read":
                         assert p == 3 and ack_seen[p] and not exchange
                         phase = "capture"
@@ -398,13 +418,27 @@ def run(path, ram, fast=False, *, normal_reads=False):
     cpu.mmio_map(0x3FFFC000, 0x1000, lambda u, o, s, d: gpio[o], None, gpio_write, None)
 
     def timer_read(uc, off, size, t):
-        nonlocal trace_check_at, connect_at
+        nonlocal trace_check_at, connect_at, client_tick, client_done
         nonlocal clock, inventory_at, next_byte, queued_send_at, phase, jump_at, uptime_offset, discovery_end, retry_isp_at, backoff_after
         if off == 8:
             if t == 0 and timers[t].get(4) == 1:
                 clock += 40
                 if clock > 55_000_000:
                     raise AssertionError(("emulated bus scenario timed out", phase, actual[-4:]))
+                if phase == "client" and clock >= client_tick:
+                    # Step in virtual time while an external client exchanges exact UART bytes.
+                    # EOF requests a clean stop; a blank line advances without input.
+                    print(client_output.hex(), flush=True)
+                    client_output.clear()
+                    line = sys.stdin.buffer.readline()
+                    if not line:
+                        client_done = True
+                        uc.emu_stop()
+                        return clock
+                    if not burst:
+                        next_byte = clock + 1042
+                    burst.extend(bytes.fromhex(line.decode("ascii")))
+                    client_tick = clock + CLIENT_STEP_US
                 if connect_at is not None and clock >= connect_at:
                     connect_at = None
                     phase = "boot-counters"
@@ -517,7 +551,9 @@ def run(path, ram, fast=False, *, normal_reads=False):
 
     corrupt = bytearray(encode(6, bytes.fromhex("0005f04b54")))
     corrupt[-2] ^= 1
-    if normal_reads:
+    if client_script is not None:
+        pass  # The client supplies all UART commands after power-on discovery.
+    elif normal_reads:
         extension(14, b"\x01")
         extension(14, bytes.fromhex("014203"))
         extension(14, bytes.fromhex("014204"))
@@ -1180,7 +1216,7 @@ def run(path, ram, fast=False, *, normal_reads=False):
         else:
             incoming.extend(queued)
 
-    if not normal_reads:
+    if not normal_reads and client_script is None:
         connect_host()
     acr = 0
     dlab = False
@@ -1227,8 +1263,11 @@ def run(path, ram, fast=False, *, normal_reads=False):
         elif off == 0:
             assert dll + 256 * dlm == (16 if fast else 313)
             draining = 3
-            for packet in decoder.feed([value]):
-                reply(*packet)
+            if client_script is not None:
+                client_output.append(value)
+            else:
+                for packet in decoder.feed([value]):
+                    reply(*packet)
 
     def rom(uc, addr, size, user):
         nonlocal entered
@@ -1251,6 +1290,10 @@ def run(path, ram, fast=False, *, normal_reads=False):
     painted = bytes(cpu.mem_read(floor, top - floor))
     free = len(painted) - len(painted.lstrip(b"\xa5"))
     assert free >= 256, free
+    if client_script is not None:
+        assert client_done, "client did not advance to EOF"
+        assert not any(exchanges), ("unused tN4 exchanges", exchanges)
+        return
     if normal_reads:
         assert boot_port_checked
         assert phase == "normal-complete" and not traces and not any(exchanges), (phase, actual[-8:])
@@ -1298,7 +1341,15 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--fast", action="store_true")
     parser.add_argument("--ram", action="store_true")
+    parser.add_argument("--client-port", action="store_true", help="test UART step protocol on stdin/stdout")
     parser.add_argument("image", type=Path)
     args = parser.parse_args()
-    run(args.image, args.ram, args.fast)
-    run(args.image, args.ram, args.fast, normal_reads=True)
+    if args.client_port:
+        if args.fast or args.ram:
+            parser.error("the client port uses the Flash image at startup UART speed")
+        # One JSON array of [port, transmit-body hex, [reply-body hex, ...]],
+        # followed by one UART input/output hex line per virtual-time step.
+        run(args.image, False, client_script=json.loads(sys.stdin.buffer.readline()))
+    else:
+        run(args.image, args.ram, args.fast)
+        run(args.image, args.ram, args.fast, normal_reads=True)
