@@ -99,6 +99,144 @@ fn mode_hint_bypasses_cache_age_but_temperature_alone_does_not_query_mode() {
 }
 
 #[test]
+fn idle_enable_transitions_refresh_the_confirmed_mode_not_just_demand() {
+    let mut inv = Inventory::new();
+    observe(&mut inv, 0, 0, 1, 0x2e7, &[0, 0, 63, 1, 2, 3, 4, 5, 6], 0);
+    observe(&mut inv, 0, 0, 1, 0x36f, &[0, 1, 65, 0x20, 6, 0, 0, 0], 0);
+    observe(&mut inv, 0, 0, 1, 0x2e7, &[3, 0, 1, 1], 0);
+    // Off at an already satisfied temperature changes neither demand nor target.
+    for (ms, flag, confirmed) in [(1, 0, 0), (2, 1, 1)] {
+        for _ in 0..2 {
+            observe(
+                &mut inv,
+                0,
+                0,
+                1,
+                0x36f,
+                &[0, flag, 65, 0x20, 6, 0, 0, 0],
+                0,
+            );
+        }
+        assert_eq!(take(&mut inv, 0, ms).unwrap()[4], 3);
+        observe(&mut inv, 0, 0, 1, 0x2e7, &[3, 0, 1, confirmed], 0);
+        assert!(take(&mut inv, 0, ms).is_none());
+    }
+}
+
+#[test]
+fn changed_mode_overtakes_a_background_backlog_but_cannot_starve_it() {
+    let mut inv = Inventory::new();
+    for n in [1, 2, 3] {
+        observe(&mut inv, 0, 0, n, 0x2e7, &[0, 0, 63, 1, 2, 3, 4, 5, 6], 0);
+        observe(&mut inv, 0, 0, n, 0x26f, &[0; 4], 0);
+    }
+    for n in [2, 3] {
+        observe(&mut inv, 0, 0, n, 0x36f, &[0, 1, 65, 0x20, 6, 0, 0, 0], 0);
+        observe(&mut inv, 0, 0, n, 0x2e7, &[3, 0, 1, 1], 0);
+        observe(&mut inv, 0, 0, n, 0x36f, &[0, 0, 65, 0x20, 6, 0, 0, 0], 0);
+    }
+    for (ms, node, block) in [(0, 2, 3), (1, 1, 13), (2, 3, 3)] {
+        let read = take(&mut inv, 0, ms).unwrap();
+        assert_eq!((read[4], read[7]), (block, 1 << (node - 1)));
+        assert!(take(&mut inv, 0, ms).is_none());
+        observe(&mut inv, 0, 0, node, 0x2e7, &[block, 0, 1, 0], 0);
+    }
+}
+
+#[test]
+fn alternating_member_channels_preserve_the_other_channels_enable_bit() {
+    let mut groups = air::AirGroups::EMPTY;
+    let mut hint = 0;
+    for (group, flag, expected) in [
+        (1, 1, 0x21),
+        (0x21, 1, 0x61),
+        (1, 1, 0x61),
+        (0x21, 0, 0x21),
+        (2, 0, 2), // a different group must not inherit any channels
+    ] {
+        let status = groups
+            .observe(0x36f, &[group, flag, 40, 0, 6, 0, 0, 0])
+            .unwrap();
+        hint = status.mode_hint(hint);
+        assert_eq!(hint, expected);
+    }
+    let master = groups
+        .observe(0x377, &[2, 0, 1, 40, 0, 6, 1, 80, 0, 6, 0, 0, 0])
+        .unwrap();
+    assert_eq!(master.mode_hint(hint), 0x62);
+    let off = groups
+        .observe(0x377, &[2, 0, 0, 40, 0, 6, 0, 80, 0, 6, 0, 0, 0])
+        .unwrap();
+    assert_eq!(off.mode_hint(0x62), 2);
+}
+
+#[test]
+fn mode_reads_always_reply_but_only_changes_or_a_new_subscription_report() {
+    let mut inv = Inventory::new();
+    let report = |inv: &mut Inventory, mode| observe(inv, 0, 0, 1, 0x2e7, &[3, 0, 1, mode], 0);
+    let push = |inv: &mut Inventory, mode| {
+        assert_eq!(
+            inv.next_report(0).unwrap().payload(),
+            &[2, 0x27, 1, 0, 0, 24, 0, mode]
+        )
+    };
+    report(&mut inv, 1);
+    inv.set_reporting(true);
+    report(&mut inv, 1);
+    push(&mut inv, 1);
+    for _ in 0..2 {
+        assert!(call(&mut inv, 0x127, 1, &[24, 0], 0).is_none());
+        expect_block_read(&mut inv, 3);
+        report(&mut inv, 1);
+        assert_eq!(
+            inv.command_reply(0).unwrap().payload(),
+            &[4, 0x27, 1, 0, 0, 24, 0, 1]
+        );
+        assert!(inv.next_report(0).is_none());
+    }
+    report(&mut inv, 0);
+    push(&mut inv, 0);
+    report(&mut inv, 1);
+    report(&mut inv, 0); // coalesced before the pending report left the cache
+    assert!(inv.next_report(0).is_none());
+    inv.set_reporting(false);
+    inv.set_reporting(true);
+    report(&mut inv, 0);
+    push(&mut inv, 0);
+}
+
+#[test]
+fn an_expired_mode_request_keeps_its_failure_and_recovers_from_one_read_only_probe() {
+    let mut inv = Inventory::new();
+    observe(&mut inv, 0, 0, 1, 0x2e7, &[0, 0, 63, 1, 2, 3, 4, 5, 6], 0);
+    inv.set_reporting(true);
+    observe(&mut inv, 0, 0, 1, 0x2e7, &[3, 0, 1, 1], 0);
+    assert_eq!(inv.next_report(0).unwrap().payload()[7], 1);
+    assert!(call(&mut inv, 0x127, 1, &[24, 0], 1).is_none());
+    expect_block_read(&mut inv, 3);
+    inv.command_expire(0, 11);
+    assert_eq!(
+        inv.command_reply(0).unwrap().payload(),
+        &[4, 0x27, 1, 0, 0, 24, 0, 0xff]
+    );
+    assert!(inv.next_report(11).is_none());
+    assert_eq!(
+        take(&mut inv, 0, 11_000).unwrap(),
+        [0x6d, 0x70, 0, 7, 3, 0, 0, 1, 0, 0, 0]
+    );
+    assert!(take(&mut inv, 0, 12_000).is_none()); // no timer-driven retry loop
+    observe(&mut inv, 0, 0, 1, 0x2e7, &[3, 0, 1, 1], 12);
+    assert_eq!(
+        inv.next_report(12).unwrap().payload(),
+        &[2, 0x27, 1, 0, 0, 24, 0, 1]
+    );
+    assert!(call(&mut inv, 0x127, 0, &[24, 0, 2], 13).is_none());
+    inv.command_expire(0, 23);
+    assert_eq!(inv.command_reply(0).unwrap().payload()[0], 3);
+    assert!(take(&mut inv, 0, 24_000).is_none()); // never replay a failed write
+}
+
+#[test]
 fn identifying_a_setpoint_controller_retires_unsent_thermostat_reads() {
     let mut inv = Inventory::new();
     observe(&mut inv, 0, 0, 1, 0x2e7, &[0, 0, 63, 1, 2, 3, 4, 5, 6], 0);

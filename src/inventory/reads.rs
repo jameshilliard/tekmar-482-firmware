@@ -46,6 +46,7 @@ pub struct BlockProbe {
     port: u8,
     subnet: u8,
     incarnation: u16,
+    urgent: bool,
 }
 
 impl BlockProbe {
@@ -60,6 +61,9 @@ pub(super) struct Reads {
     next_block: [u8; NODES],
     nodes: u32,
     cursor: u32,
+    mode_changes: u32,
+    mode_cursor: u8,
+    last_urgent: bool,
     waiting: Option<(Key, u32)>,
 }
 
@@ -69,12 +73,16 @@ impl Reads {
         next_block: [0; NODES],
         nodes: 0,
         cursor: 0,
+        mode_changes: 0,
+        mode_cursor: 0,
+        last_urgent: false,
         waiting: None,
     };
     pub(super) fn forget(&mut self, node: usize) {
         self.pending[node] = 0;
         self.next_block[node] = 0;
         self.nodes &= !(1 << node);
+        self.mode_changes &= !(1 << node);
         if self
             .waiting
             .is_some_and(|(k, _)| usize::from(k.node) == node)
@@ -92,6 +100,9 @@ impl Reads {
         }
     }
     pub(super) fn discard(&mut self, node: usize, id: u8) {
+        if id == block::HEATING_SETUP {
+            self.mode_changes &= !(1 << node);
+        }
         self.pending[node] &= !mask(id);
         if self.pending[node] == 0 {
             self.nodes &= !(1 << node);
@@ -104,7 +115,11 @@ impl Reads {
             self.nodes |= 1 << node;
         }
     }
-    fn take(&mut self, now: u32) -> Option<Key> {
+    pub(super) fn mode_changed(&mut self, node: usize) {
+        self.queue(node, block::HEATING_SETUP);
+        self.mode_changes |= 1 << node;
+    }
+    fn take(&mut self, now: u32) -> Option<(Key, bool)> {
         if let Some((_, since)) = self.waiting {
             if now.wrapping_sub(since) < BACKGROUND_REPLY_WINDOW_MS {
                 return None;
@@ -114,19 +129,29 @@ impl Reads {
         if self.nodes == 0 {
             return None;
         }
-        let node = next_bit(self.nodes, self.cursor) as usize;
-        self.cursor = ((node + 1) % NODES) as u32;
-        let i = next_bit(
-            u32::from(self.pending[node]),
-            u32::from(self.next_block[node]),
-        ) as usize;
-        self.next_block[node] = ((i + 1) % READS.len()) as u8;
-        let id = READS[i];
+        // Never displace an in-flight read. Alternate an urgent turn with the
+        // regular round robin, keeping separate cursors so neither can starve.
+        let urgent = self.mode_changes != 0 && !self.last_urgent;
+        let (node, id) = if urgent {
+            let n = next_bit(self.mode_changes, u32::from(self.mode_cursor)) as usize;
+            self.mode_cursor = ((n + 1) % NODES) as u8;
+            (n, block::HEATING_SETUP)
+        } else {
+            let n = next_bit(self.nodes, self.cursor) as usize;
+            self.cursor = ((n + 1) % NODES) as u32;
+            let i = next_bit(u32::from(self.pending[n]), u32::from(self.next_block[n])) as usize;
+            self.next_block[n] = ((i + 1) % READS.len()) as u8;
+            (n, READS[i])
+        };
+        self.last_urgent = urgent;
         self.discard(node, id);
-        Some(Key {
-            node: node as u8,
-            block: id,
-        })
+        Some((
+            Key {
+                node: node as u8,
+                block: id,
+            },
+            urgent,
+        ))
     }
 }
 
@@ -140,7 +165,7 @@ impl Inventory {
         if port.job.active() || self.broadcasts.pending(p) {
             return None;
         }
-        while let Some(key) = port.reads.take(time.millis) {
+        while let Some((key, urgent)) = port.reads.take(time.millis) {
             let row = &port.devices[usize::from(key.node)];
             if row.present(time.seconds) && row.needs_probe(key.block) {
                 port.reads.waiting = Some((key, time.millis));
@@ -149,6 +174,7 @@ impl Inventory {
                     port: p as u8,
                     subnet: row.subnet,
                     incarnation: row.incarnation,
+                    urgent,
                 });
             }
         }
@@ -176,7 +202,9 @@ impl Inventory {
         let reads = &mut self.ports[usize::from(probe.port)].reads;
         let node = usize::from(probe.key.node);
         reads.reported(node, probe.key.block);
-        if needed {
+        if needed && probe.urgent {
+            reads.mode_changed(node);
+        } else if needed {
             reads.queue(node, probe.key.block);
         }
     }

@@ -14,6 +14,9 @@ const CALLING: u8 = ENABLED | DEMAND;
 const SETBACK_SHIFT: u8 = 2;
 const OPTIMUM_START_HIGH: u8 = 1 << 6;
 const WEATHER_SHUTDOWN: u8 = 1 << 7;
+// Local cache bits above the five-bit group number, not tN4 status flags.
+const HEAT_ENABLED: u8 = 1 << 5;
+const COOL_ENABLED: u8 = 1 << 6;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Side {
@@ -27,6 +30,21 @@ pub(super) struct AirStatus {
     pub demand: u8,
     pub cool_capable: bool,
     pub target: Option<(Side, u8)>,
+    group: u8,
+    observed_sides: u8,
+    enabled_sides: u8,
+}
+
+impl AirStatus {
+    pub fn mode_hint(&self, previous: u8) -> u8 {
+        // A member reports one side; absence of the other side is not "disabled".
+        let keep = if previous & GROUP_MASK == self.group {
+            previous & (HEAT_ENABLED | COOL_ENABLED) & !self.observed_sides
+        } else {
+            0
+        };
+        self.group | self.enabled_sides | keep
+    }
 }
 
 pub(super) struct AirGroups([u8; INDEXED_GROUPS]);
@@ -71,6 +89,16 @@ impl AirGroups {
         };
         Some(AirStatus {
             temperature,
+            group: group & GROUP_MASK,
+            observed_sides: if message == message::AIR_GROUP_MASTER_STATUS {
+                HEAT_ENABLED | COOL_ENABLED
+            } else if group & MEMBER_COOL != 0 {
+                COOL_ENABLED
+            } else {
+                HEAT_ENABLED
+            },
+            enabled_sides: (u8::from(heat.0 & ENABLED != 0) * HEAT_ENABLED)
+                | (u8::from(cool.0 & ENABLED != 0) * COOL_ENABLED),
             setback: (setback >> SETBACK_SHIFT) & setback::MASK,
             demand: if calling_heat {
                 demand::HEAT

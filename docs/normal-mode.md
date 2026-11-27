@@ -124,14 +124,28 @@ that line's next read. If the peer doesn't answer, the line allows another
 background read after one second. This window is not a delay on serial
 reports, explicit host operations or verified write readback.
 
-A change in demand, setback or the active air target justifies re-reading
-configured mode, not guessing its value. A temperature-only change does not
+A change in air group, heat/cool enablement, demand, setback or the active
+target justifies re-reading configured mode, not guessing its value. An
+idle thermostat can enable heat without calling for heat. A member frame
+describes only its own channel; it does not disable the unreported side.
+A change hint for a known mode gets a priority turn in that port's read
+queue. Pending reads for the same node coalesce, and regular reads still
+get turns while multiple thermostats are changing.
+A temperature-only change does not
 trigger another mode read while the mode sample is fresh. No inventory sweep
 runs on a quiet bus. J1196J independently walks one device per minute
 (`0x76c4`), spaces block requests globally (`0x7538`), and suppresses
 optional reads for two minutes after WaterCycleStart (`0x68e4`). Those are
 stock cache policies, not tHA operations. This firmware keeps the native
 arbitration and error recovery without imposing those cross-port delays.
+
+An explicit ModeSetting Request still gets its own fresh response. With
+reporting enabled, the first confirmed mode and subsequent changes take
+precedence over routine readings for that device. Repeated unchanged setup
+blocks do not produce duplicate mode Reports. A timed-out read returns FF;
+while the same thermostat is present the gateway queues one read-only check.
+A subsequent peer confirmation can then restore the mode, even if unchanged,
+without waiting for a host poll. A failed write is never replayed this way.
 
 **Live room setpoints.** An eligible air-group status updates the target
 cache directly. A member supplies its enabled side; a master with both

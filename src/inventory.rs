@@ -450,10 +450,13 @@ impl Inventory {
                     bus.reads.queue(node, id);
                 }
             }
-            if row.live.configured(Setting::Mode)
-                && (row.mode_delay == 0 || before != row.live.mode_hint())
-            {
-                bus.reads.queue(node, block::HEATING_SETUP);
+            let hint_changed = before != row.live.mode_hint();
+            if row.live.configured(Setting::Mode) && (row.mode_delay == 0 || hint_changed) {
+                if row.live.mode_known() && hint_changed {
+                    bus.reads.mode_changed(node);
+                } else {
+                    bus.reads.queue(node, block::HEATING_SETUP);
+                }
                 row.mode_delay = if row.live.mode_known() {
                     MODE_REFRESH_SECONDS
                 } else {
@@ -543,7 +546,22 @@ impl Inventory {
         self.ports[p].job.terminal()
     }
     pub fn command_expire(&mut self, p: usize, now: u32) {
-        self.ports[p].job.expire(now);
+        let port = &mut self.ports[p];
+        if port.job.expire(now)
+            && let Some(node) = port.job.mode_read_node()
+        {
+            let row = &mut port.devices[node];
+            if row.present(now)
+                && row.address == port.job.address
+                && row.live.configured(Setting::Mode)
+            {
+                // Preserve the failed request's unavailable reply. One background
+                // read can restore subscribers from fresh peer evidence, even
+                // when the confirmed setting is the same as the last report.
+                row.live.forget_mode_report();
+                port.reads.mode_changed(node);
+            }
+        }
     }
     pub fn command_frame(&mut self, p: usize) -> Option<Request> {
         self.ports[p].job.take_frame(p as u8)
@@ -562,6 +580,13 @@ impl Inventory {
     }
 
     pub fn set_reporting(&mut self, on: bool) {
+        if on && !self.reporting {
+            for port in &mut self.ports {
+                for row in &mut port.devices {
+                    row.live.forget_mode_report();
+                }
+            }
+        }
         self.reporting = on;
         if !on {
             self.groups.clear_reports();

@@ -245,14 +245,19 @@ impl Operation {
     pub(super) fn terminal(&self) -> bool {
         matches!(self.step, Step::Done(_))
     }
-    pub(super) fn expire(&mut self, now: u32) {
+    pub(super) fn expire(&mut self, now: u32) -> bool {
         // Bound bus occupancy even when the line never becomes idle.
         if self.active()
             && !self.terminal()
             && now.wrapping_sub(self.since) >= COMMAND_TIMEOUT_SECONDS
         {
             self.fail();
+            return true;
         }
+        false
+    }
+    pub(super) fn mode_read_node(&self) -> Option<usize> {
+        (self.setting == Setting::Mode && self.write.is_none()).then(|| usize::from(self.node - 1))
     }
     pub(super) fn take_frame(&mut self, port: u8) -> Option<Request> {
         let block = self.block;
