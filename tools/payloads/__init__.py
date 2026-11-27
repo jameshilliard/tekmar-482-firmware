@@ -266,6 +266,8 @@ def bits(value: int, *fields: tuple[str, int, int]) -> Fields:
 
 
 def master_present(r: Reader) -> Fields:
+    if not r.remaining:
+        return {}  # The 482 also accepts the header alone as proof of presence.
     fields: Fields = {"boiler_subnet": r.byte()}
     for n in range(1, min(7, len(r.remaining)) + 1):
         fields[f"mix{n}_subnet"] = r.byte()

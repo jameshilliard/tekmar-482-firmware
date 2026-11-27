@@ -594,7 +594,10 @@ class PayloadTests(unittest.TestCase):
                 self.assertEqual(query.payload, bytes.fromhex(payload))
                 self.assertEqual(query.match(reply, 0x12, bytes.fromhex(body)), ReplyPart(frozenset([item]), count))
                 self.assertIsNone(query.match(req, 0x12, query.payload))
-                self.assertIsNone(query.match(reply, 0x12, b""))
+                empty = ReplyPart(frozenset([0]), 1) if query.kind is StatusRequest.MASTER else None
+                self.assertEqual(query.match(reply, 0x12, b""), empty)
+        self.assertEqual(decode(0x3ff, ""), {})
+        self.assertEqual(decode(0x3ff, "00"), {"boiler_subnet": 0})
         self.assertIsNone(NativeStatusQuery.humidity(5, 4).match(0x323, 6, bytes(6)))
         self.assertIsNone(NativeStatusQuery.io(1, 2, 3).match(0x1f3, 0, bytes([1, 2, 4, 0, 0, 0])))
 
@@ -977,8 +980,9 @@ class PayloadTests(unittest.TestCase):
         self.assertEqual(decode(0x3df, "01"), {"extension_hex": "01"})
 
     def test_truncation_and_sentinels(self):
-        for mid in DECODERS.keys() - {0x011, 0x307, 0x317, 0x327, 0x3df, 0x3ef, 0x3f7}:
-            self.assertIn("truncated", decode(mid, ""))
+        for mid in DECODERS.keys() - {0x011, 0x307, 0x317, 0x327, 0x3df, 0x3ef, 0x3f7, 0x3ff}:
+            with self.subTest(mid=hex(mid)):
+                self.assertIn("truncated", decode(mid, ""))
         for mid, body in [(0x17e, "11022f0000"), (0x32f, "123456"), (0x367, "010280"),
                           (0x3cf, "340900c003493264"), (0x24f, "000601")]:
             with self.subTest(mid=hex(mid)):

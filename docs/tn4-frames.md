@@ -481,8 +481,11 @@ J1196J copies the two bytes into the little-endian tHA NetworkError word
 
 The same catalog pairs zone synchronization 011/010, clock 317/31F,
 warm-weather shutdown 307/30F, outdoor temperature 327/32F and master
-presence 3F7/3FF. Each request has an empty payload. MasterPresent lists
-subnets, not water temperatures. The clock belongs to the reporting peer,
+presence 3F7/3FF. Each request has an empty payload. A MasterPresent
+header identifies the responding peer even with no payload: J1196J
+dispatches it to the port/subnet handler at `0x597c`, which reads the
+header and no payload bytes. Optional slots list subnets, not temperatures.
+The clock belongs to the reporting peer,
 not the 482. Neither a positive link result nor silence establishes the
 presence, value or absence of the requested service.
 
@@ -593,7 +596,7 @@ supports them. Fields are listed in transmitted order.
 | `0x3ce` | PlantLoopStatus | Supply, return, packed mode/target, loop/pump percentages and status flags as in the nine-byte base MasterStatus layout. |
 | `0x3e7` | TakingAddress | Previous subnet and node; the frame header identifies the sender. |
 | `0x3ef` | AddressTaken | No payload defined. |
-| `0x3ff` | MasterPresent | Boiler subnet followed by zero to seven mixing subnets, according to payload length. |
+| `0x3ff` | MasterPresent | Empty: presence only. Otherwise a boiler subnet followed by zero to seven mixing subnets. |
 
 **Stage selection.** StageHeatDemandRequest and all six purge/override
 commands share a five-byte payload. The 483 SW 11 `NodeMaskIn` maps the
@@ -607,7 +610,8 @@ several selected nodes received or acted on it.
 **Associating water temperatures.** A MasterPresent slot is a subnet byte
 (control in bits 7:3, bus in 2:0), not a physical gateway port. Slot 0
 advertises the boiler; slots 1 through 7 advertise those numbered mixes.
-A zero byte is unassigned. SW 11 compares the bus bits of the sender and
+A zero byte is unassigned. No bytes means no topology report; keep any
+previously reported slots. SW 11 compares the bus bits of the sender and
 slot before associating the arrival port. A master can advertise remote
 subnets, and the same MasterStatus can be heard on multiple ports. Keep the
 physical port, full header subnet and sender node. Prefer an exact subnet
