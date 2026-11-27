@@ -104,7 +104,7 @@ impl NormalOperation {
     pub fn sent(&mut self, outcome: Outcome, now: u32) {
         match self {
             Self::Block(r) => r.sent(outcome, now),
-            Self::Status(r) => r.sent(outcome),
+            Self::Status(r) => r.sent(outcome, now),
             Self::Edit(r) => r.sent(outcome),
             Self::Send(r) => r.sent(outcome),
         }

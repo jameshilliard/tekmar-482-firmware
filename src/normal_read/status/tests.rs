@@ -19,12 +19,14 @@ fn wire(id: u16, subnet: u8, node: u8, payload: &[u8]) -> Vec<u8> {
 }
 
 fn observe(r: &mut StatusRead, frame: &[u8]) -> bool {
+    observe_at(r, frame, 123)
+}
+
+fn observe_at(r: &mut StatusRead, frame: &[u8], now: u32) -> bool {
     let mut accepted = false;
-    assert!(r.observe(2, frame, 123, |part| {
-        assert_eq!(
-            &part.payload()[..11],
-            &[2, 16, 0xf0, 0x4b, 0x54, 2, 0, 123, 0, 0, 0]
-        );
+    assert!(r.observe(2, frame, now, |part| {
+        assert_eq!(&part.payload()[..7], &[2, 16, 0xf0, 0x4b, 0x54, 2, 0]);
+        assert_eq!(&part.payload()[7..11], &now.to_le_bytes());
         assert_eq!(&part.payload()[11..], frame);
         accepted = true;
         true
@@ -56,9 +58,9 @@ fn ten_read_only_exchanges_have_independent_wire_ids_shapes_and_link_outcomes() 
         assert_eq!(r.frame(2), Request::new(2, &wire(req, 0, 0, args)));
         let reply = wire(rep, 7, 32, data); // address lock is not part of the node
         assert!(!observe(&mut r, &reply));
-        r.sent(Outcome::ArbitrationLost);
+        r.sent(Outcome::ArbitrationLost, 1);
         assert!(r.queued());
-        r.sent(Outcome::NoAck);
+        r.sent(Outcome::NoAck, 2);
         assert!(!observe(&mut r, &wire(rep, 7, 1, data)));
         assert!(!observe(&mut r, &wire(rep, 6, 0, data)));
         if req != 0x3f7 {
@@ -93,7 +95,7 @@ fn ten_read_only_exchanges_have_independent_wire_ids_shapes_and_link_outcomes() 
 #[test]
 fn sparse_snow_keys_and_channel_counts_never_combine_across_sources() {
     let mut r = StatusRead::parse(&key(None, 0x17f, &[1, 3, 0, 200, 0]), 0).unwrap();
-    r.sent(Outcome::Ack);
+    r.sent(Outcome::Ack, 1);
     for data in [&[9, 1, 200][..], &[17, 1, 0, 0, 0], &[9, 1, 17, 0, 0]] {
         assert!(!observe(&mut r, &wire(0x17e, 1, 1, data)));
     }
@@ -104,14 +106,52 @@ fn sparse_snow_keys_and_channel_counts_never_combine_across_sources() {
     assert!(observe(&mut r, &wire(0x17e, 8, 36, &[9, 1, 0, 2, 3, 0xca])));
     assert_eq!(&r.take_result(2).unwrap().payload()[5..], &[2, 1, 0]);
 
-    let mut r = StatusRead::parse(&key(None, 0x1f6, &[6, 9]), u32::MAX - 4).unwrap();
-    r.sent(Outcome::Ack);
-    for (id, total) in [(255, 2), (255, 2), (0, 3), (1, 3)] {
+    let mut r = StatusRead::parse(&key(None, 0x1f6, &[6, 9]), 0).unwrap();
+    r.sent(Outcome::Ack, 1);
+    for (at, id, total) in [(123, 255, 2), (423, 255, 2), (913, 0, 3), (932, 1, 3)] {
         let report = [6, 9, id, total, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        assert!(observe(&mut r, &wire(0x1f5, 99, 1, &report)));
+        assert!(observe_at(&mut r, &wire(0x1f5, 99, 1, &report), at));
         assert!(r.take_result(2).is_none());
     }
-    r.expire(super::super::WINDOW_MS - 5);
+    r.expire(123 + WINDOW_MS);
+    assert_eq!(&r.take_result(2).unwrap().payload()[5..], &[2, 2, 0]);
+}
+
+#[test]
+fn delayed_io_discovery_gets_a_full_send_and_response_window() {
+    let start = u32::MAX - WINDOW_MS + 1400;
+    let mut r = StatusRead::parse(&key(Some([6, 9]), 0x1f6, &[6, 9]), start).unwrap();
+    r.sent(Outcome::ArbitrationLost, start.wrapping_add(WINDOW_MS / 2));
+    let sent = start.wrapping_add(WINDOW_MS - 1);
+    r.expire(sent);
+    assert!(r.queued());
+    r.sent(Outcome::Ack, sent);
+    for (channel, elapsed) in [1900, 3250, 5200, 7450, 9300, 11_240]
+        .into_iter()
+        .enumerate()
+    {
+        let now = sent.wrapping_add(elapsed);
+        r.expire(now);
+        let report = [6, 9, channel as u8, 6, 0, 0, 0, 0, 0, 0, 1, 1, 0];
+        assert!(observe_at(&mut r, &wire(0x1f5, 6, 9, &report), now));
+    }
+    assert_eq!(&r.take_result(2).unwrap().payload()[5..], &[2, 1, 0]);
+}
+
+#[test]
+fn duplicate_keys_and_foreign_frames_do_not_extend_the_reply_window() {
+    let mut r = StatusRead::parse(&key(Some([6, 9]), 0x17f, &[1, 2, 9, 22]), 0).unwrap();
+    r.sent(Outcome::Ack, 11);
+    let peer = wire(0x17e, 6, 9, &[9, 1, 9, 0, 0]);
+    let foreign = wire(0x17e, 6, 10, &[9, 1, 22, 0, 0]);
+    let unrelated = wire(0x17e, 6, 9, &[9, 1, 21, 0, 0]);
+    assert!(observe_at(&mut r, &peer, 910));
+    assert!(observe_at(&mut r, &peer, 9900));
+    assert!(!observe_at(&mut r, &foreign, 9950));
+    assert!(!observe_at(&mut r, &unrelated, 9998));
+    r.expire(910 + WINDOW_MS - 1);
+    assert!(r.take_result(2).is_none());
+    r.expire(910 + WINDOW_MS);
     assert_eq!(&r.take_result(2).unwrap().payload()[5..], &[2, 2, 0]);
 }
 
@@ -119,7 +159,7 @@ fn sparse_snow_keys_and_channel_counts_never_combine_across_sources() {
 fn uart_pressure_queue_deadlines_and_tx_faults_are_terminal_not_successes() {
     let new = || StatusRead::parse(&key(None, 0x3f7, &[]), 0).unwrap();
     let mut r = new();
-    r.sent(Outcome::Ack);
+    r.sent(Outcome::Ack, 1);
     assert!(!r.observe(1, &wire(0x3ff, 1, 1, &[]), 9, |_| false));
     assert_eq!(&r.take_result(1).unwrap().payload()[5..], &[1, 3, 0]);
     for (outcome, code) in [
@@ -128,7 +168,7 @@ fn uart_pressure_queue_deadlines_and_tx_faults_are_terminal_not_successes() {
         (Outcome::Late, 5),
     ] {
         let mut r = new();
-        r.sent(outcome);
+        r.sent(outcome, 1);
         assert!(!observe(&mut r, &wire(0x3ff, 0, 0, &[])));
         assert_eq!(&r.take_result(1).unwrap().payload()[5..], &[1, 4, code]);
     }
@@ -136,7 +176,7 @@ fn uart_pressure_queue_deadlines_and_tx_faults_are_terminal_not_successes() {
     r.unavailable();
     assert_eq!(&r.take_result(1).unwrap().payload()[5..], &[1, 4, 0xfe]);
     let mut r = new();
-    r.expire(super::super::WINDOW_MS);
+    r.expire(WINDOW_MS);
     assert_eq!(&r.take_result(1).unwrap().payload()[5..], &[1, 2, 0xff]);
 }
 
@@ -146,7 +186,7 @@ fn maximum_ordered_key_list_and_maximum_reply_fit_the_control_channel() {
     args.extend(0..61);
     let mut r = StatusRead::parse(&key(None, 0x17f, &args), 0).unwrap();
     assert_eq!(r.frame(4), Request::new(4, &wire(0x17f, 0, 0, &args)));
-    r.sent(Outcome::Ack);
+    r.sent(Outcome::Ack, 1);
     for start in [0, 20, 40, 60] {
         let count = (61 - start).min(20);
         let mut data = Vec::from([9, count]);

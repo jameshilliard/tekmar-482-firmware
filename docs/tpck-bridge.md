@@ -251,11 +251,17 @@ Filter 0 requires zero subnet/node and follows the first matching peer; filter
 1 selects the specified native subnet and five-bit node, including node zero.
 The filter selects the **reporter**, not the I/O payload address or snowmelt
 zone number. Admission echoes the complete request. Block and status reads
-share one slot per physical port. Status reads have ten seconds from admission. Background
-probes on that port wait; normal settings, other ports and host requests keep
-running. No trace subscription is required.
+share one slot per physical port. Background probes on that port wait;
+normal settings, other ports and host requests keep running. No trace
+subscription is required.
 
 The gateway sends a class-zero, source-zero read once it wins arbitration.
+It has ten seconds from admission to acquire the line. A completed
+transmission starts a fresh ten-second reply window. For multipart replies,
+a newly covered requested key or discovered channel extends that window
+by ten seconds. Duplicate parts, conflicting counts and unrelated frames
+do not extend it. A 553 can spread all six distinct channel replies across
+roughly ten seconds even on a line where the request sent promptly.
 Only the following request IDs and argument shapes are admitted (IDs in hex):
 
 | Request / report | Arguments | Matching evidence |

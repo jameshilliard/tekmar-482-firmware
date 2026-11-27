@@ -1,5 +1,5 @@
 //! Read-only 483 native status exchanges. A frame is forwarded in full, not rebuilt.
-use super::{TX_NOT_SENT, TX_PIN_UNAVAILABLE, outcome_byte};
+use super::{TX_NOT_SENT, TX_PIN_UNAVAILABLE, WINDOW_MS, outcome_byte};
 use crate::tn4::{
     self, HEADER_BYTES, NODE_MASK, PAYLOAD_MASK, snowmelt,
     tx::{Outcome, Request},
@@ -119,7 +119,7 @@ pub struct StatusRead {
     seen: Items,
     expected: Option<u8>,
     covered: u16, // up to 256 distinct channel IDs, even if a peer misreports its count
-    start: u32,
+    stamp: u32,
     phase: Phase,
     tx: u8,
 }
@@ -153,7 +153,7 @@ impl StatusRead {
             seen: Items::default(),
             expected,
             covered: 0,
-            start: now,
+            stamp: now,
             phase: Phase::Queued,
             tx: TX_NOT_SENT,
         })
@@ -166,18 +166,17 @@ impl StatusRead {
             .then(|| Request::gateway_class_zero(port, self.kind as u32, &self.args))
             .flatten()
     }
-    pub(super) fn sent(&mut self, outcome: Outcome) {
-        if matches!(outcome, Outcome::ArbitrationLost) {
+    pub(super) fn sent(&mut self, outcome: Outcome, now: u32) {
+        if !self.queued() || outcome == Outcome::ArbitrationLost {
             return;
         }
         self.tx = outcome_byte(outcome);
-        if self.queued() {
-            self.phase = if matches!(outcome, Outcome::Ack | Outcome::NoAck) {
-                Phase::Listening
-            } else {
-                Phase::Done(End::TransmitFault)
-            };
-        }
+        self.phase = if matches!(outcome, Outcome::Ack | Outcome::NoAck) {
+            self.stamp = now;
+            Phase::Listening
+        } else {
+            Phase::Done(End::TransmitFault)
+        };
     }
     pub(super) fn unavailable(&mut self) {
         self.tx = TX_PIN_UNAVAILABLE;
@@ -185,7 +184,7 @@ impl StatusRead {
     }
     pub(super) fn expire(&mut self, now: u32) {
         if matches!(self.phase, Phase::Queued | Phase::Listening)
-            && now.wrapping_sub(self.start) >= super::WINDOW_MS
+            && now.wrapping_sub(self.stamp) >= WINDOW_MS
         {
             self.phase = Phase::Done(End::Expired);
         }
@@ -262,6 +261,7 @@ impl StatusRead {
             (h >> tn4::SUBNET_SHIFT) as u8,
             (h >> tn4::NODE_SHIFT) as u8 & NODE_MASK,
         ];
+        let covered = self.covered;
         if (h >> tn4::MESSAGE_SHIFT) & tn4::MESSAGE_MASK != self.kind.report()
             || usize::from(header[HEADER_BYTES - 1] & PAYLOAD_MASK) != payload.len()
             || self.peer.is_some_and(|p| p != peer)
@@ -280,11 +280,13 @@ impl StatusRead {
             self.phase = Phase::Done(End::ControlFull);
             return false;
         }
-        if self
-            .expected
-            .is_some_and(|n| n != 0 && u16::from(n) == self.covered)
-        {
-            self.phase = Phase::Done(End::Complete);
+        if let Some(expected @ 1..=u8::MAX) = self.expected {
+            if self.covered == u16::from(expected) {
+                self.phase = Phase::Done(End::Complete);
+            } else if self.covered > covered {
+                // Only new coverage extends the window, not updates to an old item.
+                self.stamp = now;
+            }
         }
         true
     }

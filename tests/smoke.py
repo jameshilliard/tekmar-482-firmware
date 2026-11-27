@@ -211,7 +211,11 @@ def run(path, ram, fast=False, *, normal_reads=False, client_script=None):
             assert all([b for b, _ in tx] == [init] for tx in line_sends)
             if client_script is not None:
                 for port, request, responses in client_script:
-                    exchanges[port].append((bytes.fromhex(request), tuple(map(bytes.fromhex, responses))))
+                    replies = []
+                    for response in responses:
+                        delay_ms, hex_body = (0, response) if isinstance(response, str) else response
+                        replies.append((delay_ms * 1000, bytes.fromhex(hex_body)))
+                    exchanges[port].append((bytes.fromhex(request), replies))
                     peers.add(port)
                 phase = "client"
                 return
@@ -626,8 +630,9 @@ def run(path, ram, fast=False, *, normal_reads=False, client_script=None):
         # gateway traffic between replies to a single command.
         started = False
         for port, queue in enumerate(client_replies):
-            if queue and clock >= client_rx_ready[port] and not (gpio[0] & 1 << PORTS[port][3]):
-                end = inject(queue.popleft(), port=port, turnaround=0)
+            if queue and clock >= client_rx_ready[port] + queue[0][0] and not (gpio[0] & 1 << PORTS[port][3]):
+                _, reply = queue.popleft()
+                end = inject(reply, port=port, turnaround=0)
                 client_rx_ready[port] = end + PEER_TURNAROUND_US
                 started = True
         if started:
@@ -1446,7 +1451,8 @@ if __name__ == "__main__":
     if args.client_port:
         if args.fast or args.ram:
             parser.error("the client port uses the Flash image at startup UART speed")
-        # One JSON array of [port, transmit-body hex, [reply-body hex, ...]],
+        # One JSON array of [port, transmit-body hex, [reply, ...]],
+        # where reply is body hex or [additional delay in ms, body hex],
         # followed by one UART input/output hex line per virtual-time step.
         run(args.image, False, client_script=json.loads(sys.stdin.buffer.readline()))
     else:
