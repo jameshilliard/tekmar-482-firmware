@@ -37,6 +37,16 @@ behavior or compatibility with every serial client's timeout.
 | 16F SetbackEnable, 177 SetbackState | Read or set the gateway enable flag; read the active setback and receive setback reports when enabled. The flag also determines which heat, cool, floor and fan slots an Update changes. |
 | 1A7 DateTime | Update broadcasts local wall time on all five lines. No Request response or Report. |
 
+**Snow control schedules.** The
+[654 manual, p. 31](https://www.watts.com/dfsmedia/0533dbba17714b1ab581ab07a4cbb521/81803-source/638820695340000000/654-d-03.pdf#page=31)
+describes two or four events and master, member and local zone roles.
+The published 482 protocol promises `SetbackEvents` only for thermostat
+masters. J1196J nevertheless reads the cached byte for any inventoried
+address (handler `0xa610`, emitter `0xa5b0`); it does not query a schedule
+table. This firmware accepts a valid native master announcement from a
+654 on the same basis as any other identified peer. `FF` is unavailable,
+not zero events or proof that the snow control lacks scheduling.
+
 ## Bus compatibility
 
 Normal mode acts as a tN4 receiver on all five lines. After a valid CRC

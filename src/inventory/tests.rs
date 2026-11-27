@@ -524,6 +524,35 @@ fn schedule_events_only_describe_an_observed_schedule_master() {
     }
 }
 
+#[test]
+fn snow_control_identity_does_not_determine_the_schedule_count() {
+    let mut inv = Inventory::new();
+    // Synthetic path, public model 654 product number 105801.
+    observe(
+        &mut inv,
+        0,
+        0,
+        24,
+        message::BLOCK_REPORT,
+        &[0, 0, 7, 0x49, 0x9d, 1],
+        0,
+    );
+    let events = |inv: &mut Inventory| call(inv, 0x17f, 1, &[1, 0], 1).unwrap().payload()[7];
+    assert_eq!(events(&mut inv), 0xff);
+    for (flags, expected) in [(0x44, 1), (0x84, 2), (0x80, 0xff), (0x04, 0)] {
+        observe(
+            &mut inv,
+            0,
+            0,
+            24,
+            message::SCHEDULE_STATUS,
+            &[flags, 1, 60],
+            1,
+        );
+        assert_eq!(events(&mut inv), expected);
+    }
+}
+
 fn expect_block_read(inv: &mut Inventory, block: u8) {
     assert_eq!(
         inv.command_frame(0),
