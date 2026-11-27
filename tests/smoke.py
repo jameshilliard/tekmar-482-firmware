@@ -109,6 +109,7 @@ def run(path, ram, fast=False, *, normal_reads=False):
     incoming = deque()
     burst = deque()
     next_byte = 0
+    connect_at = None
     actual = []
     timers = [{}, {}]
     button = 1 << 14
@@ -179,14 +180,17 @@ def run(path, ram, fast=False, *, normal_reads=False):
         interrupted[p] = (prefix + "0", tag)
 
     def line_progress():
-        nonlocal phase, jump_at, discovery_end, inventory_at
-        if phase == "line-cold" and len(actual) >= 4 and all(line_sends) and len(observed_flags) == 5:
+        nonlocal phase, jump_at, discovery_end, inventory_at, connect_at
+        if phase == "line-cold" and all(line_sends) and len(observed_flags) == 5:
             assert all([b for b, _ in tx] == [init] for tx in line_sends)
             if normal_reads:
-                phase = "normal-block"
-                peers.update((3,4))
-                exchanges[3].append((bytes.fromhex("6d70000b 3800 00 00008000 03000000"), None))
-                extension(15, bytes.fromhex("030018 3800 0703"))
+                # No UART input, subscriptions or trace while these frames arrive.
+                assert not actual and not incoming and not training
+                phase = "offline-traffic"
+                end = inject(bytes.fromhex("123420c1 a5"), 1)
+                connect_at = inject(bytes.fromhex("12342101 a5"), 1, after=end, bad_crc=True)
+                return
+            if len(actual) < 4:
                 return
             phase = "line-up"
             contend(1, master, bytes.fromhex("7ff05001 00"), "master")
@@ -356,13 +360,17 @@ def run(path, ram, fast=False, *, normal_reads=False):
     cpu.mmio_map(0x3FFFC000, 0x1000, lambda u, o, s, d: gpio[o], None, gpio_write, None)
 
     def timer_read(uc, off, size, t):
-        nonlocal trace_check_at
+        nonlocal trace_check_at, connect_at
         nonlocal clock, inventory_at, next_byte, queued_send_at, phase, jump_at, uptime_offset, discovery_end, retry_isp_at, backoff_after
         if off == 8:
             if t == 0 and timers[t].get(4) == 1:
                 clock += 40
                 if clock > 55_000_000:
                     raise AssertionError(("emulated bus scenario timed out", phase, actual[-4:]))
+                if connect_at is not None and clock >= connect_at:
+                    connect_at = None
+                    phase = "boot-counters"
+                    connect_host()
                 if trace_check_at is not None and clock >= trace_check_at:
                     trace_check_at = None
                     call(0x107, bytes(2))
@@ -464,11 +472,16 @@ def run(path, ram, fast=False, *, normal_reads=False):
 
     corrupt = bytearray(encode(6, bytes.fromhex("0005f04b54")))
     corrupt[-2] ^= 1
-    incoming.extend(corrupt)
-    incoming.extend(bytes.fromhex("ca0706018f01000000009e35"))
-    call(0x002F35CA)
-    extension(1)
-    extension(4)
+    if normal_reads:
+        extension(14, b"\x01")
+        extension(14, bytes.fromhex("014203"))
+        extension(14, bytes.fromhex("014204"))
+    else:
+        incoming.extend(corrupt)
+        incoming.extend(bytes.fromhex("ca0706018f01000000009e35"))
+        call(0x002F35CA)
+        extension(1)
+        extension(4)
     decoder = Decoder()
     valid = set()
     invalid = set()
@@ -479,6 +492,8 @@ def run(path, ram, fast=False, *, normal_reads=False):
     error_reports = []
     error_reads = []
     stage_counts = []
+    boot_port_checked = False
+    boot_paths = {}
     error_masks = []
     uart_rx_fault = 0
     overlap = False
@@ -542,7 +557,7 @@ def run(path, ram, fast=False, *, normal_reads=False):
             telemetry_capture()
 
     def reply(kind, data):
-        nonlocal uart_rx_fault
+        nonlocal uart_rx_fault, boot_port_checked
         nonlocal trace_resume, trace_check_at
         nonlocal phase, overlap, raw_mode, raw_ack_mask, uptime_offset, retry_isp_at
         if kind == 0xd0:
@@ -606,7 +621,23 @@ def run(path, ram, fast=False, *, normal_reads=False):
             elif method == 0x544bf00e:
                 body=data[5:]
                 assert data[0]==4
-                if len(body)==4:
+                if phase == "boot-counters":
+                    if len(body) == 57:
+                        p, rx, ack, no_ack, failed, invalid_rx, untracked, unattributed = struct.unpack("<B7Q", body)
+                        assert (p, rx, invalid_rx, untracked) == (1, 1, 1, 0)
+                        assert no_ack >= 1 and unattributed == ack + no_ack + failed
+                        boot_port_checked = True
+                    else:
+                        assert len(body) == 36 and body[:2] == bytes.fromhex("0142")
+                        boot_paths[body[2]] = (body[3], *struct.unpack_from("<4Q", body, 4))
+                        if len(boot_paths) == 2:
+                            # The CRC failure belongs to the port, never to a guessed peer.
+                            assert boot_paths == {3: (1, 1, 0, 0, 0), 4: (0, 0, 0, 0, 0)}
+                            phase = "normal-block"
+                            peers.update((3,4))
+                            exchanges[3].append((bytes.fromhex("6d70000b 3800 00 00008000 03000000"), None))
+                            extension(15, bytes.fromhex("030018 3800 0703"))
+                elif len(body)==4:
                     capacity,used=struct.unpack("<HH",body)
                     assert 0<used<=capacity
                 elif len(body)==57:
@@ -969,9 +1000,20 @@ def run(path, ram, fast=False, *, normal_reads=False):
             raise AssertionError(data)
 
     queued = list(incoming)
-    if fast:
-        incoming.clear()
-    training = deque([10_000, 18_000, 90_000, 98_000, 170_000, 250_000] if fast else [])
+    incoming.clear()
+    training = deque()
+    training_start = 0
+
+    def connect_host():
+        nonlocal training_start
+        training_start = clock
+        if fast:
+            training.extend(clock + t for t in (10_000, 18_000, 90_000, 98_000, 170_000, 250_000))
+        else:
+            incoming.extend(queued)
+
+    if not normal_reads:
+        connect_host()
     acr = 0
     dlab = False
     dll = dlm = draining = 0
@@ -980,7 +1022,7 @@ def run(path, ram, fast=False, *, normal_reads=False):
     def read(uc, off, size, user):
         nonlocal draining, acr, dll, dlm, uart_rx_fault
         if training and clock >= training[0]:
-            at = training.popleft()
+            at = training.popleft() - training_start
             if at < 170_000:
                 gpio[0x14] ^= 2  # Wake burst on RXD0, no byte in the startup-rate FIFO.
             elif at == 170_000:
@@ -1042,9 +1084,10 @@ def run(path, ram, fast=False, *, normal_reads=False):
     free = len(painted) - len(painted.lstrip(b"\xa5"))
     assert free >= 256, free
     if normal_reads:
+        assert boot_port_checked
         assert phase == "normal-complete" and not traces and not any(exchanges), (phase, actual[-8:])
         assert received_rx_acks == expected_rx_acks and observed_flags == expected_flags
-        print(f"ARM Normal reads: block selector, multipart status, cross-method busy, silent peer; untouched stack {free} bytes")
+        print(f"ARM Normal reads: offline counters, block selector, multipart status, cross-method busy, silent peer; untouched stack {free} bytes")
         return
     assert entered, (clock, phase, [len(x) for x in exchanges], results, actual[-10:],
                      line_sends, expected_rx_acks - received_rx_acks, list(wire_log))

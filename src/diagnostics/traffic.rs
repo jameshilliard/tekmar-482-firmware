@@ -261,12 +261,37 @@ mod tests {
         assert!(t.entry([1, 0, 1]).is_none());
         t.received(1, &[0, 0, 0, 0]);
         assert_eq!(t.ports[1].rx_untracked, 1);
-        t.entry([0, 0, 1]).unwrap().rx = u64::MAX;
-        t.received(0, &[0, 0, 0, 64]);
-        assert_eq!(t.entry([0, 0, 1]).unwrap().rx, u64::MAX);
-        let entry = t.entry([0, 255, 1]).unwrap();
-        entry.ack = u64::MAX;
-        entry.tx(Outcome::Ack);
-        assert_eq!(&entry.wire()[8..16], &[255; 8]);
+        let near_limit = u64::MAX - 1;
+        let counts = Counts {
+            rx: near_limit,
+            ack: near_limit,
+            no_ack: near_limit,
+            failed: near_limit,
+        };
+        *t.entry([0, 0, 1]).unwrap() = counts;
+        t.ports[0] = Port {
+            counts,
+            invalid: near_limit,
+            rx_untracked: near_limit,
+            tx_unattributed: near_limit,
+        };
+        let update = [0x6d, 0xf0, 0, 4, 0, 1, 5, 0]; // single target: 0:1
+        for _ in 0..2 {
+            t.received(0, &[0, 0, 0, 64]); // registered
+            t.received(0, &[0, 0, 0, 128]); // no free directory slot
+            t.invalid(0);
+            for outcome in [Outcome::Ack, Outcome::NoAck, Outcome::ArbitrationLost] {
+                t.transmitted(0, &update, outcome);
+            }
+            t.transmitted(0, &[0, 0, 0, 0], Outcome::NoAck); // no single target
+        }
+        let p = &t.ports[0];
+        assert_eq!(p.counts.wire(), [0xff; COUNT_BYTES]);
+        assert_eq!(
+            [p.invalid, p.rx_untracked, p.tx_unattributed],
+            [u64::MAX; 3]
+        );
+        assert_eq!(t.entry([0, 0, 1]).unwrap().wire(), [0xff; COUNT_BYTES]);
+        assert_eq!(t.used as usize, CAPACITY);
     }
 }
