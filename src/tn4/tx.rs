@@ -36,9 +36,9 @@ impl Request {
         Self::with_header(port, gateway_header(message, payload.len()), payload)
     }
 
-    /// The 483 sends native status requests at class zero, also from address zero.
-    pub(crate) fn status_query(port: u8, message: u16, payload: &[u8]) -> Option<Self> {
-        let header = (u32::from(message) << MESSAGE_SHIFT) | payload.len() as u32;
+    /// The 483 originates requests and announcements at class zero from address zero.
+    pub(crate) fn gateway_class_zero(port: u8, message: u32, payload: &[u8]) -> Option<Self> {
+        let header = (message << MESSAGE_SHIFT) | payload.len() as u32;
         Self::with_header(port, header.to_be_bytes(), payload)
     }
 

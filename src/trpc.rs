@@ -32,6 +32,7 @@ const FEATURE_TRAFFIC_COUNTS: u8 = 1 << 5;
 const FEATURE_NORMAL_STATUS_READ: u8 = 1 << 7;
 // Feature bits 8 and above continue in subsequent little-endian octets.
 const FEATURE_BLOCK_TRANSFERS: u16 = 1 << 8;
+const FEATURE_NORMAL_ANNOUNCE: u16 = 1 << 9;
 const HEADER_BYTES: usize = 1 + size_of::<u32>();
 const REVISION_MAGIC: &[u8; 8] = b"TK48REV\0";
 const REVISION_BYTES: usize = REVISION_MAGIC.len() + 40; // hexadecimal Git object name
@@ -175,7 +176,7 @@ impl<'a> Call<'a> {
                         | FEATURE_NORMAL_IDENTITY
                         | FEATURE_TRAFFIC_COUNTS
                         | FEATURE_NORMAL_STATUS_READ,
-                    FEATURE_BLOCK_TRANSFERS.to_le_bytes()[1],
+                    (FEATURE_BLOCK_TRANSFERS | FEATURE_NORMAL_ANNOUNCE).to_le_bytes()[1],
                 ],
             ),
             (REQUEST, FIRMWARE_BUILD) if self.body.is_empty() => {

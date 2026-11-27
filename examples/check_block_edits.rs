@@ -1,7 +1,7 @@
 //! Host-side oracle runner: exercise the actual firmware implementation, without a bus.
 use std::io::{self, BufRead};
 use tekmar_482_firmware::{
-    normal_read::ReadSlot,
+    normal_read::NormalOperation,
     tn4::tx::{Outcome, Request},
     trpc::method,
 };
@@ -22,7 +22,7 @@ fn main() {
         let [action, key, query, report, update] = words[..] else {
             panic!("bad test vector");
         };
-        let slot = ReadSlot::parse(method::NORMAL_BLOCK_EDIT, &hex(key), 0);
+        let slot = NormalOperation::parse(method::NORMAL_BLOCK_EDIT, &hex(key), 0);
         if action == "noop" {
             assert!(slot.is_err(), "admitted no-op {key}");
         } else {
@@ -31,7 +31,7 @@ fn main() {
             assert_eq!(slot.frame(0), Request::new(0, &hex(query)), "{key}");
             slot.sent(Outcome::NoAck);
             let _ = slot.observe(0, &hex(report), 1, |_| panic!("unexpected status frame"));
-            assert!(slot.writing(), "{key}");
+            assert!(slot.single_attempt(), "{key}");
             assert_eq!(slot.frame(0), Request::new(0, &hex(update)), "{key}");
             slot.sent(Outcome::Ack);
             assert_eq!(&slot.take_result(0).unwrap().payload()[5..], &[0, 0, 1, 0]);

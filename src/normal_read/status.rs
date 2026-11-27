@@ -78,7 +78,7 @@ impl Kind {
     }
     fn report(self) -> u32 {
         match self {
-            Self::ZoneSync => 0x010,
+            Self::ZoneSync => tn4::message::ZONE_SYNC_ADJUSTMENT,
             Self::Snow => 0x17e,
             Self::IoChannel => 0x1f3,
             Self::IoDiscovery => 0x1f5,
@@ -174,7 +174,7 @@ impl StatusRead {
     }
     pub(super) fn frame(&self, port: u8) -> Option<Request> {
         self.queued()
-            .then(|| Request::status_query(port, self.kind as u16, &self.args))
+            .then(|| Request::gateway_class_zero(port, self.kind as u32, &self.args))
             .flatten()
     }
     pub(super) fn sent(&mut self, outcome: Outcome) {

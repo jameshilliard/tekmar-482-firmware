@@ -16,7 +16,7 @@ use tekmar_482_firmware::uptime::Uptime;
 use tekmar_482_firmware::{
     diagnostics,
     inventory::{AddressMove, Answer, BlockProbe, Broadcast, Inventory, LineProbe},
-    normal_read::{ReadSlot, outcome_byte},
+    normal_read::{NormalOperation, outcome_byte},
     tn4::{
         Frame, LinkResponse, Receiver, Trailer,
         tx::{Mode, Outcome, Request},
@@ -70,19 +70,20 @@ impl Receivers {
 enum NormalTx {
     Idle,
     Probe(BlockProbe),
-    HostRead,
+    HostOperation,
     Discovery(LineProbe),
     Setting,
     Broadcast(Broadcast),
 }
 
 impl NormalTx {
-    fn trace_origin(self) -> u8 {
+    fn trace_origin(self, operation: &NormalOperation) -> u8 {
         match self {
             Self::Setting => trace::SETTING,
             Self::Broadcast(_) => trace::BROADCAST,
             Self::Discovery(_) => trace::DISCOVERY,
-            Self::Probe(_) | Self::HostRead => trace::PROBE,
+            Self::Probe(_) => trace::PROBE,
+            Self::HostOperation => operation.trace_origin(),
             Self::Idle => unreachable!(),
         }
     }
@@ -106,8 +107,8 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
         static_cell::ConstStaticCell::new(diagnostics::traffic::Traffic::EMPTY);
     let traffic = TRAFFIC.take();
     #[unsafe(link_section = ".bss.normal_reads")]
-    static READS: static_cell::ConstStaticCell<[ReadSlot; PORT_COUNT]> =
-        static_cell::ConstStaticCell::new([const { ReadSlot::EMPTY }; PORT_COUNT]);
+    static READS: static_cell::ConstStaticCell<[NormalOperation; PORT_COUNT]> =
+        static_cell::ConstStaticCell::new([const { NormalOperation::EMPTY }; PORT_COUNT]);
     let reads = READS.take();
     let mut read_mask = 0u8;
     let mut uart = super::super::UartRx::default();
@@ -144,7 +145,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
         if read_mask != 0 {
             for (port, read) in reads.iter_mut().enumerate() {
                 if read_mask & (1 << port) != 0
-                    && !(matches!(owner[port], NormalTx::HostRead)
+                    && !(matches!(owner[port], NormalTx::HostOperation)
                         && sending[port].as_ref().is_some_and(Attempt::started))
                 {
                     read.expire(time.millis);
@@ -298,7 +299,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                     NormalTx::Discovery(probe) => {
                         foreground || read_active || discovery != Some(probe)
                     }
-                    NormalTx::HostRead => foreground || !host_read,
+                    NormalTx::HostOperation => foreground || !host_read,
                     NormalTx::Setting => inventory.command_finished(p),
                     NormalTx::Broadcast(tx) => inventory.stale_broadcast(p, tx, seconds),
                 };
@@ -313,7 +314,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                     owner[p] = NormalTx::Idle;
                 }
                 if read_active
-                    && !matches!(owner[p], NormalTx::HostRead)
+                    && !matches!(owner[p], NormalTx::HostOperation)
                     && out.can_receive()
                     && let Some(result) = reads[p].take_result(p as u8)
                 {
@@ -351,7 +352,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                         sending[p] =
                             Attempt::new(&req, INPUTS[p].pin, t, Mode::Normal, errors, time.millis);
                         if sending[p].is_some() {
-                            owner[p] = NormalTx::HostRead;
+                            owner[p] = NormalTx::HostOperation;
                         } else {
                             reads[p].unavailable();
                         }
@@ -422,14 +423,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                         trace::TX,
                         p,
                         time.millis,
-                        &[
-                            if matches!(owner[p], NormalTx::HostRead) && reads[p].writing() {
-                                trace::SETTING
-                            } else {
-                                owner[p].trace_origin()
-                            },
-                            outcome_byte(result),
-                        ],
+                        &[owner[p].trace_origin(&reads[p]), outcome_byte(result)],
                         attempt.body(),
                         errors,
                     );
@@ -437,7 +431,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                 if !raw
                     && result == Outcome::ArbitrationLost
                     && !matches!(owner[p], NormalTx::Setting)
-                    && !(matches!(owner[p], NormalTx::HostRead) && reads[p].writing())
+                    && !(matches!(owner[p], NormalTx::HostOperation) && reads[p].single_attempt())
                 {
                     attempt.yield_arbitration(t);
                     continue;
@@ -451,7 +445,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                     match core::mem::replace(&mut owner[p], NormalTx::Idle) {
                         NormalTx::Setting => inventory.command_sent(p, result),
                         NormalTx::Probe(probe) => inventory.probe_sent(probe, time.millis),
-                        NormalTx::HostRead => reads[p].sent(result),
+                        NormalTx::HostOperation => reads[p].sent(result),
                         NormalTx::Discovery(probe) => inventory.line(p).finished(probe),
                         _ => {}
                     }
@@ -621,6 +615,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                                     | method::NORMAL_IDENTITY
                                     | method::NORMAL_BLOCK_READ
                                     | method::NORMAL_BLOCK_EDIT
+                                    | method::NORMAL_ANNOUNCE
                                     | method::NORMAL_STATUS_READ,
                                     _,
                                     _,
@@ -631,10 +626,10 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                                     [p @ 0..=LAST_PORT, key @ ..],
                                 )
                                 | (
-                                    method::NORMAL_BLOCK_EDIT,
+                                    method::NORMAL_BLOCK_EDIT | method::NORMAL_ANNOUNCE,
                                     service::UPDATE,
                                     [p @ 0..=LAST_PORT, key @ ..],
-                                ) => match ReadSlot::parse(call.method, key, time.millis) {
+                                ) => match NormalOperation::parse(call.method, key, time.millis) {
                                     Err(e) => call.error(e),
                                     Ok(slot) if read_mask & (1 << *p) == 0 => {
                                         reads[usize::from(*p)] = slot;
@@ -646,6 +641,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                                 (
                                     method::NORMAL_BLOCK_READ
                                     | method::NORMAL_BLOCK_EDIT
+                                    | method::NORMAL_ANNOUNCE
                                     | method::NORMAL_STATUS_READ,
                                     _,
                                     _,

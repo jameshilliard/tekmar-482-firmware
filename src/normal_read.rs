@@ -1,12 +1,14 @@
-//! Explicit, single-peer Normal reads. A link ACK is never an application reply.
+//! Explicit Normal operations sharing a physical line. A link ACK is never an application reply.
 use crate::tn4::{
     self, HEADER_BYTES, MAX_BYTES, NODE_MASK, message,
     tx::{Outcome, Request},
 };
 use crate::tpck::raw;
 use crate::trpc::{BridgeError, Reply, method};
+mod announce;
 mod edit;
 mod status;
+use announce::Announcement;
 use edit::BlockEdit;
 use status::StatusRead;
 
@@ -28,15 +30,15 @@ pub fn outcome_byte(result: Outcome) -> u8 {
     }
 }
 
-// Block and status transactions share the physical port, not two independent send slots.
 #[repr(u8)]
-pub enum ReadSlot {
+pub enum NormalOperation {
     Block(BlockRead),
     Status(StatusRead),
     Edit(BlockEdit),
+    Announce(Announcement),
 }
 
-impl ReadSlot {
+impl NormalOperation {
     pub const EMPTY: Self = Self::Block(BlockRead::EMPTY);
 
     pub fn parse(method: u32, key: &[u8], now: u32) -> Result<Self, BridgeError> {
@@ -53,17 +55,29 @@ impl ReadSlot {
             method::NORMAL_BLOCK_EDIT => BlockEdit::parse(key, now)
                 .map(Self::Edit)
                 .ok_or(BridgeError::InvalidRequest),
+            method::NORMAL_ANNOUNCE => Announcement::parse(key, now)
+                .map(Self::Announce)
+                .ok_or(BridgeError::InvalidRequest),
             _ => Err(BridgeError::InvalidRequest),
         }
     }
-    pub fn writing(&self) -> bool {
-        matches!(self, Self::Edit(r) if r.writing())
+    pub fn single_attempt(&self) -> bool {
+        matches!(self, Self::Announce(_)) || matches!(self, Self::Edit(r) if r.writing())
+    }
+    pub fn trace_origin(&self) -> u8 {
+        use crate::tpck::trace;
+        match self {
+            Self::Announce(_) => trace::BROADCAST,
+            Self::Edit(r) if r.writing() => trace::SETTING,
+            _ => trace::PROBE,
+        }
     }
     pub fn queued(&self) -> bool {
         match self {
             Self::Block(r) => r.queued(),
             Self::Status(r) => r.queued(),
             Self::Edit(r) => r.queued(),
+            Self::Announce(r) => r.queued(),
         }
     }
     pub fn frame(&self, port: u8) -> Option<Request> {
@@ -71,6 +85,7 @@ impl ReadSlot {
             Self::Block(r) => r.frame(port),
             Self::Status(r) => r.frame(port),
             Self::Edit(r) => r.frame(port),
+            Self::Announce(r) => r.frame(port),
         }
     }
     pub fn sent(&mut self, outcome: Outcome) {
@@ -78,6 +93,7 @@ impl ReadSlot {
             Self::Block(r) => r.sent(outcome),
             Self::Status(r) => r.sent(outcome),
             Self::Edit(r) => r.sent(outcome),
+            Self::Announce(r) => r.sent(outcome),
         }
     }
     pub fn unavailable(&mut self) {
@@ -85,6 +101,7 @@ impl ReadSlot {
             Self::Block(r) => r.unavailable(),
             Self::Status(r) => r.unavailable(),
             Self::Edit(r) => r.unavailable(),
+            Self::Announce(r) => r.unavailable(),
         }
     }
     pub fn expire(&mut self, now: u32) {
@@ -92,6 +109,7 @@ impl ReadSlot {
             Self::Block(r) => r.expire(now),
             Self::Status(r) => r.expire(now),
             Self::Edit(r) => r.expire(now),
+            Self::Announce(r) => r.expire(now),
         }
     }
     pub fn observe(
@@ -107,6 +125,7 @@ impl ReadSlot {
                 true
             }
             Self::Status(r) => r.observe(port, body, now, publish),
+            Self::Announce(_) => true,
             Self::Edit(r) => {
                 r.observe(body);
                 true
@@ -118,6 +137,7 @@ impl ReadSlot {
             Self::Block(r) => r.take_result(port),
             Self::Status(r) => r.take_result(port),
             Self::Edit(r) => r.take_result(port),
+            Self::Announce(r) => r.take_result(port),
         }
     }
 }

@@ -50,7 +50,7 @@ the request body is empty. All integers are little endian.
 | --- | --- | --- |
 | 00000187 FirmwareRevision | Request, zero or two placeholder bytes | u16 numeric revision, 0 for this unnumbered custom image |
 | 0000018F ProtocolVersion | Request, zero or two placeholder bytes | u16 tHA protocol version, currently 3 |
-| 544BF001 BridgeCapabilities | Request | Three u8 values: version (2), mode (0 Normal, 1 Raw), port count (5). Remaining bytes are one little-endian feature bitmap: bit 0 Raw, 1 ROM update, 2 Normal trace, 3 error reporting, 4 Normal identity read, 5 traffic counters, 7 Normal status read, 8 Normal block transfers. Bit 6 is retired. |
+| 544BF001 BridgeCapabilities | Request | Three u8 values: version (2), mode (0 Normal, 1 Raw), port count (5). Remaining bytes are one little-endian feature bitmap: bit 0 Raw, 1 ROM update, 2 Normal trace, 3 error reporting, 4 Normal identity read, 5 traffic counters, 7 Normal status read, 8 Normal block transfers, 9 Normal announcements. Bit 6 is retired. |
 | 544BF002 SetBridgeMode | Update, mode u8 | Echo mode: 0 Normal, 1 Raw. Busy during an inventory walk, a started transmission, an outstanding host send or a local ACK. Switching modes clears the Normal inventory; returning to Normal also clears the ACK mask. |
 | 544BF003 PortDrops | Request, port u8 | Port u8, valid records dropped u64, invalid records dropped u64. |
 | 544BF004 FirmwareBuild | Request | Build revision without a terminator: 40 lowercase hexadecimal digits or `unversioned` |
@@ -67,6 +67,7 @@ the request body is empty. All integers are little endian.
 | 544BF00F NormalBlockRead | Request, Report | Read a block on one physical port and receive the matching native frame on the control channel. Normal only. |
 | 544BF010 NormalStatusRead | Request, Report | Solicit native status, including multipart replies, without changing mode or trace configuration. |
 | 544BF011 NormalBlockEdit | Update, Report | Compare an addressed block with the host's baseline and send at most one native block update. Does not select Raw mode. |
+| 544BF012 NormalAnnounce | Update, Report | Send one known native announcement on one physical port; report the transmit outcome. |
 
 Version 2 event counts start at zero at boot, survive mode changes and
 saturate at 2^64-1 instead of wrapping. Subtract snapshots from the same
@@ -158,6 +159,34 @@ TX: 00 ACK, 01 no ACK, 02 arbitration lost, 03 echo mismatch, 04 bad end,
 report **are not write confirmation**. After a possibly delivered update,
 start a separate NormalBlockRead and compare the edited fields. Do not
 automatically resubmit an edit after a host timeout.
+
+## Normal announcements
+
+With feature bit 9, **Update** `544BF012` takes `port:u8 id:u16le data...`.
+There is no all-port selector. The gateway builds the header, source 0/0:
+
+| Native ID | Data | Priority |
+| --- | --- | --- |
+| 010 ZoneSynchAdjustment | Cycle 0/1, purge 0/1, target 0..2. | 0 |
+| 21F SetpointRemoteEnable | Group 1..12, enable 0/1. This is not addressed to a single appliance. | 0 |
+| 2FF SceneReport | Scene 0..7 and a little-endian duration in minutes. | 0 |
+| 31F RealTimeClockReport | Five [standard-time fields](gateway-traffic.md#clock-representation), optionally followed by the DST-mode byte. | 0 |
+| 3DF NetworkInitRequest | Empty. No inventory or other application reply implied. | 1 |
+
+Response:Update echoes the complete admitted request. A competing extension
+operation on that port is rejected as Busy; it cannot replace the announcement.
+Other ports continue independently. No receive observation completes the send.
+Exactly one terminal Report `port:u8 tx:u8` follows admission: 00 link ACK,
+01 no ACK, 02 arbitration lost, 03 echo mismatch, 04 bad end, 05 missed
+timing, FE no TX pin, FF expired **before** starting. A send can wait ten
+seconds for the line. An attempt that has started finishes; even arbitration
+loss is not retried. A host timeout has unknown outcome and is not equivalent
+to FF.
+
+These sends use the Normal link driver, counters and optional broadcast TX
+trace. They do not change modes or reporting and never manufacture a group,
+zone or thermostat state report. The stock tHA group and DateTime methods
+retain their distinct all-port behavior.
 
 ## Normal status reads
 

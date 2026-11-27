@@ -296,6 +296,7 @@ def run(path, ram, fast=False, *, normal_reads=False):
                         continue
                     if not exchange:
                         assert wire != protected_bits(EDIT_WRITE) + "0" * tail, "unexpected duplicate or stale edit"
+                        assert wire != protected_bits(SCENE) + "0" * tail, "unrequested scene copy"
                         assert not raw_mode and not phase.startswith("line-") and phase != "cycle-read", (p, phase, wire)
                         drive_bits.clear()
                         continue
@@ -495,6 +496,7 @@ def run(path, ram, fast=False, *, normal_reads=False):
     results = set()
     reads = deque(RAW_READS)
     read_events = set()
+    announced = {}
     telemetry = []
     error_reports = []
     error_reads = []
@@ -640,6 +642,25 @@ def run(path, ram, fast=False, *, normal_reads=False):
                     extension(17, EDIT_KEY, True)
                 else:
                     assert data[0] == 2 and data[5:] == bytes([3,1,0,255])
+                    phase = "normal-announce"
+                    peers.discard(2)
+                    extension(18, bytes.fromhex("03 ff02 07e001"))  # Request cannot send.
+                    for port in (2, 3):
+                        exchanges[port].append((SCENE, None))
+                        extension(18, bytes([port]) + bytes.fromhex("ff02 07e001"), True)
+            elif method == 0x544bf012:
+                assert phase == "normal-announce"
+                port = data[5]
+                if data[0] == 3:
+                    assert data[6:] == bytes.fromhex("ff02 07e001")
+                    extension(18, data[5:], True)  # No replacement or duplicate.
+                else:
+                    assert data[0] == 2 and len(data) == 7 and port not in announced
+                    announced[port] = data[6]
+                if len(announced) == 2:
+                    assert announced == {2: 1, 3: 0}  # no ACK vs. ACK
+                    assert actual.count((6, bytes.fromhex("0306f04b54 12f04b54 01"))) == 2
+                    assert (6, bytes.fromhex("0406f04b54 12f04b54 02")) in actual
                     phase = "normal-silent"
                     exchanges[4].append((bytes.fromhex("6d70000b 3412 00 01000000 00000000"), None))
                     extension(15, bytes.fromhex("040001 3412 0000"))
@@ -1112,13 +1133,13 @@ def run(path, ram, fast=False, *, normal_reads=False):
         assert boot_port_checked
         assert phase == "normal-complete" and not traces and not any(exchanges), (phase, actual[-8:])
         assert received_rx_acks == expected_rx_acks and observed_flags == expected_flags
-        print(f"ARM Normal: offline counters, addressed reads, multipart status, guarded write/refusal, silent peer; untouched stack {free} bytes")
+        print(f"ARM Normal: offline counters, addressed reads, multipart status, guarded writes, per-port announcements, silent peer; untouched stack {free} bytes")
         return
     assert entered, (clock, phase, [len(x) for x in exchanges], results, actual[-10:],
                      line_sends, expected_rx_acks - received_rx_acks, list(wire_log))
     assert actual[:4] == [
         (6, bytes.fromhex(x))
-        for x in ("048f0100000300", "0400000000", "0401f04b54020005bf01")
+        for x in ("048f0100000300", "0400000000", "0401f04b54020005bf03")
     ] + [
         (
             6,

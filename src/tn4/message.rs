@@ -1,4 +1,5 @@
 //! Native tN4 application message IDs used by the gateway.
+pub const ZONE_SYNC_ADJUSTMENT: u32 = 0x010;
 pub const SETPOINT_ENABLE_REPORT: u32 = 0x20f;
 pub const SETPOINT_ENABLE_UPDATE: u32 = 0x21f;
 pub const SETPOINT_STATUS: u32 = 0x22f;
@@ -8,6 +9,7 @@ pub const BLOCK_REQUEST: u32 = 0x2d7;
 pub const BLOCK_UPDATE: u32 = 0x2df;
 pub const BLOCK_REPORT: u32 = 0x2e7;
 pub const SCHEDULE_STATUS: u32 = 0x2f7;
+pub const SCENE_REPORT: u32 = 0x2ff;
 pub const REAL_TIME_CLOCK_REPORT: u32 = 0x31f;
 pub const RH_REPORT: u32 = 0x323;
 pub const OUTDOOR_TEMPERATURE_REQUEST: u32 = 0x327;

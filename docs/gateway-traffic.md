@@ -22,7 +22,10 @@ outgoing messages. Its serial all-ports selector is **not** a tN4 address.
 In 482 Raw mode the host sends the same native body separately on each
 selected physical port. A busy line, missing ACK or UART deadline on one
 line is not a result for another. Normal-mode stock-style broadcasts
-retain their own priority and port behavior.
+retain their own priority and port behavior. The custom
+[NormalAnnounce operation](tpck-bridge.md#normal-announcements) can originate
+the listed clock, group, scene and zone-sync bodies without leaving Normal
+mode, with a separate link result for each selected line.
 
 ## Setpoint groups
 

@@ -46,3 +46,4 @@ pub const TRAFFIC_COUNTS: u32 = 0x544b_f00e;
 pub const NORMAL_BLOCK_READ: u32 = 0x544b_f00f;
 pub const NORMAL_STATUS_READ: u32 = 0x544b_f010;
 pub const NORMAL_BLOCK_EDIT: u32 = 0x544b_f011;
+pub const NORMAL_ANNOUNCE: u32 = 0x544b_f012;
