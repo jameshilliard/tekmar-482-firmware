@@ -288,6 +288,24 @@ byte. Read the same block back to verify changes; a link ACK is not a
 schedule confirmation. Single-schedule setup and all four weekday tables
 have been observed in addressed reads; indexed layouts are reference-derived.
 
+**Configuring a table.** A 553 returned a full seven-day Wake row even
+with its assignment set to Off. Read the prospective active rows before
+changing the assignment or format. Preserve their unedited times; do not
+pick a time when a coarser format would merge different values. The
+[553](https://www.watts.com/dfsmedia/0533dbba17714b1ab581ab07a4cbb521/42966-source/553-dl-02.pdf#page=18)
+and [654](https://www.watts.com/dfsmedia/0533dbba17714b1ab581ab07a4cbb521/81803-source/638820695340000000/654-d-03.pdf#page=17)
+menus specify 24-hour and seven-day tables; the 654 schedule is not
+available in the 090 sensor-only application.
+
+The [033](https://www.watts.com/dfsmedia/0533dbba17714b1ab581ab07a4cbb521/42653-source/638820696080000000/033-d-06.pdf#page=6)
+adds 5-2 and 5-1-1 cycles. For an indexed owner, SW 11 copies the format
+to the other rows of that same selector. Preserve all other header bits;
+the master bit is observed ownership, not an established remote On/Off
+command. Do not take over a competing owner or write another slot. There
+is no commit message for a set of blocks. Validate the whole proposal
+before writing, check each row independently, and stop on a missing or
+different readback. No link ACK establishes that the entire table changed.
+
 **Owner and calendar.** In 483 SW 11 `Schedule::SCHEDULE_TYPES`, a setup
 ID of 0 means no schedule, 1 a device's zone schedule, 2..5 master of
 system schedule 1..4, 6..9 member of system schedule 1..4, and 10
