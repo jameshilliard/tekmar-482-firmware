@@ -420,8 +420,14 @@ state. Trailing bytes after the declared count are extensions, not keys.
 
 For remote start/stop the [654 manual, Melt and Storm Groups](https://www.watts.com/dfsmedia/0533dbba17714b1ab581ab07a4cbb521/81803-source/638820695340000000/654-d-03.pdf)
 specifies **group enable**, not a write to status key 1b. In control
-applications read C2 for the melt group and C3 for the storm group, then
-send `21F [group, enable]` on the selected line. It is a group broadcast;
+applications, a physical 654 confirmed both group assignments in a single
+`17E` zone report when queried for keys 25 and 26 together. Match the
+configured zone and native sender as for other status keys. C2 and C3 are
+the corresponding addressed group registers. If the status exchange ends
+incomplete, read both registers; never infer the missing assignment from
+the other group or from a factory default. Confirm distinct groups in the
+documented range before sending `21F [group, enable]` on the selected line.
+It is a group broadcast;
 another device with the same assignment can respond. Do not send this to
 sensor-only applications or use a zone number as the group. After the
 link result, `17F` for key 1b at the original zone reads its operating
