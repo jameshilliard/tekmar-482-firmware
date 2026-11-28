@@ -277,7 +277,16 @@ or absolute date. A missing day in a report is not a disabled event.
 | --- | --- |
 | 000F | Heating schedule ID, cooling schedule ID, cycling rate, daily event configuration, optimum start operation, RTC setback enable. Cycling rates 0..3 correspond to 24-hour, 5-2, 5-1-1 and 7-day. Event configuration 1 = two events (Wake/Sleep); 2 = four. |
 | 0010..0013 | One event per block: Wake, Unoccupied, Occupied, Sleep. Seven time bytes; normally Monday through Sunday, with the revision exceptions below. |
+| 0037 | Local permanent override: 0..3 Wake/Unoccupied/Occupied/Sleep for four events, 4/5 Occupied/Unoccupied for two events, 6 Away, 7/8 automatic for four/two events. |
 | 0038..003B | The same four events for indexed schedules. First byte: schedule ID [2:0], master flag [3], cycling rate [5:4], event configuration [7:6]. Then seven day bytes. |
+
+Block `0037` is separate from the schedule assignment and `2F7` current
+and next events. It does not describe a temporary hold's remaining time.
+SW 11 catalogs it for 528, 530, 538 and 540. A physical 553 returned a
+zero support mask, so it is not a scan candidate for that model. Zero in
+a supported field means Wake; an absent byte means unknown. Retain other
+codes raw. The 483 references do not establish a writable override for
+this block.
 
 In the 483 request queue the optional little-endian u32 BlockRequest
 argument selects the secondary schedule ID, including ID zero. A

@@ -17,7 +17,7 @@ from payloads.plant import BoilerChillerOutput, HeatPumpOutput, MixingPresent, M
 from payloads.products import block_selectors, identify_product
 from payloads.queries import NativeStatusQuery, ReplyPart, SnowmeltRole, StatusRequest
 from payloads.scenes import NativeScene, SceneReport, SceneResponse
-from payloads.schedules import DailyEvents, ScheduleBinding, ScheduleCycle, ScheduleEvent, ScheduleProfile, ScheduleStatus
+from payloads.schedules import DailyEvents, LocalScheduleOverride, ScheduleBinding, ScheduleCycle, ScheduleEvent, ScheduleProfile, ScheduleStatus
 from payloads.sensors import SensorRole as R, SensorSlot, ThermostatSensors
 from payloads.setpoint import SetpointApplication, SetpointStatus, SetpointTargets
 from payloads.snowmelt import SnowmeltAddress, SnowmeltApplication, SnowmeltOperatingState, SnowmeltPair, SnowmeltReport, WaterDetection
@@ -236,6 +236,22 @@ class PayloadTests(unittest.TestCase):
         setup = HumiditySetup.from_report(decode(0x2e7, "a300 02 02"))
         self.assertIsNone(setup.enabled(T.HUMIDIFY))
         self.assertTrue(setup.enabled(T.DEHUMIDIFY))
+
+    def test_local_schedule_override_is_a_supported_raw_byte(self):
+        states = ("wake", "unoccupied_4", "occupied_4", "sleep", "occupied_2",
+                  "unoccupied_2", "away", "auto_4", "auto_2")
+        self.assertEqual(len(LocalScheduleOverride), len(states))
+        for raw, name in enumerate(states):
+            fields = decode_payload(0x2e7, bytes([0x37, 0, 1, raw]))
+            self.assertEqual(fields["override_state"], raw)
+            self.assertEqual(fields["override_state_name"], name)
+        unsupported = decode(0x2e7, "3700 00 00")
+        self.assertNotIn("override_state", unsupported)
+        extension = decode(0x2e7, "3700 01 ff")
+        self.assertEqual(extension["override_state"], 255)
+        self.assertNotIn("override_state_name", extension)
+        self.assertNotIn(0x37, WritableBlock)
+        self.assertNotIn(0x37, identify_product(105102).candidate_blocks)
 
     def test_schedule_status_is_not_a_schedule_assignment(self):
         for previous in range(8):
