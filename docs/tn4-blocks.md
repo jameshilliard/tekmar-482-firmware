@@ -174,6 +174,30 @@ Read counters only when needed, and do not infer deltas, rollover, or
 active outputs from incomplete or unrelated reports. No filter or sensor
 selection edit is established in the 483 writers.
 
+### Weather and equipment operating settings
+
+Blocks `0B`, `0C` and `A9` hold configured warm-weather shutdown,
+cold-weather shutdown and heat-pump balance points. Their five slots are
+Wake, Unoccupied, Occupied, Sleep and Away. Block `0B` precedes the slots
+with a separate source byte. Honor the support mask in either report
+layout. These are not the live flags in `30F` WarmWeatherShutdown.
+
+| Block (hex) | Configuration octet |
+| --- | --- |
+| A6, A7 | Heat-pump cycle setting (raw); cooling purge minutes. |
+| AA, AB, AC | Balance-point schedule ID; W1 warm shutdown; W2 lockout. |
+| AD, AE | Compressor operation during W2 backup; baseload mode. |
+| AF, B0 | Unoccupied humidity enable; humidity differential. |
+
+The 483 readers define the byte positions but do not establish the
+threshold units, Off sentinel, schedule numbering or mode encodings.
+Keep raw bytes, even zero or FF. No matching field writers are known.
+An addressed read of a physical 553 returned supported fields in `0B`,
+`0C`, `A7` and `A9..AF`. Only Wake and Sleep were supported in the `0B`
+and `A9` tables, and only Wake in `0C`. `A6` reported mask zero and `B0`
+did not answer. The model's scan tries the confirmed blocks; do not
+infer the same availability on a different model or revision.
+
 ## Selecting Instances
 
 A single `2D7` request can select several nodes on the same subnet. Each

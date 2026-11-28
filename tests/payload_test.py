@@ -377,6 +377,25 @@ class PayloadTests(unittest.TestCase):
         self.assertEqual(air_filter["time_since_filter_replacement"], 0x1234)
         self.assertEqual(decode(0x2e7, "a800 01 01")["onboard_humidity_sensor_enabled"], 1)
 
+    def test_operating_policy_keeps_only_supported_raw_octets(self):
+        candidates = set(identify_product(105102).candidate_blocks)
+        self.assertTrue({0x0b, 0x0c, 0xa7, *range(0xa9, 0xb0)} <= candidates)
+        self.assertFalse({0xa6, 0xb0}.intersection(candidates))
+        for warm in ("0b00 13 02 4a aabb 39 cc", "0b00 13 02 4a 39"):
+            fields = decode(0x2e7, warm)
+            self.assertEqual((fields["shutdown_source"], fields["wake_warm_weather_shutdown_raw"],
+                              fields["sleep_warm_weather_shutdown_raw"]), (2, 74, 57))
+            self.assertNotIn("away_warm_weather_shutdown_raw", fields)
+            self.assertNotIn("unoccupied_warm_weather_shutdown_raw", fields)
+        self.assertEqual(decode(0x2e7, "0c00 01 20")["wake_cold_weather_shutdown_raw"], 32)
+        balance = decode(0x2e7, "a900 09 00ff")
+        self.assertEqual((balance["wake_balance_point_raw"], balance["sleep_balance_point_raw"]), (0, 255))
+        self.assertNotIn("occupied_balance_point_raw", balance)
+        self.assertNotIn("heat_pump_cycles", decode(0x2e7, "a600 00"))
+        self.assertEqual(decode(0x2e7, "a700 01 09")["cool_purge_minutes"], 9)
+        self.assertEqual(decode(0x2e7, "aa00 01 fe")["balance_point_schedule_id"], 254)
+        self.assertEqual(decode(0x2e7, "ad00 01 05")["y_during_w2_mode"], 5)
+
     def test_thermostat_selector_uses_setup_and_revision_not_reported_demand(self):
         for m in Mode:
             self.assertEqual(decode_payload(0x2e7, b"\x03\x00\x01" + bytes([m]))["mode_setting_name"],
