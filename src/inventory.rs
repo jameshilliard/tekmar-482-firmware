@@ -301,6 +301,7 @@ impl Inventory {
             {
                 // The role is a hint; only a HeatingSetup report confirms the setting.
                 row.invalidate_mode();
+                row.live.forget_air_mode_hint();
                 bus.reads.mode_changed(node);
             }
             return None;
@@ -337,6 +338,7 @@ impl Inventory {
             let row = &mut bus.devices[node];
             row.incarnation = self.incarnation;
             row.invalidate_mode();
+            row.live.forget_air_mode_hint();
             row.mode_delay = 0;
             row.mode_evidence = air::ModeEvidence::EMPTY;
             row.live.dirty = 0;
@@ -412,11 +414,6 @@ impl Inventory {
         row.subnet = subnet;
         row.last_seen = now;
         let previous_attributes = row.live.attributes;
-        let prior_hint = matches!(
-            message,
-            message::AIR_GROUP_MEMBER_STATUS | message::AIR_GROUP_MASTER_STATUS
-        )
-        .then(|| row.live.mode_hint());
         if message == message::BLOCK_REPORT
             && let [id, 0, _, ..] = data
         {
@@ -461,6 +458,7 @@ impl Inventory {
         if let Some(id) = identity {
             row.identity.merge(id);
         }
+        let mut air_hint_changed = None;
         let mut changed = if message == message::BLOCK_REPORT
             && let [block::SENSOR_SETUP, 0, mask, values @ ..] = data
             && let Some(changed) = row.live.sensor_setup(*mask, values)
@@ -471,7 +469,9 @@ impl Inventory {
         } else if message == message::BLOCK_REPORT {
             row.live.setting_report(data)
         } else if let Some(air) = self.air_groups.observe(message, data) {
-            row.live.air_status(air, self.setbacks)
+            let (fields, hint_changed) = row.live.air_status(air, self.setbacks);
+            air_hint_changed = Some(hint_changed);
+            fields
         } else {
             row.live.observe(message, data)
         };
@@ -531,13 +531,12 @@ impl Inventory {
             bus.reads.queue(node, block::DEVICE_INFO);
             row.identity_delay = PROBE_RETRY_SECONDS;
         }
-        if let Some(before) = prior_hint {
+        if let Some(hint_changed) = air_hint_changed {
             for id in [block::HEAT_SETPOINTS, block::COOL_SETPOINTS] {
                 if row.live.missing_target(id) {
                     bus.reads.queue(node, id);
                 }
             }
-            let hint_changed = before != row.live.mode_hint();
             if row.live.configured(Setting::Mode) && (row.mode_delay == 0 || hint_changed) {
                 row.invalidate_mode();
                 if row.live.mode().is_some() && hint_changed {

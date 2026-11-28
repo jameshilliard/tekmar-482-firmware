@@ -1,7 +1,7 @@
 //! Device readings common to the tHA Request, Response:Update and Report paths.
 use super::codes::{TEMP_FAULT_WORDS, mode, setback, setpoint};
 use super::{
-    air::{AirStatus, Side},
+    air::{AirModeHint, AirStatus, Side},
     block_byte,
     settings::{Setting, slots},
 };
@@ -110,7 +110,7 @@ pub(super) struct Telemetry {
     setback: u8,
     mode: u8,
     reported_mode: Option<u8>,
-    air_mode_hint: u8,
+    air_mode_hint: AirModeHint,
     air_slots: [[u8; setback::SLOT_COUNT]; 2],
     targets: [[u8; 2]; 4],
     rh_targets: [u8; 2],
@@ -169,7 +169,7 @@ impl Telemetry {
         setback: 0,
         mode: 0,
         reported_mode: None,
-        air_mode_hint: 0,
+        air_mode_hint: AirModeHint::EMPTY,
         air_slots: [[0; setback::SLOT_COUNT]; 2],
         targets: [[0; 2]; 4],
         rh_targets: [0; 2],
@@ -262,16 +262,8 @@ impl Telemetry {
         };
         self.attributes & attributes != 0
     }
-    /// Changes justify reading configured mode; demand alone cannot tell us the mode.
-    pub(super) fn mode_hint(&self) -> (u8, u8, u8, [u8; 2]) {
-        let active = slots(self.setback);
-        (
-            self.air_mode_hint,
-            self.demand,
-            self.setback,
-            self.air_slots
-                .map(|side| active.map_or(UNAVAILABLE, |(i, _)| side[i])),
-        )
+    pub(super) fn forget_air_mode_hint(&mut self) {
+        self.air_mode_hint = AirModeHint::EMPTY;
     }
     pub(super) fn forget_mode_report(&mut self) {
         self.reported_mode = None;
@@ -389,25 +381,27 @@ impl Telemetry {
         }
     }
 
-    pub(super) fn air_status(&mut self, air: AirStatus, setbacks: bool) -> u16 {
-        self.air_mode_hint = air.mode_hint(self.air_mode_hint);
+    /// Return the tHA report mask and whether new evidence suggests a mode read.
+    pub(super) fn air_status(&mut self, air: AirStatus, setbacks: bool) -> (u16, bool) {
+        let mut hint_changed = air.update_mode_hint(&mut self.air_mode_hint);
         self.air = normalized_temperature(air.temperature);
         self.demand = air.demand;
         self.setback = air.setback;
         let mut fields = Field::Temperature.mask() | Field::Demand.mask() | Field::Setback.mask();
         if self.floor == Floor::Only {
-            return fields;
+            return (fields, hint_changed);
         }
         self.attributes |= Self::HEAT;
         if air.cool_capable {
             self.attributes |= Self::COOL;
         }
         if self.is_setpoint_device() {
-            return fields;
+            return (fields, hint_changed);
         }
         let active = slots(self.setback);
         if let Some((side, value)) = air.target {
             let table = &mut self.air_slots[side as usize];
+            hint_changed |= active.is_some_and(|(slot, _)| table[slot] != value);
             if !setbacks {
                 table.fill(value);
             } else if let Some((_, mask)) = active {
@@ -436,7 +430,7 @@ impl Telemetry {
             ];
             fields |= field.mask();
         }
-        fields
+        (fields, hint_changed)
     }
 
     /// Called only after the enclosing dispatcher checks the native payload length.

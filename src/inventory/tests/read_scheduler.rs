@@ -184,30 +184,39 @@ fn changed_mode_overtakes_a_background_backlog_but_cannot_starve_it() {
 }
 
 #[test]
-fn alternating_member_channels_preserve_the_other_channels_enable_bit() {
-    let mut groups = air::AirGroups::EMPTY;
-    let mut hint = 0;
-    for (group, flag, expected) in [
-        (1, 1, 0x21),
-        (0x21, 1, 0x61),
-        (1, 1, 0x61),
-        (0x21, 0, 0x21),
-        (2, 0, 2), // a different group must not inherit any channels
-    ] {
-        let status = groups
-            .observe(0x36f, &[group, flag, 40, 0, 6, 0, 0, 0])
-            .unwrap();
-        hint = status.mode_hint(hint);
-        assert_eq!(hint, expected);
+fn alternating_member_channels_only_read_setup_when_that_channel_changes() {
+    let mut inv = Inventory::new();
+    observe(&mut inv, 0, 0, 1, 0x2e7, &[0, 0, 63, 1, 2, 3, 4, 5, 6], 0);
+    let setup = [3, 0, 7, 2, 4, 1];
+    let query = [0x6d, 0x70, 0, 7, 3, 0, 0, 1, 0, 0, 0];
+    let heat = [1, 3, 40, 0, 6, 0, 0, 0];
+    let cool = [0x21, 5, 60, 0, 6, 0, 0, 0];
+    for data in [heat, cool] {
+        observe(&mut inv, 0, 0, 1, 0x36f, &data, 0);
+        assert_eq!(take(&mut inv, 0, 0), Some(query));
+        observe(&mut inv, 0, 0, 1, 0x2e7, &setup, 0);
     }
-    let master = groups
-        .observe(0x377, &[2, 0, 1, 40, 0, 6, 1, 80, 0, 6, 0, 0, 0])
-        .unwrap();
-    assert_eq!(master.mode_hint(hint), 0x62);
-    let off = groups
-        .observe(0x377, &[2, 0, 0, 40, 0, 6, 0, 80, 0, 6, 0, 0, 0])
-        .unwrap();
-    assert_eq!(off.mode_hint(0x62), 2);
+    for (mut data, demand) in [(heat, codes::demand::HEAT), (cool, codes::demand::NONE)] {
+        data[3] += 1; // Only the temperature changed on this side.
+        observe(&mut inv, 0, 0, 1, 0x36f, &data, 1);
+        assert_eq!(inv.ports[0].devices[0].cached_mode(1), Some(2));
+        assert!(take(&mut inv, 0, 1000).is_none());
+        assert_eq!(
+            call(&mut inv, 0x12f, 1, &[24, 0], 1).unwrap().payload(),
+            &[4, 0x2f, 1, 0, 0, 24, 0, demand]
+        );
+    }
+    let mut change = cool;
+    for (slot, value) in [(2, 61), (1, 4), (0, 0x22)] {
+        change[slot] = value; // New target, enable bit, then group.
+        observe(&mut inv, 0, 0, 1, 0x36f, &change, 2);
+        assert_eq!(take(&mut inv, 0, 2000), Some(query));
+        observe(&mut inv, 0, 0, 1, 0x2e7, &setup, 2);
+    }
+    let different_group_heat = [2, 3, 40, 0, 6, 0, 0, 0];
+    observe(&mut inv, 0, 0, 1, 0x36f, &different_group_heat, 3);
+    // The heat sample from group 1 cannot confirm that side of group 2.
+    assert_eq!(take(&mut inv, 0, 3000), Some(query));
 }
 
 #[test]

@@ -127,7 +127,11 @@ reports, explicit host operations or verified write readback.
 A change in air group, heat/cool enablement, demand, setback or the active
 target justifies re-reading configured mode, not guessing its value. An
 idle thermostat can enable heat without calling for heat. A member frame
-describes only its own channel; it does not disable the unreported side.
+describes only its own channel. Compare its mode hints with the previous
+sample for that channel in the same group and role. Unchanged heat and
+cool reports can alternate without invalidating the confirmed mode, even
+when their demand or setback differs. The tHA ActiveDemand and SetbackState
+values still come from the last report, as on the stock gateway.
 A change hint for a known mode gets a priority turn in that port's read
 queue. Pending reads for the same node coalesce, and regular reads still
 get turns while multiple thermostats are changing.

@@ -14,11 +14,10 @@ const ENABLED: u8 = 1;
 const DEMAND: u8 = 1 << 1;
 const CALLING: u8 = ENABLED | DEMAND;
 const SETBACK_SHIFT: u8 = 2;
+const MODE_HINT_FLAGS: u8 = CALLING | (setback::MASK << SETBACK_SHIFT);
+const MODE_HINT_OBSERVED: u8 = 1 << 5; // Local marker, not a wire flag.
 const OPTIMUM_START_HIGH: u8 = 1 << 6;
 const WEATHER_SHUTDOWN: u8 = 1 << 7;
-// Local cache bits above the five-bit group number, not tN4 status flags.
-const HEAT_ENABLED: u8 = 1 << 5;
-const COOL_ENABLED: u8 = 1 << 6;
 
 /// Pack the last role and mode confirmation into one byte per device.
 #[derive(Clone, Copy, Default)]
@@ -63,26 +62,46 @@ pub(super) enum Side {
     Cool,
 }
 
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct AirModeHint {
+    role: u8,
+    channels: [u8; 2],
+}
+
+impl AirModeHint {
+    pub const EMPTY: Self = Self {
+        role: 0,
+        channels: [0; 2],
+    };
+
+    fn update(&mut self, report: Self) -> bool {
+        let previous = *self;
+        if self.role != report.role {
+            *self = report;
+        } else {
+            // A member reports one channel, not a change to the other one.
+            for (old, new) in self.channels.iter_mut().zip(report.channels) {
+                if new != 0 {
+                    *old = new;
+                }
+            }
+        }
+        *self != previous
+    }
+}
+
 pub(super) struct AirStatus {
     pub temperature: [u8; 2],
     pub setback: u8,
     pub demand: u8,
     pub cool_capable: bool,
     pub target: Option<(Side, u8)>,
-    group: u8,
-    observed_sides: u8,
-    enabled_sides: u8,
+    mode_hint: AirModeHint,
 }
 
 impl AirStatus {
-    pub fn mode_hint(&self, previous: u8) -> u8 {
-        // A member reports one side; absence of the other side is not "disabled".
-        let keep = if previous & GROUP_MASK == self.group {
-            previous & (HEAT_ENABLED | COOL_ENABLED) & !self.observed_sides
-        } else {
-            0
-        };
-        self.group | self.enabled_sides | keep
+    pub fn update_mode_hint(&self, previous: &mut AirModeHint) -> bool {
+        previous.update(self.mode_hint)
     }
 }
 
@@ -94,16 +113,17 @@ impl AirGroups {
     pub fn observe(&mut self, message: u32, data: &[u8]) -> Option<AirStatus> {
         let (&group, rest) = data.split_first()?;
         let index = usize::from(group & GROUP_MASK);
+        let master = message == message::AIR_GROUP_MASTER_STATUS;
+        let member_cool = group & MEMBER_COOL != 0;
         let (heat, cool, setback, temperature, cool_capable) = match (message, rest) {
             (message::AIR_GROUP_MEMBER_STATUS, &[flags, target, lo, hi, _, _, _, ..]) => {
                 let side = (flags, target);
-                let cool = group & MEMBER_COOL != 0;
                 (
-                    if cool { (0, 0) } else { side },
-                    if cool { side } else { (0, 0) },
+                    if member_cool { (0, 0) } else { side },
+                    if member_cool { side } else { (0, 0) },
                     flags,
                     [lo, hi],
-                    cool && flags & ENABLED != 0,
+                    member_cool && flags & ENABLED != 0,
                 )
             }
             (message::AIR_GROUP_MASTER_STATUS, &[_, h, ht, lo, hi, c, ct, _, _, _, _, _, ..]) => {
@@ -128,16 +148,21 @@ impl AirGroups {
         };
         Some(AirStatus {
             temperature,
-            group: group & GROUP_MASK,
-            observed_sides: if message == message::AIR_GROUP_MASTER_STATUS {
-                HEAT_ENABLED | COOL_ENABLED
-            } else if group & MEMBER_COOL != 0 {
-                COOL_ENABLED
-            } else {
-                HEAT_ENABLED
+            mode_hint: AirModeHint {
+                role: (group & GROUP_MASK) | if master { GROUP_MASTER } else { 0 },
+                channels: [
+                    if master || !member_cool {
+                        (heat.0 & MODE_HINT_FLAGS) | MODE_HINT_OBSERVED
+                    } else {
+                        0
+                    },
+                    if master || member_cool {
+                        (cool.0 & MODE_HINT_FLAGS) | MODE_HINT_OBSERVED
+                    } else {
+                        0
+                    },
+                ],
             },
-            enabled_sides: (u8::from(heat.0 & ENABLED != 0) * HEAT_ENABLED)
-                | (u8::from(cool.0 & ENABLED != 0) * COOL_ENABLED),
             setback: (setback >> SETBACK_SHIFT) & setback::MASK,
             demand: if calling_heat {
                 demand::HEAT
