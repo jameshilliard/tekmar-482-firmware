@@ -88,6 +88,9 @@ class PayloadTests(unittest.TestCase):
         self.assertIsNone(OutdoorTemperature(0xc000, None).fahrenheit)
 
     def test_setpoint_words_require_application_context(self):
+        flags = decode(0x22f, "0000000000000000e40000")
+        self.assertEqual((flags["aux_relay_status"], flags["requested_enable_status"],
+                          flags["actual_enable_status"], flags["reserved"]), (0, 1, 2, 3))
         payload = bytes.fromhex("d7 cb 5800 4800 00c0 6c 35 ca e4")
         fields = decode_payload(0x22f, payload)
         self.assertEqual(fields["extension_hex"], "e4")
@@ -310,6 +313,10 @@ class PayloadTests(unittest.TestCase):
         self.assertIn("truncated", decode_payload(0x17e, payload[:-2]))
 
     def test_air_group_mode_is_not_the_thermostat_setting(self):
+        config = decode(0x36a, "e5e3")
+        self.assertEqual((config["group"], config["master"], config["reserved0"],
+                          config["previous_group"], config["previous_master"], config["reserved1"]),
+                         (5, 1, 1, 3, 1, 3))
         member = bytes.fromhex("a4 62 2a 0000 07 0080 aa")
         r = Reader(member)
         air = AirStatus.read(r, master=False)
@@ -327,6 +334,7 @@ class PayloadTests(unittest.TestCase):
         self.assertEqual((air.heat.setback, air.cool.setback), (1, 4))
         self.assertIsNone(air.cool.target_f)
         self.assertNotIn("mode_setting", decode_payload(0x377, master))
+        self.assertEqual(decode(0x377, "80000000000000000000000000")["reserved0"], 1)
         for mid, data in ((0x36f, member[:7]), (0x377, master[:12])):
             self.assertIn("truncated", decode_payload(mid, data))
 

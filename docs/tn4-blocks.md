@@ -20,9 +20,10 @@ To compare against trusted, locally extracted 483 software, run
 `python3 tests/compare_483.py <sw07-tn4-dir> <sw11-tn4-dir>` (the directories
 contain `message_types.rb`; Ruby 3 is needed). This is offline and uses no
 equipment. It checks message registrations, block IDs and indexed selectors,
-exercises every bit of the SW 11 indexed block readers and compares actual
-writer bytes with field edits. Matching bit positions alone does not
-establish the engineering unit or a particular device's capabilities.
+exercises every bit of the SW 11 indexed block readers, 17 native status
+and announcement readers, and compares actual writer bytes with field edits.
+Matching bit positions alone does not establish the engineering unit or a
+particular device's capabilities.
 
 Two SW 11 indexed reader defects should **not** be copied: for block 08
 it reads the whole first or second byte for two fan fields declared as

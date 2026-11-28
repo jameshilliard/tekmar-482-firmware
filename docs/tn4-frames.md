@@ -648,6 +648,17 @@ supports them. Fields are listed in transmitted order.
 | `0x3ef` | AddressTaken | No payload defined. |
 | `0x3ff` | MasterPresent | Empty: presence only. Otherwise a boiler subnet followed by zero to seven mixing subnets. |
 
+**Indexed reference differences.** The SW 11 indexed `PlantLoopStatus`
+reader accidentally includes the mode bits in its target and always reads
+the minimum flag as zero. Its declarative layout separates a 13-bit
+target and tests the minimum flag in bit 5. The indexed `SetpointStatus`
+leaves three two-bit output fields shifted in place; the declarative
+layout right-aligns them. Its indexed `ScheduleStatus` never assigns the
+edge byte, which is present in the declarative layout. The local decoder
+uses the declarative interpretations; the comparison test checks these
+differences alongside every bit of 17 selected status and announcement
+layouts.
+
 **Stage selection.** StageHeatDemandRequest and all six purge/override
 commands share a five-byte payload. The 483 SW 11 `NodeMaskIn` maps the
 three little-endian bitmap bytes to nodes 1..8, 9..16 and 17..24. For
