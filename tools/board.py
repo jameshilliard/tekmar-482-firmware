@@ -245,7 +245,7 @@ async def echo_test(port, buses):
         echoes = []
         await monitor(port, 8, tx=(bus, ECHO_QUERY), require_peer=False,
                       on_record=lambda data: echoes.append(data) if data[:2] == bytes((0,bus)) else None)
-        if not any(data[6:] == ECHO_QUERY for data in echoes):
+        if not any(data[6:-1] == ECHO_QUERY for data in echoes):
             raise RuntimeError(f"no matching bus echo on port {bus}")
         print(f"Port {bus}: transmit echo verified.")
 

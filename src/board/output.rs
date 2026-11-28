@@ -12,7 +12,7 @@ const TRACE_SLOTS: usize = 2 * PORT_COUNT;
 const RECORD_SLOTS: usize = COMMAND_WATERMARK + PORT_COUNT + TRACE_SLOTS;
 type SlotMask = u32;
 const _: () = assert!(RECORD_SLOTS <= SlotMask::BITS as usize);
-const INVALID_RECORD_BYTES: usize = tpck::raw::INVALID_PREFIX + MAX_BYTES + size_of::<u16>();
+const INVALID_RECORD_BYTES: usize = tpck::capture::INVALID_PREFIX + MAX_BYTES + size_of::<u16>();
 const RECORD_PAYLOAD_BYTES: usize = if INVALID_RECORD_BYTES > MAX_REPLY_BYTES {
     INVALID_RECORD_BYTES
 } else {
@@ -101,8 +101,7 @@ impl Output {
         event: u8,
         p: usize,
         ms: u32,
-        detail: &[u8],
-        body: &[u8],
+        parts: [&[u8]; 2],
         errors: &mut ErrorBook,
     ) {
         self.flush_trace_gap(false);
@@ -111,11 +110,12 @@ impl Output {
             self.gap.lost(p);
             return;
         }
-        let mut prefix = [0; tpck::raw::RX_PREFIX];
-        prefix[0] = event;
-        prefix[1] = p as u8;
-        prefix[2..].copy_from_slice(&ms.to_le_bytes());
-        self.enqueue_parts(Kind::Trace, tpck::NORMAL_TRACE, &[&prefix, detail, body]);
+        self.observation(
+            Kind::Trace,
+            tpck::NORMAL_TRACE,
+            tpck::capture::prefix(event, p as u8, ms),
+            parts,
+        );
     }
     pub(super) fn flush_trace_gap(&mut self, boundary: bool) {
         if (self.traces < TRACE_SLOTS || boundary)
@@ -152,7 +152,13 @@ impl Output {
         }
         kind
     }
-    pub(super) fn capture(&mut self, kind: Kind, parts: &[&[u8]], ms: u32, errors: &mut ErrorBook) {
+    pub(super) fn capture(
+        &mut self,
+        kind: Kind,
+        parts: [&[u8]; 2],
+        ms: u32,
+        errors: &mut ErrorBook,
+    ) {
         let first = usize::from(self.encoder.started());
         if self.len - self.traces >= RX_WATERMARK {
             if matches!(kind, Kind::Rx(_))
@@ -167,7 +173,26 @@ impl Output {
                 return;
             }
         }
-        self.enqueue_parts(kind, tpck::TN4, parts);
+        let (event, port) = match kind {
+            Kind::Rx(port) => (tpck::capture::NATIVE, port),
+            Kind::Invalid(port) => (tpck::capture::INVALID, port),
+            _ => unreachable!(),
+        };
+        self.observation(
+            kind,
+            tpck::TN4,
+            tpck::capture::prefix(event, port, ms),
+            parts,
+        );
+    }
+    fn observation(
+        &mut self,
+        kind: Kind,
+        ty: u8,
+        prefix: [u8; tpck::capture::PREFIX],
+        [first, second]: [&[u8]; 2],
+    ) {
+        self.enqueue_parts(kind, ty, &[&prefix, first, second]);
     }
     pub(super) fn enqueue(&mut self, kind: Kind, ty: u8, data: &[u8]) {
         self.enqueue_parts(kind, ty, &[data]);

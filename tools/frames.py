@@ -64,14 +64,19 @@ def describe(data):
     kind, port = data[:2]
     if kind == 0:
         body = data[6:]
-        if len(body) < 4 or len(body) != 4 + (body[3] & 63):
+        if len(body) < 4:
             raise ValueError("invalid raw frame length")
+        end = 4 + (body[3] & 63)
+        if len(body) not in (end, end + 1):
+            raise ValueError("invalid raw frame length")
+        flags = f" flags=0x{body[end]:02x}" if len(body) > end else ""
+        body = body[:end]
         header = int.from_bytes(body[:4], "big")
         mid = (header >> 20) & 1023
         return (
             f"port={port} end_ms={int.from_bytes(data[2:6], 'little')} "
             f"id=0x{mid:03x} subnet={(header >> 12) & 255} node={(header >> 6) & 63} "
-            f"body={body.hex()} {details(mid, body[4:])}"
+            f"body={body.hex()}{flags} {details(mid, body[4:])}"
         ).rstrip()
     if kind == 4 and len(data) >= 9:
         count = int.from_bytes(data[7:9], "little")

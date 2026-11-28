@@ -45,7 +45,7 @@ class HelperTest(unittest.TestCase):
         os.write(master, encode(6, bytes([3 if update else 4]) + mid + reply))
 
     def capabilities(self, master):
-        self.exchange(master, 1, bytes([3, 0, 5, 3]))
+        self.exchange(master, 1, bytes([4, 0, 5, 3]))
 
     def test_handoff(self):
         master, proc = self.start_helper("enter-isp")
@@ -152,7 +152,7 @@ class HelperTest(unittest.TestCase):
         ]:
             with self.subTest(action=action):
                 master, proc = self.start_helper(action)
-                self.exchange(master, 1, bytes([3, initial, 5, 3]))
+                self.exchange(master, 1, bytes([4, initial, 5, 3]))
                 self.exchange(master, 2, selection, selection, update=True)
                 _, err = proc.communicate(timeout=3)
                 self.assertEqual(proc.returncode, 0, err)
@@ -163,7 +163,7 @@ class HelperTest(unittest.TestCase):
             master, proc = self.start_helper("diagnostics", "--ack-port", "3",
                                              "--seconds", "1", "--save-capture", str(target))
             self.raw(master, 1 << 3)
-            packets = encode(1, bytes.fromhex("0003190000007d7123420582"), literal_header=True)
+            packets = encode(1, bytes.fromhex("0003190000007d712342058201"), literal_header=True)
             packets += encode(1, bytes.fromhex("04021900000002010080"), literal_header=True)
             os.write(master, packets)
             self.close_raw(master)
@@ -172,6 +172,7 @@ class HelperTest(unittest.TestCase):
             out, err = proc.communicate(timeout=3)
             self.assertEqual(proc.returncode, 0, err)
             self.assertEqual(target.read_bytes(), packets)
+            self.assertIn(b"body=7d7123420582 flags=0x01", out)
             self.assertIn(b"port=2 end_ms=25 invalid=2 bit_count=1 bits=80", out)
             self.assertIn(b"port=4 dropped_valid=4 dropped_invalid=0", out)
 
@@ -184,7 +185,7 @@ class HelperTest(unittest.TestCase):
             master, proc = self.start_helper(action, *args)
             self.raw(master)
             self.expect(master, encode(1, bytes([0, 4]) + bytes(4) + ECHO_QUERY, literal_header=True))
-            os.write(master, encode(1, bytes([0, 4]) + bytes(4) + ECHO_QUERY, literal_header=True)
+            os.write(master, encode(1, bytes([0, 4]) + bytes(4) + ECHO_QUERY + b"\x00", literal_header=True)
                      + encode(1, bytes([2, 4]) + result, literal_header=True))
             self.close_raw(master)
             _, err = proc.communicate(timeout=3)

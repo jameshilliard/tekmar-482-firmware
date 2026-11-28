@@ -56,7 +56,7 @@ the request body is empty. All integers are little endian.
 | --- | --- | --- |
 | 00000187 FirmwareRevision | Request, zero or two placeholder bytes | u16 numeric revision, 0 for this unnumbered custom image |
 | 0000018F ProtocolVersion | Request, zero or two placeholder bytes | u16 tHA protocol version, currently 3 |
-| 544BF001 BridgeCapabilities | Request | Three u8 values: version (3), mode (0 Normal, 1 Raw), port count (5). Remaining bytes are one little-endian feature bitmap: bit 0 Raw, 1 ROM update, 2 Normal trace, 3 error reporting, 4 Normal identity read, 5 traffic counters, 7 Normal status read, 9 Normal announcements, 10 Normal bitmap block reads and guarded edits, 11 ordered Normal trace loss notices, 12 Normal subnet discovery, 13 trace-ordered native operation results, 14 link timing, 15 Normal stage commands, 16 Normal service frames. Bits 6 and 8 are retired. |
+| 544BF001 BridgeCapabilities | Request | Three u8 values: version (4), mode (0 Normal, 1 Raw), port count (5). Remaining bytes are one little-endian feature bitmap: bit 0 Raw, 1 ROM update, 2 Normal trace, 3 error reporting, 4 Normal identity read, 5 traffic counters, 7 Normal status read, 9 Normal announcements, 10 Normal bitmap block reads and guarded edits, 11 ordered Normal trace loss notices, 12 Normal subnet discovery, 13 trace-ordered native operation results, 14 link timing, 15 Normal stage commands, 16 Normal service frames. Bits 6 and 8 are retired. |
 | 544BF002 SetBridgeMode | Update, mode u8, options u8 | Echo both bytes. `00 00`: Normal. `01 00`: 485 base Raw. `01 01`: Raw with 482 extension records. Busy while a bus operation, inventory walk or local ACK is outstanding. Entering Normal or base Raw clears the ACK mask. |
 | 544BF003 PortDrops | Request, port u8 | Port u8, valid records dropped u64, invalid records dropped u64. |
 | 544BF004 FirmwareBuild | Request | Build revision without a terminator: 40 lowercase hexadecimal digits or `unversioned` |
@@ -378,7 +378,7 @@ followed by the payload length specified in its low six bits.
 
 | Service | Direction | Fields after port |
 | --- | --- | --- |
-| 00 Native (RX) | Gateway to host | Gateway uptime in ms (u32, wraps), then native body. Acknowledged and unacknowledged link-valid frames, including a valid local echo, are forwarded. |
+| 00 Native (RX) | Gateway to host | Gateway uptime in ms (u32, wraps), then native body. With extensions, one RX flags byte follows the body. Acknowledged and unacknowledged link-valid frames, including a valid local echo, are forwarded. |
 | 00 Native (Send) | Host to gateway | Zero timestamp (u32), then native body including source. Gateway supplies the wire CRC, stuffing and trailer. |
 
 For example, port 3 plus native body `12 30 00 00` encodes as
@@ -398,8 +398,11 @@ implement private 485 tRPC calls.
 
 **Raw with extensions (`01 01`).** The host selects a single physical
 port per Send; selector `3F` is not accepted in this profile. The native
-record and TPCK framing stay the same. These additional records are
-gateway-to-host only:
+body and TPCK framing stay the same. RX adds the same trailing flags as
+Normal trace (bit 0: link ACK observed; bit 1: early start). The native
+header's length identifies the end of the body, so it never includes the
+flags. This reports what the receiver observed without enabling link ACK.
+These additional records are gateway-to-host only:
 
 | Service | Name | Fields after port |
 | --- | --- | --- |
@@ -431,13 +434,15 @@ Send. It is off at boot and on entry to Raw. A serial disconnect is not
 detectable; an independent host can always clear the trace mask in Normal.
 
 TPCK type D0 is gateway-to-host only. For 00, 01 and 04 the prefix is
-event u8, port u8, gateway uptime in ms u32 (little endian, wraps).
-Event 05 contains just the event byte and its data; it has no timestamp.
+event u8, port u8, gateway uptime in ms u32 (little endian, wraps). RX
+and invalid capture have the same payload layout as extended Raw. Valid
+native bodies start immediately after the timestamp in both modes.
+Event 05 has no timestamp.
 
 | Event | Data | Meaning |
 | --- | --- | --- |
-| 00 Rx | flags u8, complete native body | Peer frame; bit 0 means link ACK observed, bit 1 early start (not passed to the Normal inventory). Gateway TX echo is excluded. |
-| 01 Tx | origin u8, outcome u8, intended native body | One gateway attempt at completion, including an arbitration loss before a retry. Origins: 0 setting transaction, 1 broadcast, 2 line discovery, 3 native read (background or explicit), 4 explicit stage command, 5 explicit service frame. Outcome 0 link ACK, 1 no ACK, 2 arbitration lost, 3 echo mismatch, 4 bad end, 5 missed timing. A failed attempt need not have put the complete body on the bus. |
+| 00 Rx | Complete native body, flags u8 | Peer frame; bit 0 means link ACK observed, bit 1 early start (not passed to the Normal inventory). Gateway TX echo is excluded. |
+| 01 Tx | Intended native body, origin u8, outcome u8 | One gateway attempt at completion, including an arbitration loss before a retry. Origins: 0 setting transaction, 1 broadcast, 2 line discovery, 3 native read (background or explicit), 4 explicit stage command, 5 explicit service frame. Outcome 0 link ACK, 1 no ACK, 2 arbitration lost, 3 echo mismatch, 4 bad end, 5 missed timing. A failed attempt need not have put the complete body on the bus. |
 | 04 RxInvalid | reason u8, bit count u16, captured bits | Same reason and bit packing as Raw RxInvalid. Not a valid peer update. |
 | 05 Gap | affected port mask u8, dropped record count u64 little endian | One or more earlier trace records were dropped. The count is a total across the indicated ports; directions and individual counts are unknown. |
 

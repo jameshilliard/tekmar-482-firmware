@@ -698,7 +698,7 @@ def run(path, ram, fast=False, *, normal_reads=False, client_script=None):
         if kind == 0xd0:
             if phase == "trace-burst":
                 assert data[0] == 0, ("unexpected TX, invalid frame or trace loss", data.hex())
-                burst_traces.append((data[1], data[7:]))
+                burst_traces.append((data[1], data[6:-1]))
                 return
             if normal_reads:
                 assert data[1] == (8 if data[0] == 5 else 3)
@@ -706,7 +706,7 @@ def run(path, ram, fast=False, *, normal_reads=False, client_script=None):
                 return
             if data[0] == 5:
                 assert phase == "trace-congested" and data == bytes.fromhex("0501 0200000000000000")
-                assert [r[-2] for k, r in traces if k == 0] == list(range(1, TRACE_BURST + 1))
+                assert [r[-3] for k, r in traces if k == 0] == list(range(1, TRACE_BURST + 1))
                 traces.append((data[0], data[1:]))
                 return
             assert data[1] == 0 and int.from_bytes(data[2:6], "little") and not raw_mode
@@ -757,7 +757,7 @@ def run(path, ram, fast=False, *, normal_reads=False, client_script=None):
                     assert phase == "normal-block" and data[0] == 2 and data[5:7] == bytes([3,0])
                     assert data[7] == 0 and int.from_bytes(data[8:12], "little") > 0
                     assert data[12:] == bytes.fromhex("6e700047 380003 f3 11 ca35")
-                    captured = [t[7:] for t in read_traces if t[0] == 0]
+                    captured = [t[6:-1] for t in read_traces if t[0] == 0]
                     lost = sum(int.from_bytes(t[2:], "little") for t in read_traces if t[0] == 5)
                     assert captured and data[12:] not in captured and lost > 0
                     assert len(captured) + lost >= TRACE_BURST + 2
@@ -780,7 +780,7 @@ def run(path, ram, fast=False, *, normal_reads=False, client_script=None):
                     parts = [d for k, d in actual if k == 6 and d[:7] == bytes.fromhex("0210f04b54 0300")]
                     assert [d[11:] for d in parts] == [bytes.fromhex(s) for s in ("17e00605 090108 35ca","17e00e06 0901ff 0405 7e")]
                     for part in parts:
-                        assert any(t[0] == 0 and t[2:6] == part[7:11] and t[7:] == part[11:] for t in read_traces)
+                        assert any(t[0] == 0 and t[2:6] == part[7:11] and t[6:-1] == part[11:] for t in read_traces)
                     assert 0 < int.from_bytes(parts[0][7:11],"little") < int.from_bytes(parts[1][7:11],"little")
                     assert actual.count((6, bytes.fromhex("0406f04b54 0ff04b54 01"))) == 2
                     phase = "edit-guard"
@@ -839,7 +839,7 @@ def run(path, ram, fast=False, *, normal_reads=False, client_script=None):
                     assert (6, bytes.fromhex("0306f04b54 15f04b54 02")) in actual
                     assert (6, bytes.fromhex("0306f04b54 15f04b54 01")) in actual
                     assert (6, bytes.fromhex("0406f04b54 13f04b54 01")) in actual
-                    assert [t[6:] for t in read_traces if t[0] == 1 and t[6] == 4] == [b"\x04\0" + STAGE_PURGE]
+                    assert [t[6:] for t in read_traces if t[0] == 1 and t[-2] == 4] == [STAGE_PURGE + b"\x04\0"]
                     phase = "normal-service"
                     exchanges[3].append((SERVICE_CYCLE, None))
                     extension(22, SERVICE_KEY)  # Only the Update service may transmit.
@@ -855,7 +855,7 @@ def run(path, ram, fast=False, *, normal_reads=False, client_script=None):
                     assert (6, bytes.fromhex("0406f04b54 16f04b54 02")) in actual
                     assert (6, bytes.fromhex("0306f04b54 16f04b54 02")) in actual
                     assert (6, bytes.fromhex("0306f04b54 16f04b54 01")) in actual
-                    assert [t[6:] for t in read_traces if t[0] == 1 and t[6] == 5] == [b"\x05\0" + SERVICE_CYCLE]
+                    assert [t[6:] for t in read_traces if t[0] == 1 and t[-2] == 5] == [SERVICE_CYCLE + b"\x05\0"]
                     extension(11, b"\x00", True)
                     phase = "normal-discover"
                     exchanges[3].append((bytes.fromhex("6d70000b 0000 15 ffffff7f 00000000"), None))
@@ -984,7 +984,7 @@ def run(path, ram, fast=False, *, normal_reads=False, client_script=None):
                 elif data[0] == 4 and phase == "trace-congested":
                     assert data[5:] == b"\x01" + struct.pack("<5Q", 2, 0, 0, 0, 0)
                     assert (6, bytes.fromhex("0407010000 0c00")) in actual
-                    assert [r[-2] for k, r in traces if k == 0] == list(range(1, TRACE_BURST + 1))
+                    assert [r[-3] for k, r in traces if k == 0] == list(range(1, TRACE_BURST + 1))
                     assert [r for k, r in traces if k == 5] == [bytes.fromhex("01 0200000000000000")]
                     phase = "trace-reporting"
                     send(0)
@@ -997,12 +997,12 @@ def run(path, ram, fast=False, *, normal_reads=False, client_script=None):
                     inject(BODY, 0, bad_crc=True)
                 else:
                     assert data[5:] == b"\0" and phase == "device-target"
-                    assert (0, bytes.fromhex("01 76f00608 20032a0a06000000")) in traces
-                    assert (0, bytes.fromhex("01 7d700602 8fe1")) in traces
-                    assert (1, bytes.fromhex("00 00 6d700007 0300 00 00008000")) in traces
-                    assert (1, bytes.fromhex("00 02 6df00007 0018 0300 020309")) in traces
-                    assert (1, bytes.fromhex("01 00") + clock_frame) in traces
-                    assert not any(k == 0 and record[1:] == clock_frame for k, record in traces)
+                    assert (0, bytes.fromhex("76f00608 20032a0a06000000 01")) in traces
+                    assert (0, bytes.fromhex("7d700602 8fe1 01")) in traces
+                    assert (1, bytes.fromhex("6d700007 0300 00 00008000 00 00")) in traces
+                    assert (1, bytes.fromhex("6df00007 0018 0300 020309 00 02")) in traces
+                    assert (1, clock_frame + bytes.fromhex("01 00")) in traces
+                    assert not any(k == 0 and record[:-1] == clock_frame for k, record in traces)
                     call(0x10f, b"\x01", True)
             elif method == 0x187 and data[0] == 4:
                 assert phase == "panel-request" and data[5:] == bytes(2)
@@ -1299,27 +1299,30 @@ def run(path, ram, fast=False, *, normal_reads=False, client_script=None):
             assert protected & 0x7FFF == 0x0E2E
             invalid.add(p)
         elif service == 0:
+            body = data[6:-1]
+            assert data[-1] & ~3 == 0
             if phase == "queued-rx":
-                assert p == 2 and data[6:] in (BODY, SCENE)
-                queued_event(data[6:])
+                assert p == 2 and body in (BODY, SCENE)
+                queued_event(body)
                 return
             if phase == "telemetry":
-                assert (p, data[6:]) == TELEMETRY[len(telemetry)]
-                telemetry.append((p, data[6:]))
+                assert (p, body) == TELEMETRY[len(telemetry)]
+                telemetry.append((p, body))
                 if len(telemetry) == len(TELEMETRY):
                     phase = "enter-base"
                     extension(2, b"\x01\x00", True)
                     at_line_rate()
                 return
             if phase == "raw-read":
-                assert data[6:] in (RAW_SENDS[p], *reads[0])
-                if data[6:] == reads[0][1]:
+                assert body in (RAW_SENDS[p], *reads[0])
+                if body == reads[0][1]:
                     assert p == 0
                     read_event("report")
                 return
-            assert data[6:] == (BODY if phase == "capture" else raw_winner if p == 1 else RAW_SENDS[p])
+            assert body == (BODY if phase == "capture" else raw_winner if p == 1 else RAW_SENDS[p])
             if phase == "capture":
                 assert p in invalid
+                assert data[-1] & 1 == int(p == 2), ("Raw RX ACK bit", data.hex())
                 valid.add(p)
                 if len(valid) == 5:
                     phase = "sending"
@@ -1458,7 +1461,7 @@ def run(path, ram, fast=False, *, normal_reads=False, client_script=None):
                      line_sends, expected_rx_acks - received_rx_acks, list(wire_log))
     assert actual[:4] == [
         (6, bytes.fromhex(x))
-        for x in ("048f0100000300", "0400000000", "0401f04b54030005bffe01")
+        for x in ("048f0100000300", "0400000000", "0401f04b54040005bffe01")
     ] + [
         (
             6,
@@ -1488,7 +1491,7 @@ def run(path, ram, fast=False, *, normal_reads=False, client_script=None):
     assert congestion_reports == list(range(1, TRACE_BURST + 3)), congestion_reports
     assert [b for b, _ in line_sends[2]] == [init, master]
     assert not conflicts and not interrupted and lost == {"master", "write", "raw"}
-    assert (1, raw_winner) in [(b[1], b[6:]) for k, b in actual if k == 1 and b[0] == 0]
+    assert (1, raw_winner) in [(b[1], b[6:-1]) for k, b in actual if k == 1 and b[0] == 0]
     assert expected_rx_acks and received_rx_acks == expected_rx_acks, expected_rx_acks - received_rx_acks
     print(
         f"ARM TPCK: five-port discovery, arbitration/backoff, RX/ACK, TX/overlap, ISP; untouched stack {free} bytes"

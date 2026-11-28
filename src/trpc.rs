@@ -23,7 +23,7 @@ pub enum BridgeError {
 
 const THA_VERSION: u16 = 3;
 const UNNUMBERED_FIRMWARE: u16 = 0;
-const BRIDGE_VERSION: u8 = 3;
+const BRIDGE_VERSION: u8 = 4;
 const FEATURE_BIDIRECTIONAL_RAW: u8 = 1;
 const FEATURE_ROM_UPDATE: u8 = 1 << 1;
 const FEATURE_NORMAL_TRACE: u8 = 1 << 2;

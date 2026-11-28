@@ -1,6 +1,6 @@
 //! Listen-only tN4 link decoder. Logic high is dominant; idle is low.
 
-use crate::tpck::raw::invalid;
+use crate::tpck::capture::invalid;
 pub mod block;
 pub mod message;
 mod response;

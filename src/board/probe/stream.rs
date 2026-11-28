@@ -8,7 +8,7 @@ use core::cell::RefCell;
 use tekmar_482_firmware::diagnostics::errors::{ALL_SOURCES, ErrorBook, HostError, LineError};
 use tekmar_482_firmware::diagnostics::timing::LinkTiming;
 use tekmar_482_firmware::tn4::{ALL_PORTS_MASK, LAST_PORT, MAX_BYTES, PORT_COUNT};
-use tekmar_482_firmware::tpck::{raw, trace};
+use tekmar_482_firmware::tpck::{capture, raw, trace};
 const MOVE_QUEUE_CAPACITY: usize = 128;
 const NORMAL_MODE: u8 = 0;
 const RAW_MODE: u8 = 1;
@@ -90,8 +90,8 @@ impl CapturedFrame {
             debug_assert_eq!(self.len, 0);
             self.bytes[..frame.bytes.len()].copy_from_slice(frame.bytes);
             self.len = frame.bytes.len() as u8;
-            self.flags = (u8::from(frame.trailer == Trailer::Ack) * trace::ACK)
-                | (u8::from(frame.early_start) * trace::EARLY_START);
+            self.flags = (u8::from(frame.trailer == Trailer::Ack) * capture::ACK)
+                | (u8::from(frame.early_start) * capture::EARLY_START);
         }
     }
 }
@@ -263,13 +263,13 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
             if !sending[p].as_ref().is_some_and(Attempt::started) {
                 traffic.received(p, body);
             }
-            if frame.flags & trace::ACK == 0 {
+            if frame.flags & capture::ACK == 0 {
                 errors.line(p, LineError::RxNoAck, time.millis);
             }
             if raw {
                 out.capture(
                     Kind::Rx(p as u8),
-                    &[&[raw::RECORD, p as u8], &time.millis.to_le_bytes(), body],
+                    [body, raw_extensions.then_some(frame.flags).as_slice()],
                     time.millis,
                     errors,
                 );
@@ -279,9 +279,15 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                 && !sending[p].as_ref().is_some_and(Attempt::started)
             {
                 if trace_mask & (1 << p) != 0 {
-                    out.trace(trace::RX, p, time.millis, &[frame.flags], body, errors);
+                    out.trace(
+                        capture::NATIVE,
+                        p,
+                        time.millis,
+                        [body, &[frame.flags]],
+                        errors,
+                    );
                 }
-                if frame.flags & trace::EARLY_START == 0 {
+                if frame.flags & capture::EARLY_START == 0 {
                     if read_mask & (1 << p) != 0
                         && !reads[p].observe(p as u8, body, time.millis, |part| {
                             if !out.can_receive() {
@@ -326,37 +332,20 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                     traffic.invalid(p);
                 }
                 let code = match fault.reason {
-                    raw::invalid::STUFFING => LineError::Stuffing,
-                    raw::invalid::CRC => LineError::Crc,
-                    raw::invalid::CRC_DELIMITER => LineError::CrcDelimiter,
-                    raw::invalid::BAD_END => LineError::BadEnd,
+                    capture::invalid::STUFFING => LineError::Stuffing,
+                    capture::invalid::CRC => LineError::Crc,
+                    capture::invalid::CRC_DELIMITER => LineError::CrcDelimiter,
+                    capture::invalid::BAD_END => LineError::BadEnd,
                     _ => unreachable!(),
                 };
                 errors.line(p, code, time.millis);
+                let [lo, hi] = fault.bits.to_le_bytes();
+                let parts: [&[u8]; 2] = [&[fault.reason, lo, hi], fault.bytes];
                 if raw && raw_extensions {
-                    let [lo, hi] = fault.bits.to_le_bytes();
-                    out.capture(
-                        Kind::Invalid(p as u8),
-                        &[
-                            &[raw::RX_INVALID, p as u8],
-                            &time.millis.to_le_bytes(),
-                            &[fault.reason, lo, hi],
-                            fault.bytes,
-                        ],
-                        time.millis,
-                        errors,
-                    );
+                    out.capture(Kind::Invalid(p as u8), parts, time.millis, errors);
                 } else if !raw && listening {
                     if trace_mask & (1 << p) != 0 {
-                        let [lo, hi] = fault.bits.to_le_bytes();
-                        out.trace(
-                            trace::INVALID,
-                            p,
-                            time.millis,
-                            &[fault.reason, lo, hi],
-                            fault.bytes,
-                            errors,
-                        );
+                        out.trace(capture::INVALID, p, time.millis, parts, errors);
                     }
                     if fault_at.is_none() {
                         inventory.line(p).frame_error();
@@ -528,8 +517,10 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                         trace::TX,
                         p,
                         time.millis,
-                        &[owner[p].trace_origin(&reads[p]), outcome_byte(result)],
-                        attempt.body(),
+                        [
+                            attempt.body(),
+                            &[owner[p].trace_origin(&reads[p]), outcome_byte(result)],
+                        ],
                         errors,
                     );
                 }
@@ -610,7 +601,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                     if let Some(packet) = decoder.push(b, |code| errors.host(code, time.millis)) {
                         baud.locked = true;
                         if packet.kind == tpck::TN4 {
-                            if raw && let [raw::RECORD, port, ..] = packet.data {
+                            if raw && let [capture::NATIVE, port, ..] = packet.data {
                                 let p = usize::from(*port);
                                 let body = raw::send_body(packet.data);
                                 if !raw_extensions && *port == raw::ALL_PORTS {

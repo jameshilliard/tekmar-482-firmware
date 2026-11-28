@@ -46,7 +46,8 @@ uv run --script tools/ram_trial.py "$PORT" \
 The helper negotiates Raw mode, listens on all five lines and requests
 Normal mode when finished. By default it neither sends a frame nor
 acknowledges incoming traffic. The archive contains binary TPCK Raw
-records: the same decoder handles live and replayed traffic. Invalid
+records: the same decoder handles live and replayed traffic. Extended
+Raw includes the ACK and early-start flags from Normal trace. Invalid
 captures are diagnostics, not device updates. See the [packet layouts and
 ordering](tpck-bridge.md) and the [native tN4 payload catalog](tn4-frames.md).
 

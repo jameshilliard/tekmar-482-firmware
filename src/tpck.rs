@@ -1,4 +1,5 @@
 //! UART framing shared by vendor tRPC and the binary raw bridge.
+pub mod capture;
 pub mod raw;
 pub mod trace;
 use crate::diagnostics::errors::HostError;
