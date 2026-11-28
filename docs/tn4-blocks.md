@@ -7,7 +7,8 @@ does not. The [frame reference](tn4-frames.md#block-reports) describes
 compact and positional reports. Unsupported placeholders, including
 nonzero ones, do not establish a reading or a writable setting.
 
-The table covers the 166 IDs in the 483 SW 11 block registry. The
+The table covers the 166 IDs in the 483 SW 11 block registry plus block
+`52` from the 485 J1237G indexed registry. The
 [field layouts](../tools/payloads/layouts.py) give names and widths in
 wire order; words and double words are little-endian. For indexed blocks
 the request argument identifies the selected instance. Its report
@@ -43,13 +44,16 @@ not proof of the original wiring or of a unique device.
 
 The [product catalog](../tools/payloads/products.py) uses Tektra and J
 numbers from the 483 SW 11 product table, plus the additional models
-in the [published tHA list](https://www.watts.com/our-story/brands/tekmar/tha).
+in the [published tHA list](https://www.watts.com/our-story/brands/tekmar/tha)
+and 485 J1237G's product table. The latter lists the 554 under product
+105101 with J1240, and the 670 under products 107002 and 108401 with
+J1254 and J1265. It does not bind each 670 product number to a single J.
 It does not infer a model from a J number alone, a group ID or a master role.
 Two early thermostat variants share a product number; so do a power
 manager and a user switch. Without a distinguishing J number they
-remain unidentified. For identified models, the 40 SW 11 read tables
-suggest blocks to try; the masks in actual reports establish the
-available data, not these lists.
+remain unidentified. For identified models, the 40 SW 11 read tables and
+the two additional J1237G tables (554 and 670) suggest blocks to try.
+The masks in actual reports establish available data, not these lists.
 
 SW 11's `Block.fixup_device_identification` corrects four early devices
 that transmit a byte-swapped J number. With a matching cataloged product,
@@ -85,7 +89,7 @@ reported values. The decoder adds a `corrected_product_number` or
 | 48, 49 | Per-port link counters. 48: stuffing, CRC, CRC delimiter, ACK, ACK delimiter, EOF and dominant-bit errors. 49: local busy, remote busy, arbitration loss, error/event count. These are the reporting device's counters, not the bridge's UART diagnostics. |
 | 4A..4C | Plant mode, stage 3 fire delay and staging selection; energy-use and savings-time registers (one word each). |
 | 4D..50 | Selected mix pump hours, outdoor low and high (degH), available/enabled mix pump masks. |
-| 53..55, 58 | Maximum heat, minimum cool and maximum cool room targets in setback order; floor cooling enable. |
+| 52..55, 58 | Minimum heat, maximum heat, minimum cool and maximum cool room targets in setback order; floor cooling enable. |
 | 5A, 5B, 62 | Selected tank pump hours; available/enabled tank pumps; received-message count (u32). 62 is registered in the declarative catalog, not the indexed 483 reader. |
 | 71..7D, C0..D2 | [Snowmelt configuration, slab targets and diagnostics](tn4-frames.md#addressed-snowmelt-blocks). |
 | 83..8A | Water temperature selection (boiler/mix/tank bits), tN2 link, backup source, heat pump loop mode, cooling tank target, floor dewpoint mode, minimum cooling tank target, second heat pump configuration. |
@@ -121,6 +125,13 @@ status disagree, withhold labeled temperatures. The floor mean uses the
 assigned floor inputs (external 1 alone on 528/538) and rounds down in
 native units; do not publish it with missing contributors. The input
 blocks are read-only here. Raw forwarding never changes their bytes.
+
+The 485's `MinRoomHeatTargetsIn` (`52`) declares five single-byte fields
+in wake, unoccupied, occupied, sleep and away order. The 554 profile
+indicates wake and sleep; honor the live report mask for all five slots.
+J1237G has a reader but no writer for `52`. It also revises the 557's
+expected `09` ventilation mask; this does not change the layout or
+override a peer's reported mask.
 
 ### Thermostat equipment setup
 

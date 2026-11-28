@@ -187,8 +187,9 @@ maximum tN4 version. Only complete, supported fields are interpreted.
 | 00A3 | Humidification mode setup, dehumidification mode setup. |
 | 00A4, 00A5 | Five humidification or dehumidification percentage targets in setback order. tHA exposes only the first; the native blocks contain all five. |
 
-These layouts come from the 483 block types and the J1196J block-report
-and block-update handlers. Reports include a support mask; updates do not.
+These layouts come from the 483 block types, the J1196J block-report and
+block-update handlers, and the 485 J1237G reader where noted. Reports
+include a support mask; updates do not.
 
 ### Addressed snowmelt blocks
 
@@ -217,7 +218,7 @@ selector zero on indexed blocks and did not change settings.
 | 00C6..00CB | Sensor ID u8 and raw u16: slab high/low, supply high/low, return high/low, respectively. |
 | 00CC, 00CD | Relay ID u8 and u16 hours or cycles. |
 | 00CE, 00CF | Sensor ID u8 and u16 wet or dry level. |
-| 00D0 | Application mode u8, application type u8. The 483 names mode values 0..4 PWM, boiler, mixing, electric and sensor-only. |
+| 00D0 | Application mode u8, application type u8. The 483 names mode values 0..4 PWM, boiler, mixing, electric and sensor-only; the 485 adds boiler plus PWM (5) and boiler plus mixing (6), and labels 7 unsupported. |
 | 00D1, 00D2 | Control ID u8 and raw u16 boiler minimum or maximum. |
 
 The 483 sends the eleven-byte request layout with a little-endian u32
@@ -377,8 +378,8 @@ are raw; field width alone does not establish a temperature scale.
 | 4, 5 | Staged boiler or chiller: state [3:0] and pump [7:6]; four available stages [3:0] and four operating stages [7:4]; input and outlet u8. Only the boiler appends output [4:0] and return protection [7:5]. |
 | 6 | Modulating boiler: same state and pump byte; current, minimum and maximum modulation; input and outlet u8; output and protection as for 4. |
 | 7 | Modulating chiller: identified, but neither 483 layout defines the body. Returned unchanged as `extension_hex`. |
-| 8..11 | Staged heat pumps (air-to-air, water-to-air, water-to-water, air-to-water): state [3:0], O/B [4], cooling [5]; stages on, stages available. Types 10/11 add a pump status byte [1:0]. Types 9..11 end with input and outlet u16. |
-| 12..15 | Modulating versions of 8..11: same state byte; current, minimum and maximum modulation. Types 14/15 add pump status [1:0] and two temperature words. The 483 indexed and declarative layouts disagree by one byte on those words. A four-byte tail matches the packed layout; longer tails are returned as `temperature_tail_hex` without choosing offsets. |
+| 8..11 | Staged heat pumps (air-to-air, water-to-air, water-to-water, air-to-water): state [3:0], O/B [4], cooling [5]; stages on, stages available. Types 10/11 add a loop pump status byte [1:0]. Types 9..11 end with heat pump return and outlet u16. |
+| 12..15 | Modulating versions of 8..11: same state byte; current, minimum and maximum modulation. Types 14/15 add loop pump status [1:0] and return/outlet temperature words. The 485 retains the 483 indexed offsets, which disagree with the declarative layout by one byte. A four-byte tail matches the packed layout; longer tails are returned as `temperature_tail_hex` without choosing offsets. |
 | 16 | Staged electric: state, stages on, stages available, sensor u16. |
 | 17, 18 | On/off injection pump or variable-speed pump: state, sensor u16. |
 
@@ -434,6 +435,11 @@ output. The [query catalog](../tools/payloads/queries.py) supplies those
 sets. They are useful requests, not a promise that every key is reported.
 The six-bit frame length fits at most 61 request keys or 20 report pairs.
 Multiple reports can contribute; a missing key is unknown, not zero.
+
+For applications 5 and 6, the 485 J1237G host addresses the zone and
+requests only the shared water detection and slab temperature keys by
+default. Preserve additional keys if actually reported. The new mode
+names do not establish a mode-specific write path or group control.
 
 A single native source can emit **both** a zone report and a sensor
 report, even using the same configured number. SW 11 uses the zone's slab

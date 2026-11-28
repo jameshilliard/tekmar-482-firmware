@@ -291,6 +291,37 @@ class PayloadTests(unittest.TestCase):
             self.assertEqual(query.keys, app.status_keys)
             self.assertEqual(query.payload[0], 0x12 if app is SnowmeltApplication.SENSOR_ONLY else 0x11)
 
+    def test_485_read_profiles_and_minimum_room_heat(self):
+        thermostat = identify_product(105101, 1240)
+        self.assertEqual(thermostat.model, "554")
+        self.assertEqual(len(thermostat.candidate_blocks), 27)
+        self.assertEqual(thermostat.candidate_blocks[-4:], (0x52, 0x53, 0x54, 0x55))
+        snow = identify_product(107002, 1254)
+        self.assertEqual(snow, identify_product(108401, 1265))
+        self.assertEqual(snow.model, "670")
+        self.assertEqual(len(snow.candidate_blocks), 45)
+        self.assertNotIn(0xca, snow.candidate_blocks)
+        self.assertIn(0xcd, snow.candidate_blocks)
+        self.assertIn(0xd0, snow.candidate_blocks)
+        self.assertEqual(decode(0x2e7, "5200 09 28 25"), {
+            "block_id": 0x52, "support_mask": "0x09",
+            "wake_minimum_room_heat_raw": 40, "sleep_minimum_room_heat_raw": 37,
+        })
+        positional = decode(0x2e7, "5200 09 28 a6 b3 25 ca")
+        self.assertEqual(positional["extension_hex"], "ca")
+        self.assertNotIn("unoccupied_minimum_room_heat_raw", positional)
+        self.assertIn("truncated", decode(0x2e7, "5200 09 28"))
+        self.assertNotIn(0x52, WritableBlock)
+
+    def test_485_combined_snowmelt_modes_use_only_shared_status_keys(self):
+        for value, name in ((5, "boiler_pwm"), (6, "boiler_mixing")):
+            app = SnowmeltApplication(value)
+            self.assertFalse(app.control_writes_supported)
+            self.assertEqual(NativeStatusQuery.for_snowmelt_device(app, 3).payload,
+                             bytes.fromhex("11 02 19 22"))
+            self.assertEqual(decode(0x2e7, f"d000 03 {value:02x} 01")["application_mode_name"], name)
+        self.assertNotIn("application_mode_name", decode(0x2e7, "d000 03 07 01"))
+
     def test_snowmelt_pairs_retain_order_raw_words_and_faults(self):
         payload = bytes.fromhex("19 05 220006 2200c0 1b1204 9900ca 190400 35")
         r = Reader(payload)
@@ -1131,13 +1162,13 @@ class PayloadTests(unittest.TestCase):
             ("02030405060708", {"minimum_modulation_level": 4, "input_temp_raw": 6, "output": 8}),
             ("", {"plant": "modulating_chiller"}),
             ("320103", {"state": 2, "ob_config": 1, "cooling": 1, "number_stages_on": 1}),
-            ("32010334127856", {"number_stages_available": 3, "input_temp_raw": 0x1234}),
-            ("3201038234127856", {"pump_status": 2, "outlet_temp_raw": 0x5678}),
-            ("3201038134127856", {"pump_status": 1, "input_temp_raw": 0x1234}),
+            ("32010334127856", {"number_stages_available": 3, "return_temp_raw": 0x1234}),
+            ("3201038234127856", {"loop_pump_status": 2, "outlet_temp_raw": 0x5678}),
+            ("3201038134127856", {"loop_pump_status": 1, "return_temp_raw": 0x1234}),
             ("32030507", {"current_modulation_level": 3, "maximum_modulation_level": 7}),
             ("32030507", {"minimum_modulation_level": 5, "maximum_modulation_level": 7}),
-            ("320305070234127856", {"pump_status": 2, "outlet_temp_raw": 0x5678}),
-            ("320305070134127856", {"pump_status": 1, "input_temp_raw": 0x1234}),
+            ("320305070234127856", {"loop_pump_status": 2, "outlet_temp_raw": 0x5678}),
+            ("320305070134127856", {"loop_pump_status": 1, "return_temp_raw": 0x1234}),
             ("1203053412", {"state": 18, "number_stages_available": 5, "sensor_temp_raw": 0x1234}),
             ("233412", {"state": 35, "sensor_temp_raw": 0x1234}),
             ("457856", {"state": 69, "sensor_temp_raw": 0x5678}),
@@ -1153,7 +1184,7 @@ class PayloadTests(unittest.TestCase):
         for kind in ("0e", "0f"):
             f = decode(0x24f, "32" + kind + "32030507020034127856")
             self.assertEqual(f["temperature_tail_hex"], "0034127856")
-            self.assertNotIn("input_temp_raw", f)
+            self.assertNotIn("return_temp_raw", f)
 
     def test_snowmelt_status_fields(self):
         fields = decode(0x17e, "09070102011b02011f0700210a002affff2d3412300c00")
