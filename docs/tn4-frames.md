@@ -655,9 +655,9 @@ target and tests the minimum flag in bit 5. The indexed `SetpointStatus`
 leaves three two-bit output fields shifted in place; the declarative
 layout right-aligns them. Its indexed `ScheduleStatus` never assigns the
 edge byte, which is present in the declarative layout. The local decoder
-uses the declarative interpretations; the comparison test checks these
-differences alongside every bit of 17 selected status and announcement
-layouts.
+uses the declarative interpretations. An offline reference comparison
+checked these differences and every bit of 17 selected status and
+announcement layouts.
 
 **Stage selection.** StageHeatDemandRequest and all six purge/override
 commands share a five-byte payload. The 483 SW 11 `NodeMaskIn` maps the
@@ -697,7 +697,7 @@ reader agrees. Send it through NormalServiceFrame with an explicit
 sender and priority. The length's units and the responding model or
 role are not established. Keep it separate from the observed cycle in
 377 AirGroupMasterStatus; 377 is not a matched reply to 33F.
-The optional 483 comparison checks every bit in the five base service
+An offline 483 comparison checked every bit in the five base service
 layouts against the SW 11 indexed readers, excluding the unresolved
 mixing tail.
 

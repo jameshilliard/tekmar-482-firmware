@@ -16,14 +16,12 @@ byte with flags. A partial word remains raw. Unknown units, reserved flag
 bits and extension bytes are retained rather than assigned meanings.
 Layout support does not mean every product answers or accepts an update.
 
-To compare against trusted, locally extracted 483 software, run
-`python3 tests/compare_483.py <sw07-tn4-dir> <sw11-tn4-dir>` (the directories
-contain `message_types.rb`; Ruby 3 is needed). This is offline and uses no
-equipment. It checks message registrations, block IDs and indexed selectors,
-exercises every bit of the SW 11 indexed block readers, 17 native status
-and announcement readers, and compares actual writer bytes with field edits.
-Matching bit positions alone does not establish the engineering unit or a
-particular device's capabilities.
+Offline comparisons against locally extracted 483 software checked message
+registrations, block IDs and indexed selectors, every bit of the SW 11
+indexed block readers and 17 native status and announcement readers, and
+actual writer bytes against field edits. Matching bit positions alone does
+not establish the engineering unit or a particular device's capabilities.
+Vendor sources and the comparison helper are not distributed in this project.
 
 Two SW 11 indexed reader defects should **not** be copied: for block 08
 it reads the whole first or second byte for two fan fields declared as
