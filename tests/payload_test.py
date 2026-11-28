@@ -338,13 +338,13 @@ class PayloadTests(unittest.TestCase):
         for mid, data in ((0x36f, member[:7]), (0x377, master[:12])):
             self.assertIn("truncated", decode_payload(mid, data))
 
-    def test_air_group_target_uses_master_gate_selection_and_heat_setback(self):
+    def test_air_group_target_uses_master_gate_and_selected_channel_setback(self):
         book = AirGroupTargets()
         def master(g, h, c, ht=40, ct=50):
             return book.observe(AirStatus.read(Reader(bytes([g, 0, h, ht, 0, 0, c, ct, 0, 0, 0, 0, 0])), master=True))
         def member(g, f, target=42):
             return book.observe(AirStatus.read(Reader(bytes([g, f, target, 0, 0, 0, 0, 0])), master=False))
-        self.assertEqual(master(16, 4, 11), AirTarget(T.COOL, 1, 50))
+        self.assertEqual(master(16, 4, 11), AirTarget(T.COOL, 2, 50))
         self.assertEqual(master(16, 7, 11), AirTarget(T.HEAT, 1, 40))
         self.assertIsNone(master(16, 5, 9))
         self.assertIsNone(master(48, 7, 11))  # No fallback to cool if the chosen heat is inhibited.
