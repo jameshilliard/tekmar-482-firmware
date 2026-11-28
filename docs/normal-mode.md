@@ -120,9 +120,14 @@ with a native read and return the value the device actually retained.
 setpoints or setup on the source port. Repeated requests for the same device
 and block occupy one entry. A busy port retains its reads; another port can
 make progress independently. A matching block report immediately releases
-that line's next read. If the peer doesn't answer, the line allows another
-background read after one second. This window is not a delay on serial
-reports, explicit host operations or verified write readback.
+that line's next read, but a malformed support-mask layout cannot release
+a background read or create or refresh an inventory entry. It remains
+visible in the native trace. An unsupported block can answer an explicit
+read without supplying a value. A matching malformed setting reply can
+fail that operation without changing the cache. If the peer doesn't
+answer, the line allows another background read after one second. This
+window is not a delay on serial reports, explicit host operations or
+verified write readback.
 
 A change in air group, heat/cool enablement, demand, setback or the active
 target justifies re-reading configured mode, not guessing its value. An
@@ -307,7 +312,7 @@ Product identity alone does not set bits.
 | 0008 | FanDuctStatus (25F) or a ventilation requirement in block 09. This says nothing about the current fan speed. |
 | 0010 | RHReport (323), independent of whether either humidity limit is enabled. |
 | 0020, 0040 | Following RHReport, block A3 enables the maximum via byte 1 and the minimum via byte 0. Off or unavailable flags do not grant access. |
-| 0080 | Setpoint control status (22F) with operating mode 1, or a setpoint control setup/target block (26, 28, 2A, 2C, 2E, 30). This is not a setpoint group. |
+| 0080 | Setpoint control status (22F) with operating mode 1, a supported known application in block 26, or a complete supported target word in 28, 2A, 2C, 2E or 30. Unsupported placeholders and half-words cannot establish the role. This is not a setpoint group. |
 
 The custom firmware reports a change to **any** mask bit with reporting
 enabled, before dependent samples still pending for that device. Like the

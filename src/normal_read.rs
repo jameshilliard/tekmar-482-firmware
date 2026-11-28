@@ -1,6 +1,6 @@
 //! Explicit Normal operations sharing a physical line. A link ACK is never an application reply.
 use crate::tn4::{
-    self, HEADER_BYTES, MAX_BYTES, NODE_MASK, message,
+    self, HEADER_BYTES, MAX_BYTES, NODE_MASK, block, message,
     tx::{Outcome, Request},
 };
 use crate::tpck::raw;
@@ -233,14 +233,12 @@ impl Query {
         let header = u32::from_be_bytes([*a, *b, *c, *d]);
         let node = (header >> tn4::NODE_SHIFT) as u8 & NODE_MASK;
         let bit = 1u32 << node.checked_sub(1)?;
-        let count = support.count_ones() as usize;
-        let span = (u8::BITS - support.leading_zeros()) as usize;
         ((header >> tn4::MESSAGE_SHIFT) & tn4::MESSAGE_MASK == message::BLOCK_REPORT
             && (header >> tn4::SUBNET_SHIFT) as u8 == self.subnet
             && self.nodes & bit != 0
             && (header as usize & tn4::PAYLOAD_MASK as usize) + HEADER_BYTES == body.len()
             && [*lo, *hi] == self.block
-            && (data.len() == count || data.len() >= span)
+            && block::report_layout(*support, data.len()).is_some()
             && (self.selector_mask == 0
                 || support & 1 != 0 && data[0] & self.selector_mask == self.selector))
             .then_some(bit)

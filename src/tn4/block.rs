@@ -15,3 +15,20 @@ pub const POOL_TARGETS: u8 = 0x30;
 pub const HUMIDITY_SETUP: u8 = 0xa3;
 pub const HUMIDIFY_TARGETS: u8 = 0xa4;
 pub const DEHUMIDIFY_TARGETS: u8 = 0xa5;
+
+pub enum ReportLayout {
+    Positional,
+    Compact,
+}
+
+/// Match the supported bytes before using any of them as application evidence.
+pub fn report_layout(support: u8, bytes: usize) -> Option<ReportLayout> {
+    let span = (u8::BITS - support.leading_zeros()) as usize;
+    if bytes >= span {
+        Some(ReportLayout::Positional)
+    } else if bytes == support.count_ones() as usize {
+        Some(ReportLayout::Compact)
+    } else {
+        None
+    }
+}

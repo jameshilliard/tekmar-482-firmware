@@ -59,6 +59,32 @@ fn reply_window_is_per_line_bounded_and_starts_at_physical_send_completion() {
 }
 
 #[test]
+fn malformed_reports_neither_discover_devices_nor_release_background_reads() {
+    let malformed: &[&[u8]] = &[
+        &[0, 0, 7, 9],          // Too few bytes for the supported fields.
+        &[0, 0, 0x11, 9, 8, 7], // Neither compact nor positional.
+    ];
+    let mut inv = Inventory::new();
+    for data in malformed {
+        observe(&mut inv, 2, 9, 24, 0x2e7, data, 0);
+    }
+    assert!(!inv.ports[2].devices[23].present(0));
+    assert!(!inv.has_reads(2));
+
+    // A malformed reply did not claim the port's subnet.
+    observe(&mut inv, 2, 10, 24, 0x36f, &[0, 1, 45, 0, 6, 0, 0, 0], 0);
+    let identity = inv.next_probe(2, at(0)).unwrap();
+    assert_eq!(identity.body()[4], 0);
+    inv.probe_sent(identity, at(10).millis);
+    for data in malformed {
+        observe(&mut inv, 2, 10, 24, 0x2e7, data, 0);
+        assert!(take(&mut inv, 2, 20).is_none());
+    }
+    observe(&mut inv, 2, 10, 24, 0x2e7, &[0, 0, 0x27, 1, 2, 3, 4], 0);
+    assert_eq!(take(&mut inv, 2, 21).unwrap()[4], 3);
+}
+
+#[test]
 fn preempted_read_is_retained_but_cannot_follow_replacement_or_satisfied_field() {
     let mut inv = Inventory::new();
     for n in [1, 24] {

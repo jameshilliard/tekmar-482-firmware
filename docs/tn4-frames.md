@@ -551,6 +551,14 @@ SW 11 registries and recognizes all 166 registered block IDs. This is
 coverage of identifiers and their known layouts, not a claim that every
 field has known semantics or can be written.
 
+An offline comparison exercised the SW 11 layout or envelope for each
+registered ID, including all 19 plant subtype selectors, all known
+snowmelt pair keys, provisional or empty layouts, and maximum-length
+sensor and pair arrays. The ambiguous plant temperature tails stay raw.
+Block report masks and update headers were checked separately from the
+inner block catalog and its actual indexed writers. These are wire checks,
+not evidence that a given device implements a message or replies to it.
+
 I/O discovery 1F6/1F5 and channel reads 1F4/1F3 use the full payload
 subnet and node bytes, distinct from the six-bit native header node.
 Discovery also carries a channel count; count distinct channel IDs per

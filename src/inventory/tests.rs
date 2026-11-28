@@ -978,6 +978,34 @@ fn setpoint_identification_withdraws_pending_thermostat_reports_and_writes() {
 }
 
 #[test]
+fn setpoint_blocks_need_supported_application_or_a_complete_target_word() {
+    let mut inv = Inventory::new();
+    observe(&mut inv, 0, 0, 1, 0x2e7, &[3, 0, 7, 1, 4, 5], 0);
+    for data in [
+        &[0x26, 0, 0, 0xa5][..], // A placeholder with no supported fields.
+        &[0x26, 0, 2, 0x01],     // A compact reply without the application.
+        &[0x26, 0, 1, 0xff],     // An unavailable application.
+        &[0x26, 0, 7, 0],        // Truncated support mask.
+        &[0x2c, 0, 0x10, 0x34],  // Half of a target, not a usable word.
+        &[0x2c, 0, 0, 0x34, 0x12],
+    ] {
+        observe(&mut inv, 0, 0, 1, 0x2e7, data, 1);
+        assert!(!inv.ports[0].devices[0].live.is_setpoint_device());
+        assert_eq!(
+            call(&mut inv, 0x127, 1, &[24, 0], 1).unwrap().payload()[7],
+            1
+        );
+    }
+    // A full compact target at offsets two and three establishes capability.
+    observe(&mut inv, 0, 0, 1, 0x2e7, &[0x2c, 0, 0x0c, 0x34, 0x12], 1);
+    assert!(inv.ports[0].devices[0].live.is_setpoint_device());
+    assert_eq!(
+        call(&mut inv, 0x127, 1, &[24, 0], 1).unwrap().payload()[7],
+        255
+    );
+}
+
+#[test]
 fn setpoint_status_refreshes_addressed_setup_without_probing_on_every_report() {
     let mut inv = Inventory::new();
     let status = [0, 0x10, 0, 0, 0, 0, 0, 0, 0, 0, 0];

@@ -323,6 +323,10 @@ impl Operation {
             return;
         }
         if Some(*block) == self.setting.setup() {
+            if block::report_layout(*support, values.len()).is_none() {
+                self.fail();
+                return;
+            }
             let app = block_byte(*support, values, 0);
             let Some(next) = self.setting.block(app) else {
                 self.fail();

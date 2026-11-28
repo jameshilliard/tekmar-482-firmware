@@ -42,6 +42,7 @@ const MAX_FAN_STEP: u8 = 10;
 const BLOCK_REQUEST_PAYLOAD_BYTES: usize = 2 + 1 + size_of::<u32>();
 const BLOCK_REQUEST_FRAME_BYTES: usize = tn4::HEADER_BYTES + BLOCK_REQUEST_PAYLOAD_BYTES;
 const UNKNOWN: u32 = u32::MAX;
+const TARGET_WORD_STARTS: u8 = 0b0101_0101; // First byte of each little-endian target word.
 
 #[derive(Clone, Copy, Default)]
 struct Device {
@@ -191,18 +192,32 @@ fn block_request(block: u8, subnet: u8, node_index: usize) -> [u8; BLOCK_REQUEST
 }
 
 fn block_byte(mask: u8, data: &[u8], index: usize) -> Option<u8> {
-    let bit = 1u8 << index;
+    let bit = 1u8.checked_shl(index as u32)?;
     if mask & bit == 0 {
         return None;
     }
-    let offset = if data.len() >= 8 || (mask >> data.len()) == 0 {
-        index
-    } else if data.len() == mask.count_ones() as usize {
-        (mask & (bit - 1)).count_ones() as usize
-    } else {
-        return None;
+    let offset = match block::report_layout(mask, data.len())? {
+        block::ReportLayout::Positional => index,
+        block::ReportLayout::Compact => (mask & (bit - 1)).count_ones() as usize,
     };
     data.get(offset).copied()
+}
+
+fn setpoint_configuration(data: &[u8]) -> bool {
+    let [id, 0, support, fields @ ..] = data else {
+        return false;
+    };
+    match *id {
+        block::SETPOINT_SETUP => block_byte(*support, fields, 0)
+            .and_then(|app| Setting::DeviceTarget.block(Some(app)))
+            .is_some(),
+        block::SETPOINT_TARGETS
+        | block::HOT_TUB_TARGETS
+        | block::DHW_TARGETS
+        | block::FLOOR_TARGETS
+        | block::POOL_TARGETS => support & (support >> 1) & TARGET_WORD_STARTS != 0,
+        _ => false,
+    }
 }
 
 pub enum Answer {
@@ -357,7 +372,19 @@ impl Inventory {
             message::SETPOINT_STATUS => message::payload_bytes::SETPOINT_STATUS,
             message::FAN_DUCT_STATUS => message::payload_bytes::FAN_DUCT_STATUS,
             message::SLAB_STATUS => message::payload_bytes::SLAB_STATUS,
-            message::BLOCK_REPORT => message::payload_bytes::BLOCK_REPORT_PREFIX,
+            message::BLOCK_REPORT => {
+                let [_, _, support, fields @ ..] = data else {
+                    return None;
+                };
+                if block::report_layout(*support, fields.len()).is_none() {
+                    // A malformed matching setting reply can fail the operation,
+                    // but it is not evidence for the device cache or background reads.
+                    bus.job
+                        .sample(address, subnet, data, &bus.devices[node].live);
+                    return None;
+                }
+                message::payload_bytes::BLOCK_REPORT_PREFIX
+            }
             message::SCHEDULE_STATUS if bus.devices[node].present(now) => {
                 message::payload_bytes::SCHEDULE_STATUS
             }
@@ -421,24 +448,7 @@ impl Inventory {
         }
         let setpoint_running = message == message::SETPOINT_STATUS
             && data[1] & codes::setpoint::STATUS_MODE_MASK == codes::setpoint::STATUS_RUNNING;
-        if setpoint_running
-            || message == message::BLOCK_REPORT
-                && matches!(
-                    data,
-                    [
-                        block::SETPOINT_SETUP
-                            | block::SETPOINT_TARGETS
-                            | block::HOT_TUB_TARGETS
-                            | block::DHW_TARGETS
-                            | block::FLOOR_TARGETS
-                            | block::POOL_TARGETS,
-                        0,
-                        _,
-                        _,
-                        ..
-                    ]
-                )
-        {
+        if setpoint_running || message == message::BLOCK_REPORT && setpoint_configuration(data) {
             row.live.mark_setpoint_device();
             row.invalidate_mode();
             self.mode_reads
