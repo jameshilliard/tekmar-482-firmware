@@ -45,7 +45,7 @@ class HelperTest(unittest.TestCase):
         os.write(master, encode(6, bytes([3 if update else 4]) + mid + reply))
 
     def capabilities(self, master):
-        self.exchange(master, 1, bytes([2, 0, 5, 3]))
+        self.exchange(master, 1, bytes([3, 0, 5, 3]))
 
     def test_handoff(self):
         master, proc = self.start_helper("enter-isp")
@@ -139,11 +139,23 @@ class HelperTest(unittest.TestCase):
 
     def raw(self, master, mask=0):
         self.capabilities(master)
-        self.exchange(master, 2, b"\x01", b"\x01", update=True)
+        self.exchange(master, 2, b"\x01\x01", b"\x01\x01", update=True)
         self.exchange(master, 9, bytes([mask]), bytes([mask]), update=True)
 
     def close_raw(self, master):
-        self.exchange(master, 2, b"\0", b"\0", update=True)
+        self.exchange(master, 2, bytes(2), bytes(2), update=True)
+
+    def test_select_base_and_restore_normal(self):
+        for action, initial, selection in [
+            ("raw-base", 0, b"\x01\0"),
+            ("normal", 1, bytes(2)),
+        ]:
+            with self.subTest(action=action):
+                master, proc = self.start_helper(action)
+                self.exchange(master, 1, bytes([3, initial, 5, 3]))
+                self.exchange(master, 2, selection, selection, update=True)
+                _, err = proc.communicate(timeout=3)
+                self.assertEqual(proc.returncode, 0, err)
 
     def test_binary_capture_and_drop_counters(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -151,8 +163,8 @@ class HelperTest(unittest.TestCase):
             master, proc = self.start_helper("diagnostics", "--ack-port", "3",
                                              "--seconds", "1", "--save-capture", str(target))
             self.raw(master, 1 << 3)
-            packets = encode(1, bytes.fromhex("0003190000007d7123420582"))
-            packets += encode(1, bytes.fromhex("04021900000002010080"))
+            packets = encode(1, bytes.fromhex("0003190000007d7123420582"), literal_header=True)
+            packets += encode(1, bytes.fromhex("04021900000002010080"), literal_header=True)
             os.write(master, packets)
             self.close_raw(master)
             for p in range(5):
@@ -171,9 +183,9 @@ class HelperTest(unittest.TestCase):
         ]:
             master, proc = self.start_helper(action, *args)
             self.raw(master)
-            self.expect(master, encode(1, bytes([1, 4]) + ECHO_QUERY))
-            os.write(master, encode(1, bytes([0, 4, 0, 0, 0, 0]) + ECHO_QUERY)
-                     + encode(1, bytes([2, 4]) + result))
+            self.expect(master, encode(1, bytes([0, 4]) + bytes(4) + ECHO_QUERY, literal_header=True))
+            os.write(master, encode(1, bytes([0, 4]) + bytes(4) + ECHO_QUERY, literal_header=True)
+                     + encode(1, bytes([2, 4]) + result, literal_header=True))
             self.close_raw(master)
             _, err = proc.communicate(timeout=3)
             self.assertEqual(proc.returncode == 0, success, err)

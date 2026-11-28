@@ -19,9 +19,11 @@ have send-side evidence in 483 SW 11. Message IDs below are hexadecimal.
 
 The 483 message serializer sets native header priority 0 on its normal
 outgoing messages. Its serial all-ports selector is **not** a tN4 address.
-In 482 Raw mode the host sends the same native body separately on each
-selected physical port. A busy line, missing ACK or UART deadline on one
-line is not a result for another. Normal-mode stock-style broadcasts
+In 482 Raw mode with extensions, the host sends the same native body
+separately on each selected physical port. A busy line, missing ACK or UART
+deadline on one line is not a result for another. The 485 base Raw profile
+also accepts the all-ports selector without returning per-port results.
+Normal-mode stock-style broadcasts
 retain their own priority and port behavior. The custom
 [NormalAnnounce operation](tpck-bridge.md#normal-announcements) can originate
 the listed clock, group, scene and zone-sync bodies without leaving Normal

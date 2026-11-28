@@ -157,6 +157,27 @@ fn poll_started(
     }
 }
 
+fn raw_attempt(
+    p: usize,
+    body: Option<&[u8]>,
+    errors: &mut ErrorBook,
+    ms: u32,
+) -> Result<Attempt, u8> {
+    let req = body
+        .and_then(|body| Request::new(p as u8, body))
+        .ok_or(raw::rejected::INVALID_BODY)?;
+    let input = INPUTS[p];
+    Attempt::new(
+        &req,
+        input.pin,
+        read(TIMERS[input.timer] + TC),
+        Mode::Raw,
+        errors,
+        ms,
+    )
+    .ok_or(raw::rejected::PIN_UNAVAILABLE)
+}
+
 pub async fn run(panel: &RefCell<Panel>) -> ! {
     #[cfg_attr(not(feature = "ram-trial"), unsafe(link_section = ".bss.inventory"))]
     static INVENTORY: static_cell::ConstStaticCell<Inventory> =
@@ -190,6 +211,8 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
     let out = Output::take();
     let mut baud = Acquisition::default();
     let mut raw = false;
+    let mut raw_extensions = false;
+    let mut mode_transition = false;
     let mut trace_mask = 0u8;
     let mut reboot = false;
     let mut occupied = [false; PORT_COUNT];
@@ -246,7 +269,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
             if raw {
                 out.capture(
                     Kind::Rx(p as u8),
-                    &[&[raw::RX, p as u8], &time.millis.to_le_bytes(), body],
+                    &[&[raw::RECORD, p as u8], &time.millis.to_le_bytes(), body],
                     time.millis,
                     errors,
                 );
@@ -310,7 +333,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                     _ => unreachable!(),
                 };
                 errors.line(p, code, time.millis);
-                if raw {
+                if raw && raw_extensions {
                     let [lo, hi] = fault.bits.to_le_bytes();
                     out.capture(
                         Kind::Invalid(p as u8),
@@ -323,7 +346,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                         time.millis,
                         errors,
                     );
-                } else if listening {
+                } else if !raw && listening {
                     if trace_mask & (1 << p) != 0 {
                         let [lo, hi] = fault.bits.to_le_bytes();
                         out.trace(
@@ -533,6 +556,9 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                     }
                     continue;
                 }
+                if !raw_extensions {
+                    continue;
+                }
                 let body = [
                     raw::TX_RESULT,
                     p as u8,
@@ -570,7 +596,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
         // dispatching one command even if more bytes are already available.
         out.flush_trace_gap(false);
         'receive: for _ in 0..uart0::FIFO_BYTES {
-            if reboot || !out.can_dispatch() {
+            if reboot || mode_transition || !out.can_dispatch() {
                 break 'receive;
             }
             baud.poll(now[0], &mut decoder);
@@ -584,55 +610,55 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                     if let Some(packet) = decoder.push(b, |code| errors.host(code, time.millis)) {
                         baud.locked = true;
                         if packet.kind == tpck::TN4 {
-                            if let [raw::SEND, port, body @ ..] = packet.data {
+                            if raw && let [raw::RECORD, port, ..] = packet.data {
                                 let p = usize::from(*port);
-                                if p >= PORT_COUNT {
-                                    out.enqueue(
-                                        Kind::Control,
-                                        tpck::TN4,
-                                        &[raw::PORT_ERROR, *port, raw::port_error::INVALID_PORT],
-                                    );
-                                } else if occupied[p] {
-                                    out.enqueue(
-                                        Kind::Overlap(*port),
-                                        tpck::TN4,
-                                        &[
-                                            raw::PORT_ERROR,
-                                            *port,
-                                            raw::port_error::SEND_IN_PROGRESS,
-                                        ],
-                                    );
-                                } else {
-                                    occupied[p] = true;
-                                    let mut reason = None;
-                                    if !raw {
-                                        reason = Some(raw::rejected::WRONG_MODE);
-                                    } else if let Some(req) = Request::new(*port, body) {
-                                        if response[p].busy() {
-                                            reason = Some(raw::rejected::LINK_RESPONSE_ACTIVE);
-                                        } else {
+                                let body = raw::send_body(packet.data);
+                                if !raw_extensions && *port == raw::ALL_PORTS {
+                                    if !sending.iter().any(Option::is_some)
+                                        && !response.iter().any(LinkResponse::busy)
+                                    {
+                                        // Stage the whole broadcast before any sender can start.
+                                        for (p, slot) in sending.iter_mut().enumerate() {
                                             response_pin[p] = None;
-                                            sending[p] = Attempt::new(
-                                                &req,
-                                                INPUTS[p].pin,
-                                                read(TIMERS[INPUTS[p].timer] + TC),
-                                                Mode::Raw,
-                                                errors,
-                                                time.millis,
-                                            );
-                                            if sending[p].is_none() {
-                                                reason = Some(raw::rejected::PIN_UNAVAILABLE);
+                                            *slot = raw_attempt(p, body, errors, time.millis).ok();
+                                            if slot.is_none() {
+                                                sending.fill_with(|| None);
+                                                break;
                                             }
                                         }
-                                    } else {
-                                        reason = Some(raw::rejected::INVALID_BODY);
                                     }
-                                    if let Some(reason) = reason {
+                                } else if p >= PORT_COUNT || occupied[p] {
+                                    if raw_extensions {
+                                        let (kind, code) = if p >= PORT_COUNT {
+                                            (Kind::Control, raw::port_error::INVALID_PORT)
+                                        } else {
+                                            (
+                                                Kind::Overlap(*port),
+                                                raw::port_error::SEND_IN_PROGRESS,
+                                            )
+                                        };
                                         out.enqueue(
+                                            kind,
+                                            tpck::TN4,
+                                            &[raw::PORT_ERROR, *port, code],
+                                        );
+                                    }
+                                } else if sending[p].is_none() {
+                                    let attempt = if response[p].busy() {
+                                        Err(raw::rejected::LINK_RESPONSE_ACTIVE)
+                                    } else {
+                                        response_pin[p] = None;
+                                        raw_attempt(p, body, errors, time.millis)
+                                    };
+                                    occupied[p] = raw_extensions;
+                                    match attempt {
+                                        Ok(attempt) => sending[p] = Some(attempt),
+                                        Err(reason) if raw_extensions => out.enqueue(
                                             Kind::Result(*port),
                                             tpck::TN4,
                                             &[raw::TX_RESULT, *port, raw::status::REJECTED, reason],
-                                        );
+                                        ),
+                                        Err(_) => {}
                                     }
                                 }
                             }
@@ -686,23 +712,26 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                                 (
                                     method::SET_BRIDGE_MODE,
                                     service::UPDATE,
-                                    [m @ NORMAL_MODE..=RAW_MODE],
-                                ) if !busy => {
-                                    if raw != (*m == RAW_MODE) {
-                                        trace_mask = 0;
-                                        inventory.reset();
-                                        last_service = None;
-                                        panel.borrow_mut().reset_sequence();
+                                    [m @ NORMAL_MODE..=RAW_MODE, options @ 0..=raw::EXTENSIONS],
+                                ) if *m == RAW_MODE || *options == 0 => {
+                                    if busy {
+                                        call.error(BridgeError::Busy)
+                                    } else {
+                                        if raw != (*m == RAW_MODE) {
+                                            trace_mask = 0;
+                                            inventory.reset();
+                                            last_service = None;
+                                            panel.borrow_mut().reset_sequence();
+                                        }
+                                        raw = *m == RAW_MODE;
+                                        raw_extensions = *options == raw::EXTENSIONS;
+                                        mode_transition = true;
+                                        if !raw || !raw_extensions {
+                                            ack_mask = 0;
+                                            response_pin = core::array::from_fn(|_| None);
+                                        }
+                                        call.ok(call.body)
                                     }
-                                    raw = *m == RAW_MODE;
-                                    if !raw {
-                                        ack_mask = 0;
-                                        response_pin = core::array::from_fn(|_| None);
-                                    }
-                                    call.ok(&[*m])
-                                }
-                                (method::SET_BRIDGE_MODE, service::UPDATE, [_]) if busy => {
-                                    call.error(BridgeError::Busy)
                                 }
                                 (
                                     method::NORMAL_TRACE
@@ -867,6 +896,8 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                             reboot = reply.after_drain == AfterDrain::EnterRom;
                             let kind = if reboot {
                                 Kind::Reboot
+                            } else if mode_transition {
+                                Kind::Mode
                             } else if matches!(
                                 call.method,
                                 method::NORMAL_TRACE
@@ -877,7 +908,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
                             } else {
                                 Kind::Control
                             };
-                            if matches!(kind, Kind::Fence | Kind::Reboot) {
+                            if matches!(kind, Kind::Fence | Kind::Mode | Kind::Reboot) {
                                 out.boundary(kind, reply.payload());
                             } else {
                                 out.enqueue(kind, tpck::TRPC, reply.payload());
@@ -912,6 +943,7 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
             out.enqueue(Kind::Control, tpck::TRPC, report.payload());
         }
         if !reboot
+            && (!raw || raw_extensions)
             && out.can_diagnose()
             && let Some(body) = errors.next_report()
         {
@@ -923,6 +955,16 @@ pub async fn run(panel: &RefCell<Panel>) -> ! {
         }
         match out.pump(&mut uart, errors, time.millis) {
             Some(Kind::Result(p)) => occupied[p as usize] = false,
+            Some(Kind::Mode) => {
+                let header = if raw {
+                    tpck::Header::Literal
+                } else {
+                    tpck::Header::Escaped
+                };
+                out.set_header(header);
+                decoder.set_header(header);
+                mode_transition = false;
+            }
             Some(Kind::Reboot) => {
                 drop(response_pin);
                 drop(bus);

@@ -27,10 +27,13 @@ start, streamed native traffic and reentered ROM ISP.
 
 The unescaped interior is one length byte (payload only), one packet type,
 that many payload bytes, and the low eight bits of their sum including
-length and type. Prefix every interior CA, 35 or 2F byte with 2F, including
-length and checksum. Wrap the result in CA and 35. An unescaped CA restarts
-the decoder. Dispatch only on a valid checksum followed immediately by an
-unescaped 35. An invalid frame never executes a command or receives a reply.
+length and type. Wrap the result in CA and 35. In Normal mode, prefix every
+interior CA, 35 or 2F with 2F, including length, type and checksum. In Raw,
+length and type are literal bytes, as in the 485 serial transport; only
+payload and checksum are escaped. An unescaped CA outside those two literal
+positions restarts the decoder. Dispatch only on a valid checksum followed
+immediately by an unescaped 35. An invalid frame never executes a command or
+receives a reply.
 
 Frames may follow each other with no inter-frame delay. In particular, a host
 can submit one Send on each of several different ports without waiting for the
@@ -53,8 +56,8 @@ the request body is empty. All integers are little endian.
 | --- | --- | --- |
 | 00000187 FirmwareRevision | Request, zero or two placeholder bytes | u16 numeric revision, 0 for this unnumbered custom image |
 | 0000018F ProtocolVersion | Request, zero or two placeholder bytes | u16 tHA protocol version, currently 3 |
-| 544BF001 BridgeCapabilities | Request | Three u8 values: version (2), mode (0 Normal, 1 Raw), port count (5). Remaining bytes are one little-endian feature bitmap: bit 0 Raw, 1 ROM update, 2 Normal trace, 3 error reporting, 4 Normal identity read, 5 traffic counters, 7 Normal status read, 9 Normal announcements, 10 Normal bitmap block reads and guarded edits, 11 ordered Normal trace loss notices, 12 Normal subnet discovery, 13 trace-ordered native operation results, 14 link timing, 15 Normal stage commands, 16 Normal service frames. Bits 6 and 8 are retired. |
-| 544BF002 SetBridgeMode | Update, mode u8 | Echo mode: 0 Normal, 1 Raw. Busy during an inventory walk, a started transmission, an outstanding host send or a local ACK. Switching modes clears the Normal inventory; returning to Normal also clears the ACK mask. |
+| 544BF001 BridgeCapabilities | Request | Three u8 values: version (3), mode (0 Normal, 1 Raw), port count (5). Remaining bytes are one little-endian feature bitmap: bit 0 Raw, 1 ROM update, 2 Normal trace, 3 error reporting, 4 Normal identity read, 5 traffic counters, 7 Normal status read, 9 Normal announcements, 10 Normal bitmap block reads and guarded edits, 11 ordered Normal trace loss notices, 12 Normal subnet discovery, 13 trace-ordered native operation results, 14 link timing, 15 Normal stage commands, 16 Normal service frames. Bits 6 and 8 are retired. |
+| 544BF002 SetBridgeMode | Update, mode u8, options u8 | Echo both bytes. `00 00`: Normal. `01 00`: 485 base Raw. `01 01`: Raw with 482 extension records. Busy while a bus operation, inventory walk or local ACK is outstanding. Entering Normal or base Raw clears the ACK mask. |
 | 544BF003 PortDrops | Request, port u8 | Port u8, valid records dropped u64, invalid records dropped u64. |
 | 544BF004 FirmwareBuild | Request | Build revision without a terminator: 40 lowercase hexadecimal digits or `unversioned` |
 | 544BF005 EnterFirmwareUpdate | Update | Empty positive reply. Finish transmitting it, drain the last UART stop bit, release peripherals and enter ROM ISP. No erase or application programming is performed by this call. |
@@ -64,7 +67,7 @@ the request body is empty. All integers are little endian.
 | 544BF009 LinkAckMask | Update, mask u8 in Raw mode | Echo mask (bit N for port N). Zero disables local ACK. |
 | 544BF00A CaptureCounters | Request | Two timer readings in microseconds (u32), five edge counts (u64), five last capture ticks (u32); both port arrays in physical port order. |
 | 544BF00B NormalTrace | Request, empty; Update, port mask u8 | Normal only. Request returns the mask and five cumulative u64 trace-drop counts in port order. Update replaces the mask and echoes it; zero stops tracing. |
-| 544BF00C ErrorReporting | Request, Update, Report | Both modes. Read/replace the source mask, read one error counter, or receive changed counters (below). |
+| 544BF00C ErrorReporting | Request, Update, Report | Both modes. Read/replace the source mask, read one error counter, or receive changed counters (below). Unsolicited reports are paused in base Raw. |
 | 544BF00D NormalIdentity | Request, port/subnet/node | Queues a read of identity block 00 in Normal mode. The native reply, not the gateway acknowledgement, identifies the device. |
 | 544BF00E TrafficCounts | Request | Read gateway-owned traffic totals or enumerate native paths, in either mode. See below. |
 | 544BF00F NormalBlockRead | Request, Report | Read a block on one physical port and receive each selected peer's native frame via the control channel. Normal only. |
@@ -360,18 +363,49 @@ physical timing tolerance, clear error counters, or affect reporting.
 
 ## Raw records
 
-TPCK type 01 carries the following payloads. The first two bytes are
-always service and physical port (0..4). Multibyte metadata is little
-endian. A native body is the four-byte big-endian tN4 header followed
-by the payload length specified in its low six bits.
+Select Raw with `SetBridgeMode` while using the current framing. The
+gateway sends queued records and the positive reply in the old framing.
+That reply is the boundary: the next frame uses the new framing. Wait for
+the reply before sending in the new framing. Busy and invalid replies
+leave the existing mode unchanged. Switching between Normal and Raw clears
+the Normal inventory. `BridgeCapabilities` is usable on reconnect in either
+framing because its request and reply headers contain no escaped bytes.
+
+TPCK type 01 carries native records. Service and port occupy one byte each;
+port values 0 through 4 are 482 physical port indices. Multibyte metadata
+is little endian. The native body is the four-byte big-endian tN4 header
+followed by the payload length specified in its low six bits.
 
 | Service | Direction | Fields after port |
 | --- | --- | --- |
-| 00 Rx | Gateway to host | Gateway uptime in ms (u32, wraps), native body. Only link-valid frames; both acknowledged and unacknowledged frames are forwarded. |
-| 01 Send | Host to gateway | Native body including source. Gateway supplies the wire CRC, stuffing and trailer. |
-| 02 TxResult | Gateway to host | Status 0: sent and link-acknowledged, no extra byte. Status 1: rejected before send, one reason byte (1 invalid body, 2 pin unavailable, 3 wrong mode, 4 local ACK active). Status 2: attempted, one reason byte (1 no ACK, 2 arbitration lost, 3 echo mismatch, 4 bad end, 5 missed timing). |
-| 03 PortError | Gateway to host | Reason u8: 1 send in progress on this port, 2 invalid port. This is not the terminal result of the outstanding send. |
-| 04 RxInvalid | Gateway to host | Gateway uptime in ms u32, reason u8 (1 stuffing, 2 CRC, 3 CRC delimiter, 4 bad end), bit count u16, captured destuffed bits starting with SOF, MSB first, zero pad in last byte. Not a device update. |
+| 00 Native (RX) | Gateway to host | Gateway uptime in ms (u32, wraps), then native body. Acknowledged and unacknowledged link-valid frames, including a valid local echo, are forwarded. |
+| 00 Native (Send) | Host to gateway | Zero timestamp (u32), then native body including source. Gateway supplies the wire CRC, stuffing and trailer. |
+
+For example, port 3 plus native body `12 30 00 00` encodes as
+`CA 0A 01 00 03 00 00 00 00 12 30 00 00 50 35` on UART. Normal
+mode does not accept native sends.
+
+**485 base Raw (`01 00`).** The 485 J1237G host software uses the literal
+TPCK header and the service-00 layout above. Its ordinary all-ports send
+uses selector `3F`; on the 482 this stages a single attempt on each of the
+five ports. If any port already has a pending operation or cannot accept
+the frame, none are queued. Invalid or busy sends are ignored without a
+reply. There are no unsolicited 482 extension records in this profile.
+The 485 host also recognizes a service-01 NAK, but its MCU's NAK behavior,
+receive port numbering and timestamp units have not been confirmed. The
+482 retains its own port numbering and millisecond uptime and does not
+implement private 485 tRPC calls.
+
+**Raw with extensions (`01 01`).** The host selects a single physical
+port per Send; selector `3F` is not accepted in this profile. The native
+record and TPCK framing stay the same. These additional records are
+gateway-to-host only:
+
+| Service | Name | Fields after port |
+| --- | --- | --- |
+| 02 | TxResult | Status 0: sent and link-acknowledged, no extra byte. Status 1: rejected before send, one reason byte (1 invalid body or nonzero timestamp, 2 pin unavailable, 4 local ACK active). Status 2: attempted, one reason byte (1 no ACK, 2 arbitration lost, 3 echo mismatch, 4 bad end, 5 missed timing). |
+| 03 | PortError | Reason u8: 1 send in progress on this port, 2 invalid port. This is not the terminal result of an outstanding send. |
+| 04 | RxInvalid | Gateway uptime in ms u32, reason u8 (1 stuffing, 2 CRC, 3 CRC delimiter, 4 bad end), bit count u16, captured destuffed bits starting with SOF, MSB first, zero pad in last byte. Not a device update. |
 
 There is at most one outstanding send per port. Wait for its terminal
 TxResult before submitting another on the same port. Other ports can

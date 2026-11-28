@@ -23,8 +23,16 @@ const KIND_OFFSET: u16 = 2;
 const PAYLOAD_OFFSET: u16 = 3;
 const ENCODED: u16 = u16::MAX;
 
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub enum Header {
+    #[default]
+    Escaped,
+    Literal,
+}
+
 /// Resume a single TPCK frame without allocating its escaped representation.
 pub struct Encoder {
+    header: Header,
     offset: u16,
     sum: u8,
     escaped: Option<u8>,
@@ -32,10 +40,22 @@ pub struct Encoder {
 
 impl Encoder {
     pub const EMPTY: Self = Self {
+        header: Header::Escaped,
         offset: 0,
         sum: 0,
         escaped: None,
     };
+
+    pub fn set_header(&mut self, header: Header) {
+        *self = Self {
+            header,
+            ..Self::EMPTY
+        };
+    }
+
+    pub fn reset(&mut self) {
+        self.set_header(self.header);
+    }
 
     pub fn started(&self) -> bool {
         self.offset != 0
@@ -82,7 +102,9 @@ impl Encoder {
                 self.sum = self.sum.wrapping_add(byte);
             }
             self.offset += 1;
-            if matches!(byte, SOF | EOF | ESC) {
+            if (offset >= PAYLOAD_OFFSET || self.header == Header::Escaped)
+                && matches!(byte, SOF | EOF | ESC)
+            {
                 self.escaped = Some(byte);
                 put(ESC);
             } else {
@@ -113,6 +135,7 @@ enum State {
 }
 
 pub struct Decoder {
+    header: Header,
     state: State,
     escaped: bool,
     len: u8,
@@ -125,6 +148,7 @@ pub struct Decoder {
 impl Default for Decoder {
     fn default() -> Self {
         Self {
+            header: Header::Escaped,
             state: State::Idle,
             escaped: false,
             len: 0,
@@ -137,13 +161,20 @@ impl Default for Decoder {
 }
 
 impl Decoder {
+    pub fn set_header(&mut self, header: Header) {
+        self.reset();
+        self.header = header;
+    }
+
     pub fn reset(&mut self) {
         self.state = State::Idle;
         self.escaped = false;
     }
 
     pub fn push(&mut self, byte: u8, mut fault: impl FnMut(HostError)) -> Option<Packet<'_>> {
-        if !self.escaped {
+        let literal =
+            self.header == Header::Literal && matches!(self.state, State::Length | State::Type);
+        if !self.escaped && !literal {
             match byte {
                 SOF => {
                     if !matches!(self.state, State::Idle | State::Length) {
@@ -264,21 +295,51 @@ mod tests {
 
     #[test]
     fn all_lengths_round_trip_including_escaped_lengths_and_types() {
-        for n in 0..=255 {
-            let payload = core::array::from_fn::<_, 255, _>(|i| [SOF, EOF, ESC][i % 3]);
+        let payload = core::array::from_fn::<_, 255, _>(|i| [SOF, EOF, ESC][i % 3]);
+        for header in [Header::Escaped, Header::Literal] {
             let mut decoder = Decoder::default();
-            let mut packets = 0;
-            encode(ESC, &payload[..n], |byte| {
-                if let Some(p) = decoder.push(byte, |_| panic!("valid packet")) {
-                    assert_eq!(p.kind, ESC);
-                    assert_eq!(p.data, &payload[..n]);
-                    packets += 1;
-                }
-            })
-            .unwrap();
-            assert_eq!(packets, 1);
+            let mut encoder = Encoder::EMPTY;
+            decoder.set_header(header);
+            encoder.set_header(header);
+            for n in 0..=255 {
+                let mut packets = 0;
+                encoder
+                    .write(ESC, &payload[..n], usize::MAX, |byte| {
+                        if let Some(p) = decoder.push(byte, |_| panic!("valid packet")) {
+                            assert_eq!(p.kind, ESC);
+                            assert_eq!(p.data, &payload[..n]);
+                            packets += 1;
+                        }
+                    })
+                    .unwrap();
+                assert_eq!(packets, 1);
+                encoder.reset();
+            }
         }
         assert_eq!(encode(1, &[0; 256], |_| panic!()), Err(TooLong));
+    }
+
+    #[test]
+    fn raw_header_is_literal_but_checksum_is_stuffed() {
+        let mut decoder = Decoder::default();
+        decoder.set_header(Header::Literal);
+        let mut encoder = Encoder::EMPTY;
+        encoder.set_header(Header::Literal);
+        let mut bytes = heapless::Vec::<_, 6>::new();
+        encoder
+            .write(EOF, &[], 6, |byte| bytes.push(byte).unwrap())
+            .unwrap();
+        assert_eq!(&bytes[..], &[SOF, 0, EOF, ESC, EOF, EOF]);
+        for &b in &bytes[..5] {
+            assert_eq!(decoder.push(b, |_| panic!("valid packet")), None);
+        }
+        assert_eq!(
+            decoder.push(EOF, |_| panic!("valid packet")),
+            Some(Packet {
+                kind: EOF,
+                data: &[]
+            }),
+        );
     }
 
     #[test]

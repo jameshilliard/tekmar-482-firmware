@@ -155,6 +155,9 @@ def run(path, ram, fast=False, *, normal_reads=False, client_script=None):
     expected_flags, observed_flags = set(), set()
     ack_seen = [False] * len(PORTS)
     raw_mode, raw_ack_mask = False, 0
+    base_body = bytes.fromhex("12302025") + bytes.fromhex("ca352f") + bytes(34)
+    base_echoes = set()
+    base_finish_at = None
     master, init = bytes.fromhex("7f700000"), bytes.fromhex("7df00000")
     line_wires = {protected_bits(body) + "0" * tail: body for body in (master, init) for tail in (3, 11)}
     probe_slots = {protected_bits(body) + "00" for body in (master, init)}
@@ -439,7 +442,7 @@ def run(path, ram, fast=False, *, normal_reads=False, client_script=None):
     cpu.mmio_map(0x3FFFC000, 0x1000, lambda u, o, s, d: gpio[o], None, gpio_write, None)
 
     def timer_read(uc, off, size, t):
-        nonlocal trace_check_at, connect_at, client_tick, client_done
+        nonlocal trace_check_at, connect_at, client_tick, client_done, base_finish_at
         nonlocal clock, inventory_at, next_byte, queued_send_at, phase, jump_at, uptime_offset, discovery_end, retry_isp_at, backoff_after
         nonlocal miss_injected
         if off == 8:
@@ -476,6 +479,11 @@ def run(path, ram, fast=False, *, normal_reads=False, client_script=None):
                     else:
                         call(0x107, bytes(2))
                         extension(11)
+                if base_finish_at is not None and clock >= base_finish_at:
+                    base_finish_at = None
+                    phase = "leave-base"
+                    extension(2, bytes(2), True)
+                    at_line_rate()
                 if retry_isp_at is not None and clock >= retry_isp_at:
                     retry_isp_at = None
                     if phase == "isp-after-flag":
@@ -542,7 +550,8 @@ def run(path, ram, fast=False, *, normal_reads=False, client_script=None):
 
     def call(method, body=b"", update=False):
         incoming.extend(
-            encode(6, bytes([0 if update else 1]) + struct.pack("<I", method) + body)
+            encode(6, bytes([0 if update else 1]) + struct.pack("<I", method) + body,
+                   literal_header=raw_mode)
         )
 
     def extension(method, body=b"", update=False):
@@ -574,8 +583,9 @@ def run(path, ram, fast=False, *, normal_reads=False, client_script=None):
                 expected_rx_acks.add((p, start + (2 * len(BITS) + 19) * 2500))
         edges.extend(sorted(all_edges))
 
-    def send(p, body=SCENE):
-        incoming.extend(encode(1, bytes([1, p]) + body))
+    def send(p, body=SCENE, *, stamp=0):
+        incoming.extend(encode(1, bytes([0, p]) + struct.pack("<I", stamp) + body,
+                               literal_header=raw_mode))
 
     corrupt = bytearray(encode(6, bytes.fromhex("0005f04b54")))
     corrupt[-2] ^= 1
@@ -684,7 +694,7 @@ def run(path, ram, fast=False, *, normal_reads=False, client_script=None):
     def reply(kind, data):
         nonlocal uart_rx_fault, boot_port_checked
         nonlocal trace_resume, trace_check_at
-        nonlocal phase, overlap, raw_mode, raw_ack_mask, uptime_offset, retry_isp_at
+        nonlocal phase, overlap, raw_mode, raw_ack_mask, uptime_offset, retry_isp_at, base_finish_at
         if kind == 0xd0:
             if phase == "trace-burst":
                 assert data[0] == 0, ("unexpected TX, invalid frame or trace loss", data.hex())
@@ -739,7 +749,7 @@ def run(path, ram, fast=False, *, normal_reads=False, client_script=None):
                     assert phase == "normal-block"
                     assert data[5:] == GROUP_KEY
                     extension(15, GROUP_KEY)  # busy, not a second query
-                    extension(2, b"\x01", True)  # changing mode cannot abandon the read
+                    extension(2, b"\x01\x01", True)  # cannot abandon the read
                 elif data[5:7] == bytes([3,4]):
                     assert phase == "normal-block" and data[0] == 2 and data[7] == 0
                     assert data[12:] == bytes.fromhex("6e700607 380003 f3 22 ca35")
@@ -899,6 +909,7 @@ def run(path, ram, fast=False, *, normal_reads=False, client_script=None):
                 actual.pop()
             elif method == 0x544bf00c:
                 if data[0] == 2:
+                    assert phase != "base-raw", "unsolicited extension in 485 base mode"
                     source, code, ms, count = struct.unpack("<BBIQ", data[5:])
                     assert source in (2, 5) and count > 0
                     error_reports.append((raw_mode, source, code, ms, count))
@@ -977,6 +988,7 @@ def run(path, ram, fast=False, *, normal_reads=False, client_script=None):
                     assert [r for k, r in traces if k == 5] == [bytes.fromhex("01 0200000000000000")]
                     phase = "trace-reporting"
                     send(0)
+                    call(0x10f, b"\x01", True)
                 elif data[0] == 4:
                     assert data[5:] == bytes(41)
                     extension(11, b"\x01", True)
@@ -1017,7 +1029,7 @@ def run(path, ram, fast=False, *, normal_reads=False, client_script=None):
             elif method == 0x18f and data[0] == 2:
                 assert phase == "panel-protocol" and data[5:] == b"\x03\0"
                 phase = "capture"
-                extension(2, b"\x01", True)
+                extension(2, b"\x01\x01", True)
             elif method == 0x10f and data[5:] == b"\x01":
                 if phase == "device-target":
                     setting_exchange.append((bytes.fromhex("6d700007 2600 00 00008000"),
@@ -1210,8 +1222,9 @@ def run(path, ram, fast=False, *, normal_reads=False, client_script=None):
                 call(0x187, bytes(2), True)
                 call(0x18f, bytes(2), True)
                 call(0x187, b"\xff\xff")
-            elif method == 0x544BF002 and data[5:] == bytes([1]):
+            elif method == 0x544BF002 and data[5:] == b"\x01\x01":
                 raw_mode = True
+                decoder.literal_header = True
                 uptime_offset += 61_000_000
                 assert [pkt for k, pkt in actual if k == 6 and pkt[1:5] == bytes.fromhex("a7010000")] == [
                     bytes.fromhex("03a7010000") + b"\xff" * 7,
@@ -1230,8 +1243,15 @@ def run(path, ram, fast=False, *, normal_reads=False, client_script=None):
                 assert raw_mode and data[0] == 3 and data[5:] == bytes([1 << 2])
                 raw_ack_mask = data[5]
                 plant_inputs()
-            elif method == 0x544BF002 and data[5:] == bytes([0]):
+            elif method == 0x544BF002 and data[5:] == b"\x01\x00":
+                assert phase == "enter-base" and raw_mode and data[0] == 3
+                phase = "base-raw"
+                raw_ack_mask = 0
+                end = inject(BODY, port=2, bad_crc=True)
+                inject(BODY, port=2, after=end)
+            elif method == 0x544BF002 and data[5:] == bytes(2):
                 raw_mode, raw_ack_mask = False, 0
+                decoder.literal_header = False
                 extension(12, bytes.fromhex("0584"))
                 extension(12, b"\0", True)
                 extension(7)
@@ -1250,7 +1270,25 @@ def run(path, ram, fast=False, *, normal_reads=False, client_script=None):
                     phase = "isp-after-flag"
                 retry_isp_at = clock + 25_000
             return
+        assert raw_mode, ("unexpected tN4 record in Normal", data.hex())
         service, p = data[:2]
+        if phase == "base-raw":
+            assert service == 0, ("unexpected 485 base service", data.hex())
+            if p == 2 and data[6:] == BODY:
+                # A valid peer record is still forwarded after a bad frame.
+                assert not any(exchanges) and not base_echoes
+                for line in exchanges:
+                    line.append((base_body, None))
+                send(0, stamp=1)  # 485 host TX timestamps must be zero.
+                send(0x3f, base_body)
+                send(0x3f)  # Busy on at least one port; do not transmit anywhere.
+                at_line_rate()
+                return
+            assert data[6:] == base_body and p not in base_echoes, data.hex()
+            base_echoes.add(p)
+            if len(base_echoes) == len(PORTS):
+                base_finish_at = clock + 50_000
+            return
         if service == 4:
             assert data[6] == 2 and int.from_bytes(data[7:9], "little") == 56
             protected = int.from_bytes(data[9:], "big")
@@ -1269,7 +1307,8 @@ def run(path, ram, fast=False, *, normal_reads=False, client_script=None):
                 assert (p, data[6:]) == TELEMETRY[len(telemetry)]
                 telemetry.append((p, data[6:]))
                 if len(telemetry) == len(TELEMETRY):
-                    extension(2, bytes(1), True)
+                    phase = "enter-base"
+                    extension(2, b"\x01\x00", True)
                     at_line_rate()
                 return
             if phase == "raw-read":
@@ -1289,16 +1328,12 @@ def run(path, ram, fast=False, *, normal_reads=False, client_script=None):
                         exchanges[n].append((body, None))
                         send(n, body)
                     send(0)
-                    extension(2, b"\x00", True)
+                    extension(2, bytes(2), True)
                     at_line_rate()
         elif service == 3:
             assert data == bytes([3, 0, 1])
             overlap = True
         elif service == 2:
-            if phase == "trace-reporting":
-                assert data == bytes.fromhex("02000103")  # still Normal: injection refused
-                call(0x10f, b"\x01", True)
-                return
             assert data[2:] == bytes([2, 2 if phase == "sending" and p == 1 else 1]), data
             if phase == "queued-rx":
                 assert p == 2
@@ -1423,7 +1458,7 @@ def run(path, ram, fast=False, *, normal_reads=False, client_script=None):
                      line_sends, expected_rx_acks - received_rx_acks, list(wire_log))
     assert actual[:4] == [
         (6, bytes.fromhex(x))
-        for x in ("048f0100000300", "0400000000", "0401f04b54020005bffe01")
+        for x in ("048f0100000300", "0400000000", "0401f04b54030005bffe01")
     ] + [
         (
             6,
@@ -1449,6 +1484,7 @@ def run(path, ram, fast=False, *, normal_reads=False, client_script=None):
     assert not reads and not read_events and actual[-1] == (6, bytes.fromhex("0305f04b54"))
     assert expected_flags == observed_flags, (clock, expected_flags - observed_flags, observed_flags - expected_flags)
     assert tuple(telemetry) == TELEMETRY
+    assert base_echoes == set(range(len(PORTS)))
     assert congestion_reports == list(range(1, TRACE_BURST + 3)), congestion_reports
     assert [b for b, _ in line_sends[2]] == [init, master]
     assert not conflicts and not interrupted and lost == {"master", "write", "raw"}

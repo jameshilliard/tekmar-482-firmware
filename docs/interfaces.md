@@ -50,6 +50,11 @@ records: the same decoder handles live and replayed traffic. Invalid
 captures are diagnostics, not device updates. See the [packet layouts and
 ordering](tpck-bridge.md) and the [native tN4 payload catalog](tn4-frames.md).
 
+To hand the UART to another host using the 485 native format without the
+482 result and diagnostic records, run `board.py raw-base PORT`. Run
+`board.py normal PORT` to restore Normal mode after that host disconnects.
+Use the same fixed UART rate for both hosts.
+
 ### Receiver diagnostics
 
 The gateway counts valid and invalid records dropped under UART

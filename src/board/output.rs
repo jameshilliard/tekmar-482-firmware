@@ -30,6 +30,7 @@ pub(super) enum Kind {
     Trace,
     Diagnostic,
     Fence,
+    Mode,
     Reboot,
 }
 
@@ -88,6 +89,9 @@ impl Output {
     pub(super) fn boundary(&mut self, kind: Kind, reply: &[u8]) {
         self.flush_trace_gap(true);
         self.enqueue(kind, tpck::TRPC, reply);
+    }
+    pub(super) fn set_header(&mut self, header: tpck::Header) {
+        self.encoder.set_header(header);
     }
     pub(super) fn can_diagnose(&self) -> bool {
         !self.diagnostic && self.can_report()
@@ -243,12 +247,12 @@ impl Output {
         if !self.encoder.finished() {
             return None;
         }
-        if matches!(r.kind, Kind::Result(_) | Kind::Reboot)
+        if matches!(r.kind, Kind::Result(_) | Kind::Mode | Kind::Reboot)
             && uart.status(errors, ms) & uart0::TEMT == 0
         {
             return None;
         }
-        self.encoder = tpck::Encoder::EMPTY;
+        self.encoder.reset();
         Some(self.remove(0))
     }
 }

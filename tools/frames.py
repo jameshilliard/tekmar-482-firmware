@@ -8,11 +8,11 @@ from payloads import details
 SOF, EOF, ESC = 0xCA, 0x35, 0x2F
 
 
-def encode(kind, payload):
+def encode(kind, payload, *, literal_header=False):
     interior = bytes((len(payload), kind)) + payload
     out = bytearray([SOF])
-    for b in interior + bytes([sum(interior) & 255]):
-        if b in (SOF, EOF, ESC):
+    for index, b in enumerate(interior + bytes([sum(interior) & 255])):
+        if b in (SOF, EOF, ESC) and not (literal_header and index < 2):
             out.append(ESC)
         out.append(b)
     out.append(EOF)
@@ -20,13 +20,17 @@ def encode(kind, payload):
 
 
 class Decoder:
-    def __init__(self):
+    def __init__(self, *, literal_header=False):
+        self.literal_header = literal_header
+        self.strict = True
         self.active = self.escaped = False
         self.buf = bytearray()
 
     def feed(self, chunk):
         for b in chunk:
-            if not self.escaped and b == SOF:
+            if self.active and self.literal_header and len(self.buf) < 2:
+                self.buf.append(b)
+            elif not self.escaped and b == SOF:
                 self.active = True
                 self.buf.clear()
             elif not self.active:
@@ -40,13 +44,18 @@ class Decoder:
                     or self.buf[0] + 3 != len(self.buf)
                     or sum(self.buf[:-1]) & 255 != self.buf[-1]
                 ):
-                    raise ValueError("invalid TPCK length or checksum")
+                    if self.strict:
+                        raise ValueError("invalid TPCK length or checksum")
+                    continue
                 yield self.buf[1], bytes(self.buf[2:-1])
             else:
                 self.escaped = False
                 self.buf.append(b)
                 if len(self.buf) > 258:
-                    raise ValueError("oversized TPCK packet")
+                    self.active = False
+                    self.buf.clear()
+                    if self.strict:
+                        raise ValueError("oversized TPCK packet")
 
 
 def describe(data):
@@ -82,7 +91,7 @@ def describe(data):
 
 
 def replay(chunks):
-    parser = Decoder()
+    parser = Decoder(literal_header=True)
     for chunk in chunks:
         for kind, payload in parser.feed(chunk):
             if kind == 1:

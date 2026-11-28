@@ -1,29 +1,28 @@
 """Bounded, exclusive asyncio access to the development gateway's local UART."""
 
 import asyncio
-from collections import deque
-
-from frames import Decoder
 from contextlib import asynccontextmanager
 
 import serialx
+from frames import Decoder
 
 
 class Link:
     def __init__(self, reader, writer, baudrate):
         self.baudrate = baudrate
         self.decoder = Decoder()
-        self.packets = deque()
+        self._pending = iter(())
         self.reader = reader
         self.writer = writer
 
     async def packet(self):
-        while not self.packets:
+        while True:
+            for packet in self._pending:
+                return packet
             chunk = await self.reader.read(256)
             if not chunk:
                 raise EOFError("gateway closed")
-            self.packets.extend(self.decoder.feed(chunk))
-        return self.packets.popleft()
+            self._pending = self.decoder.feed(chunk)
 
     async def write(self, data):
         self.writer.write(data)

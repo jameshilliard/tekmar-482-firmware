@@ -28,7 +28,8 @@ class PanelState(NamedTuple):
 
 async def call(port, method, body=b"", *, update=False, receive=None):
     key = (0x544bf000 + method).to_bytes(4, "little")
-    request = encode(6, bytes([0 if update else 1]) + key + body)
+    request = encode(6, bytes([0 if update else 1]) + key + body,
+                     literal_header=port.decoder.literal_header)
     async def wait():
         await port.write(request)
         while True:
@@ -146,12 +147,24 @@ async def identify(port):
         for preamble in (burst, burst, bytes([0xca])):
             await port.write(preamble)
             await asyncio.sleep(0.08)
-    caps = await call(port, 1)
+    port.decoder.strict = False
+    try:
+        caps = await call(port, 1)
+    finally:
+        port.decoder.strict = True
     if len(caps) < 4 or caps[1] > 1 or caps[2] != 5:
         raise RuntimeError("missing binary bridge capabilities")
     if caps[0] != WIRE_VERSION:
         raise RuntimeError(f"unsupported custom bridge wire version {caps[0]}; expected {WIRE_VERSION}")
+    port.decoder.literal_header = bool(caps[1])
     return caps
+
+
+async def set_mode(port, mode, *, extensions=False, receive=None):
+    body = bytes((mode, int(extensions)))
+    if await call(port, 2, body, update=True, receive=receive) != body:
+        raise RuntimeError("mode change not acknowledged")
+    port.decoder.literal_header = bool(mode)
 
 
 async def request(port, enter_isp):
@@ -187,13 +200,12 @@ async def monitor(port, seconds, *, diagnostics=False, tx=None, on_record=None,
         raise ValueError("invalid ACK port")
     result = None
     with (save_capture.open("xb") if save_capture is not None else nullcontext()) as archive:
-        if await call(port, 2, bytes([1]), update=True) != bytes([1]):
-            raise RuntimeError("failed to enter Raw mode")
+        await set_mode(port, 1, extensions=True)
         def receive(data):
             nonlocal result
             row = describe(data)
             if archive:
-                archive.write(encode(1, data))
+                archive.write(encode(1, data, literal_header=True))
             if on_record:
                 on_record(data)
             if data[0] == 2:
@@ -206,7 +218,8 @@ async def monitor(port, seconds, *, diagnostics=False, tx=None, on_record=None,
             if await call(port, 9, mask, update=True, receive=receive) != mask:
                 raise RuntimeError("ACK mask not acknowledged")
             if tx:
-                await port.write(encode(1, bytes((1, tx[0])) + tx[1]))
+                await port.write(encode(1, bytes((0, tx[0])) + bytes(4) + tx[1],
+                                        literal_header=True))
             deadline = asyncio.get_running_loop().time() + seconds
             while (delay := deadline - asyncio.get_running_loop().time()) > 0 and (not tx or result is None):
                 try:
@@ -216,8 +229,7 @@ async def monitor(port, seconds, *, diagnostics=False, tx=None, on_record=None,
                 if kind == 1:
                     receive(data)
         finally:
-            if await call(port, 2, bytes([0]), update=True, receive=receive) != bytes([0]):
-                raise RuntimeError("failed to leave Raw mode")
+            await set_mode(port, 0, receive=receive)
     if tx and result != bytes([0]) and (require_peer or result != bytes([2, 1])):
         raise RuntimeError(f"send not confirmed: {result!r}")
     if diagnostics:
@@ -240,7 +252,7 @@ async def echo_test(port, buses):
 
 async def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["identify", "probe", "echo-test", "frames", "diagnostics", "send", "panel", "led-test", "enter-isp"])
+    parser.add_argument("action", choices=["identify", "probe", "echo-test", "frames", "diagnostics", "send", "panel", "led-test", "enter-isp", "raw-base", "normal"])
     parser.add_argument("port", help="local serial device (requires exclusive access)")
     parser.add_argument("--baud", type=int, default=9600)
     parser.add_argument("--seconds", type=int, default=30, help="capture or panel input test duration")
@@ -277,6 +289,9 @@ async def main() -> int:
                 await panel(port, args.action == "led-test", check_input=args.check_input, seconds=args.seconds)
             elif args.action == "probe":
                 await probe(port)
+            elif args.action in ("raw-base", "normal"):
+                await identify(port)
+                await set_mode(port, int(args.action == "raw-base"))
             else:
                 await request(port, args.action == "enter-isp")
     except (OSError, RuntimeError, EOFError, ValueError, asyncio.TimeoutError) as error:

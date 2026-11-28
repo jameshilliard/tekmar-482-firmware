@@ -1355,7 +1355,7 @@ class PayloadTests(unittest.TestCase):
         self.assertFalse(unknown.is_clear)
 
     def test_binary_replay(self):
-        message = encode(1, bytes.fromhex("0003190000007d7123420582"))
+        message = encode(1, bytes.fromhex("0003190000007d7123420582"), literal_header=True)
         [row] = replay([message[:3], message[3:]])
         self.assertIn("id=0x3d7", row)
         self.assertIn("NetworkError code=5 instance=2 priority=2", row)
